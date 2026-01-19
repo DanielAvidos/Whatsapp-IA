@@ -13,7 +13,7 @@ import {
   SidebarMenuButton,
 } from "@/components/ui/sidebar";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
-import { Building2, KeyRound, MessageSquare, Users, LogOut } from "lucide-react";
+import { Building2, KeyRound, MessageSquare, Users, LogOut, FlaskConical } from "lucide-react";
 import { Logo } from "@/components/icons/logo";
 import { useUser, useAuth } from "@/firebase";
 import { Button } from "../ui/button";
@@ -25,6 +25,7 @@ const navItems: { href: string; icon: React.ElementType; labelKey: TranslationKe
   { href: "/channels", icon: MessageSquare, labelKey: "nav.channels" },
   { href: "/api-keys", icon: KeyRound, labelKey: "nav.api-keys" },
   { href: "/members", icon: Users, labelKey: "nav.members" },
+  { href: "/tests", icon: FlaskConical, labelKey: "nav.tests" },
 ];
 
 export function AppSidebar() {
