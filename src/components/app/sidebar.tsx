@@ -17,18 +17,21 @@ import { Building2, KeyRound, MessageSquare, Users, LogOut } from "lucide-react"
 import { Logo } from "@/components/icons/logo";
 import { useUser, useAuth } from "@/firebase";
 import { Button } from "../ui/button";
+import { useLanguage } from "@/context/language-provider";
+import { TranslationKey } from "@/lib/locales";
 
-const navItems = [
-  { href: "/dashboard", icon: Building2, label: "Tenants" },
-  { href: "/channels", icon: MessageSquare, label: "Channels" },
-  { href: "/api-keys", icon: KeyRound, label: "API Keys" },
-  { href: "/members", icon: Users, label: "Members" },
+const navItems: { href: string; icon: React.ElementType; labelKey: TranslationKey }[] = [
+  { href: "/dashboard", icon: Building2, labelKey: "nav.tenants" },
+  { href: "/channels", icon: MessageSquare, labelKey: "nav.channels" },
+  { href: "/api-keys", icon: KeyRound, labelKey: "nav.api-keys" },
+  { href: "/members", icon: Users, labelKey: "nav.members" },
 ];
 
 export function AppSidebar() {
   const pathname = usePathname();
   const { user } = useUser();
   const auth = useAuth();
+  const { t } = useLanguage();
 
   const handleSignOut = () => {
     auth.signOut();
@@ -54,10 +57,10 @@ export function AppSidebar() {
                 asChild
                 isActive={pathname.startsWith(item.href)}
                 icon={<item.icon />}
-                tooltip={{ children: item.label }}
+                tooltip={{ children: t(item.labelKey) }}
               >
                 <Link href={item.href}>
-                  {item.label}
+                  {t(item.labelKey)}
                 </Link>
               </SidebarMenuButton>
             </SidebarMenuItem>
@@ -79,7 +82,7 @@ export function AppSidebar() {
               <span className="truncate text-xs text-muted-foreground capitalize">{role}</span>
             </div>
             <Button variant="ghost" size="icon" className="h-8 w-8" onClick={handleSignOut}
-              aria-label="Sign out"
+              aria-label={t('sign.out')}
             >
               <LogOut className="size-4" />
             </Button>

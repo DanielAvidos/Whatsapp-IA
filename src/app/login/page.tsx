@@ -19,6 +19,8 @@ import { useAuth, useUser, initiateEmailSignIn } from "@/firebase";
 import { Logo } from "@/components/icons/logo";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Eye, EyeOff } from "lucide-react";
+import { useLanguage } from "@/context/language-provider";
+import { LanguageSwitcher } from "@/components/language-switcher";
 
 const loginSchema = z.object({
   email: z.string().email({ message: "Invalid email address." }),
@@ -32,6 +34,7 @@ export default function LoginPage() {
   const { user, isUserLoading } = useUser();
   const router = useRouter();
   const [showPassword, setShowPassword] = useState(false);
+  const { t } = useLanguage();
 
   const form = useForm<LoginFormValues>({
     resolver: zodResolver(loginSchema),
@@ -57,8 +60,8 @@ export default function LoginPage() {
        <Card className="w-full max-w-sm">
         <CardHeader className="items-center text-center">
           <Logo className="size-10 mb-2" />
-          <CardTitle>Welcome Back</CardTitle>
-          <CardDescription>Sign in to your account to continue</CardDescription>
+          <CardTitle>{t('welcome.back')}</CardTitle>
+          <CardDescription>{t('signin.description')}</CardDescription>
         </CardHeader>
         <CardContent>
           <Form {...form}>
@@ -68,7 +71,7 @@ export default function LoginPage() {
                 name="email"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>Email</FormLabel>
+                    <FormLabel>{t('email.label')}</FormLabel>
                     <FormControl>
                       <Input placeholder="name@example.com" {...field} />
                     </FormControl>
@@ -81,7 +84,7 @@ export default function LoginPage() {
                 name="password"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>Password</FormLabel>
+                    <FormLabel>{t('password.label')}</FormLabel>
                     <div className="relative">
                       <FormControl>
                         <Input
@@ -104,7 +107,7 @@ export default function LoginPage() {
                           <Eye className="h-4 w-4" />
                         )}
                         <span className="sr-only">
-                          {showPassword ? "Hide password" : "Show password"}
+                          {showPassword ? t('hide.password') : t('show.password')}
                         </span>
                       </Button>
                     </div>
@@ -113,12 +116,13 @@ export default function LoginPage() {
                 )}
               />
               <Button type="submit" className="w-full">
-                Sign In
+                {t('signin.button')}
               </Button>
             </form>
           </Form>
         </CardContent>
       </Card>
+      <LanguageSwitcher />
     </main>
   );
 }

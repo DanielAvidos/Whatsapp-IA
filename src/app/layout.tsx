@@ -2,6 +2,7 @@ import type { Metadata } from 'next';
 import './globals.css';
 import { Toaster } from "@/components/ui/toaster";
 import { FirebaseClientProvider } from '@/firebase';
+import { LanguageProvider } from '@/context/language-provider';
 
 export const metadata: Metadata = {
   title: 'Whatsapp IA',
@@ -22,7 +23,9 @@ export default function RootLayout({
       </head>
       <body className="font-body antialiased">
         <FirebaseClientProvider>
+          <LanguageProvider>
             {children}
+          </LanguageProvider>
           <Toaster />
         </FirebaseClientProvider>
       </body>
