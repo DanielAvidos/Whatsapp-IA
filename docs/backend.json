@@ -1,0 +1,292 @@
+{
+  "entities": {
+    "Tenant": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "Tenant",
+      "type": "object",
+      "description": "Represents a tenant (company/team) within the application.",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique identifier for the Tenant entity."
+        },
+        "name": {
+          "type": "string",
+          "description": "The name of the tenant."
+        },
+        "status": {
+          "type": "string",
+          "description": "The status of the tenant (e.g., active, suspended).",
+          "format": "string"
+        },
+        "plan": {
+          "type": "string",
+          "description": "The plan associated with the tenant."
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "status",
+        "plan"
+      ]
+    },
+    "Member": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "Member",
+      "type": "object",
+      "description": "Represents a member within a tenant.",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique identifier for the Member entity."
+        },
+        "tenantId": {
+          "type": "string",
+          "description": "Reference to Tenant. (Relationship: Tenant 1:N Member)"
+        },
+        "userId": {
+          "type": "string",
+          "description": "Unique identifier for the user from the authentication system."
+        },
+        "role": {
+          "type": "string",
+          "description": "The role of the member within the tenant (e.g., owner, admin, agent, viewer)."
+        },
+        "status": {
+          "type": "string",
+          "description": "The status of the member (e.g., active, invited, disabled)."
+        }
+      },
+      "required": [
+        "id",
+        "tenantId",
+        "userId",
+        "role",
+        "status"
+      ]
+    },
+    "Channel": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "Channel",
+      "type": "object",
+      "description": "Represents a communication channel (e.g., WhatsApp number) within a tenant.",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique identifier for the Channel entity."
+        },
+        "tenantId": {
+          "type": "string",
+          "description": "Reference to Tenant. (Relationship: Tenant 1:N Channel)"
+        },
+        "name": {
+          "type": "string",
+          "description": "Name of the channel."
+        },
+        "phoneNumber": {
+          "type": "string",
+          "description": "The phone number associated with the channel."
+        },
+        "status": {
+          "type": "string",
+          "description": "The status of the channel (e.g., CONNECTED, DISCONNECTED, CONNECTING)."
+        }
+      },
+      "required": [
+        "id",
+        "tenantId",
+        "name",
+        "phoneNumber",
+        "status"
+      ]
+    },
+    "ApiKey": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "ApiKey",
+      "type": "object",
+      "description": "Represents a placeholder API key for a tenant.",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique identifier for the ApiKey entity."
+        },
+        "tenantId": {
+          "type": "string",
+          "description": "Reference to Tenant. (Relationship: Tenant 1:N ApiKey)"
+        },
+        "keyPrefix": {
+          "type": "string",
+          "description": "The prefix of the API key."
+        },
+        "scopes": {
+          "type": "array",
+          "description": "An array of scopes associated with the API key (e.g., messages:send, channels:read).",
+          "items": {
+            "type": "string"
+          }
+        },
+        "hashedKey": {
+          "type": "string",
+          "description": "A placeholder hash of the full API key."
+        }
+      },
+      "required": [
+        "id",
+        "tenantId",
+        "keyPrefix",
+        "scopes",
+        "hashedKey"
+      ]
+    },
+    "User": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "User",
+      "type": "object",
+      "description": "Represents a user of the application obtained from Firebase Authentication.",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique identifier for the User entity, matching the Firebase Auth UID."
+        },
+        "email": {
+          "type": "string",
+          "description": "The user's email address.",
+          "format": "email"
+        },
+        "displayName": {
+          "type": "string",
+          "description": "The user's display name."
+        },
+        "photoURL": {
+          "type": "string",
+          "description": "URL to the user's profile photo, optional",
+          "format": "uri"
+        }
+      },
+      "required": [
+        "id",
+        "email"
+      ]
+    }
+  },
+  "auth": {
+    "providers": [
+      "password",
+      "anonymous"
+    ]
+  },
+  "firestore": {
+    "structure": [
+      {
+        "path": "/roles_admin/{userId}",
+        "definition": {
+          "entityName": "User",
+          "schema": {
+            "$ref": "#/backend/entities/User"
+          },
+          "description": "Collection to store admin roles. Existence of a document grants admin privileges. User ID matches Firebase Auth UID.",
+          "params": [
+            {
+              "name": "userId",
+              "description": "The Firebase Auth UID of the user."
+            }
+          ]
+        }
+      },
+      {
+        "path": "/users/{userId}",
+        "definition": {
+          "entityName": "User",
+          "schema": {
+            "$ref": "#/backend/entities/User"
+          },
+          "description": "Collection to store user data. User ID matches Firebase Auth UID.",
+          "params": [
+            {
+              "name": "userId",
+              "description": "The Firebase Auth UID of the user."
+            }
+          ]
+        }
+      },
+      {
+        "path": "/tenants/{tenantId}",
+        "definition": {
+          "entityName": "Tenant",
+          "schema": {
+            "$ref": "#/backend/entities/Tenant"
+          },
+          "description": "Collection to store tenant data.",
+          "params": [
+            {
+              "name": "tenantId",
+              "description": "The unique identifier of the tenant."
+            }
+          ]
+        }
+      },
+      {
+        "path": "/tenants/{tenantId}/members/{memberId}",
+        "definition": {
+          "entityName": "Member",
+          "schema": {
+            "$ref": "#/backend/entities/Member"
+          },
+          "description": "Subcollection to store tenant members. Includes denormalized 'tenantId' for authorization independence.",
+          "params": [
+            {
+              "name": "tenantId",
+              "description": "The unique identifier of the tenant."
+            },
+            {
+              "name": "memberId",
+              "description": "The unique identifier of the member."
+            }
+          ]
+        }
+      },
+      {
+        "path": "/tenants/{tenantId}/channels/{channelId}",
+        "definition": {
+          "entityName": "Channel",
+          "schema": {
+            "$ref": "#/backend/entities/Channel"
+          },
+          "description": "Subcollection to store tenant channels. Includes denormalized 'tenantId' for authorization independence.",
+          "params": [
+            {
+              "name": "tenantId",
+              "description": "The unique identifier of the tenant."
+            },
+            {
+              "name": "channelId",
+              "description": "The unique identifier of the channel."
+            }
+          ]
+        }
+      },
+      {
+        "path": "/tenants/{tenantId}/apiKeys/{apiKeyId}",
+        "definition": {
+          "entityName": "ApiKey",
+          "schema": {
+            "$ref": "#/backend/entities/ApiKey"
+          },
+          "description": "Subcollection to store tenant API keys. Includes denormalized 'tenantId' for authorization independence.",
+          "params": [
+            {
+              "name": "tenantId",
+              "description": "The unique identifier of the tenant."
+            },
+            {
+              "name": "apiKeyId",
+              "description": "The unique identifier of the API key."
+            }
+          ]
+        }
+      }
+    ],
+    "reasoning": "This Firestore structure prioritizes security, scalability, and debuggability using Authorization Independence, Structural Segregation, Access Modeling, and Data Clarity principles. It avoids hierarchical authorization dependencies (`get()` calls in rules) by denormalizing authorization data (Membership Maps) into subcollections. This enables atomic operations and simplifies security rules. Segregation ensures that each collection has a homogeneous security posture. The structure facilitates secure `list` operations. It incorporates Tenant-based multi-tenancy where each tenant has its own members, channels and API keys.  Users are stored separately to maintain authentication information separate from tenant-specific membership data.\n\n**Authorization Independence:** The `members` map within each `tenant/{tenantId}` document enables role-based access control without needing to read parent documents. This ensures atomic operations (transactions/batches) are possible.\n\n**QAPs (Rules are not Filters):** Segregation of data into tenants, members, channels and api keys means that `list` operations can be efficiently secured by enforcing authorization rules at the collection level. Membership maps also ensure user can only access the tenants where they are members.\n\n**DBAC:** Roles are stored in the database (`members` documents) and authorization relies solely on `request.auth.uid`.\n\n**Admin Role:** The `/roles_admin/{uid}` collection allows for granting global admin privileges. The existence of a document in this collection grants admin access.\n\n**Data Invariants:** Ownership and relationships are maintained by `tenantId` fields in the `members`, `channels` and `apiKeys` collections.\n\n**Denormalization:** The `tenantId` field is denormalized into each `members`, `channels` and `apiKeys` document, which facilitates QAP (Rules are not Filters) and authorization independence (no `get()` calls).\n\nThe data structure is designed to support the core features of the Whatsapp IA app effectively:\n\n*   **Multi-tenant Dashboard:** The top-level `/tenants` collection allows for listing all tenants.\n*   **Tenant Management:**  The `/tenants/{tenantId}` path allows for CRUD operations on individual tenants.\n*   **Member Management:**  The `/tenants/{tenantId}/members/{memberId}` path manages members within each tenant. The denormalized tenant ID enables efficient querying of members for a specific tenant.\n*   **Channel Management:** The `/tenants/{tenantId}/channels/{channelId}` path manages channels within each tenant. The denormalized tenant ID enables efficient querying of channels for a specific tenant.\n*   **API Key Generation (Dummy):** The `/tenants/{tenantId}/apiKeys/{apiKeyId}` path manages API keys within each tenant. The denormalized tenant ID enables efficient querying of API keys for a specific tenant.\n*   **Role-Based Access Control:** Firestore rules will use the `members` map in `/tenants/{tenantId}` and the `/tenants/{tenantId}/members/{memberId}` documents to determine user roles and permissions.\n*   **Demo Data Generation:** The structure allows for easy population of demo data within a tenant by creating documents in the `/tenants/{tenantId}/channels`, `/tenants/{tenantId}/apiKeys`, and `/tenants/{tenantId}/members` collections."
+  }
+}
