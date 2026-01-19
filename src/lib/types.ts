@@ -1,3 +1,5 @@
+import { FieldValue, Timestamp } from 'firebase/firestore';
+
 export type Tenant = {
   id: string;
   name: string;
@@ -33,4 +35,14 @@ export type ApiKey = {
   keyHash: string;
   scopes: ApiKeyScope[];
   createdAt: string;
+};
+
+export type WhatsappChannel = {
+  id: string;
+  displayName: string;
+  status: 'DISCONNECTED' | 'CONNECTING' | 'CONNECTED';
+  qr: string | null;
+  phoneE164: string | null;
+  lastSeenAt: Timestamp | null;
+  updatedAt: FieldValue | Timestamp;
 };
