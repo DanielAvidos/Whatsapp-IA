@@ -1,7 +1,7 @@
 "use client";
 
 import { AppSidebar } from "@/components/app/sidebar";
-import { SidebarInset } from "@/components/ui/sidebar";
+import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import { useUser } from "@/firebase";
 import { useRouter } from "next/navigation";
 import { useEffect } from "react";
@@ -34,11 +34,11 @@ export default function AppLayout({
   }
   
   return (
-    <div className="flex min-h-screen">
+    <SidebarProvider>
       <AppSidebar />
       <SidebarInset>
         {children}
       </SidebarInset>
-    </div>
+    </SidebarProvider>
   );
 }
