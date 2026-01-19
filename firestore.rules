@@ -201,5 +201,17 @@ service cloud.firestore {
         allow delete: if (isSuperAdmin() || isTenantAdmin(tenantId)) && isExistingDoc();
       }
     }
+
+    /**
+     * @description Stores connection state for the test WhatsApp channel.
+     *              The primary document is 'default'. Allows any authenticated
+     *              user to read/write for testing purposes.
+     * @path        /channels/{channelId}
+     * @allow       (read, write) Any authenticated user.
+     * @principle   Provides open access for the system-wide test channel functionality.
+     */
+    match /channels/{channelId} {
+      allow read, write: if isSignedIn();
+    }
   }
 }
