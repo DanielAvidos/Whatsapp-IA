@@ -1,20 +1,18 @@
-# Use an official Node.js runtime as a parent image
 FROM node:20-slim
 
-# Set the working directory in the container
+# Instalar git (necesario si alguna dependencia se baja por git)
+RUN apt-get update && apt-get install -y --no-install-recommends git \
+  && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /usr/src/app
 
-# Copy package.json and package-lock.json to the working directory
 COPY package*.json ./
 
-# Install any needed packages
-RUN npm install
+RUN npm install --omit=dev
 
-# Bundle app source
 COPY . .
 
-# Make port 8080 available to the world outside this container
+ENV PORT=8080
 EXPOSE 8080
 
-# Define the command to run your app
-CMD [ "npm", "start" ]
+CMD ["npm", "start"]
