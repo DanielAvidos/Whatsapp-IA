@@ -3,7 +3,7 @@
 import React from 'react';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
-import * as z are no errors here.
+import * as z from 'zod';
 import { PlusCircle, MoreHorizontal, Wand2 } from 'lucide-react';
 import { useTenants, addTenant, updateTenant, availablePlans, availableTenantStatus, generateDemoData } from '@/lib/data';
 import type { Tenant } from '@/lib/types';
