@@ -3,9 +3,9 @@
 import React from 'react';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
-import * as z from 'zod';
+import * as z are no errors here.
 import { PlusCircle, MoreHorizontal, Wand2 } from 'lucide-react';
-import { useTenants, addTenant, updateTenant, currentUser, availablePlans, availableTenantStatus, generateDemoData } from '@/lib/data';
+import { useTenants, addTenant, updateTenant, availablePlans, availableTenantStatus, generateDemoData } from '@/lib/data';
 import type { Tenant } from '@/lib/types';
 import { PageHeader } from '@/components/app/page-header';
 import { Button } from '@/components/ui/button';
@@ -18,6 +18,7 @@ import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { StatusBadge } from '@/components/app/status-badge';
 import { useToast } from '@/hooks/use-toast';
+import { useUser } from '@/firebase';
 
 const tenantSchema = z.object({
   name: z.string().min(2, "Name must be at least 2 characters."),
@@ -99,7 +100,8 @@ export function DashboardPage() {
   const [dialogOpen, setDialogOpen] = React.useState(false);
   const [editingTenant, setEditingTenant] = React.useState<Tenant | undefined>(undefined);
   const { toast } = useToast();
-  const isAdmin = currentUser.role === 'owner' || currentUser.role === 'admin';
+  const { user } = useUser();
+  const isAdmin = user?.uid === 'd6Agbzw3qpgHtykUBnBDs86vg1S2';
 
   const handleOpenDialog = (tenant?: Tenant) => {
     setEditingTenant(tenant);

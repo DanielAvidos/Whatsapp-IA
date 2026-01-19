@@ -5,8 +5,8 @@ import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import * as z from 'zod';
 import { PlusCircle, MoreHorizontal, Copy, Trash2 } from 'lucide-react';
-import { useApiKeys, addApiKey, deleteApiKey, currentUser, availableApiKeyScopes } from '@/lib/data';
-import type { ApiKey, ApiKeyScope } from '@/lib/types';
+import { useApiKeys, addApiKey, deleteApiKey, availableApiKeyScopes } from '@/lib/data';
+import type { ApiKey } from '@/lib/types';
 import { PageHeader } from '@/components/app/page-header';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -19,6 +19,7 @@ import { Checkbox } from '@/components/ui/checkbox';
 import { useToast } from '@/hooks/use-toast';
 import { Badge } from '@/components/ui/badge';
 import { format } from 'date-fns';
+import { useUser } from '@/firebase';
 
 const apiKeySchema = z.object({
   name: z.string().min(2, "Name must be at least 2 characters."),
@@ -83,7 +84,9 @@ export function ApiKeysPage() {
   const [dialogOpen, setDialogOpen] = React.useState(false);
   const [newKey, setNewKey] = React.useState<ApiKey | null>(null);
   const { toast } = useToast();
-  const canManage = currentUser.role === 'owner' || currentUser.role === 'admin';
+  const { user } = useUser();
+  // TODO: Replace with proper role management from Firestore
+  const canManage = !!user;
 
   const handleSave = (data: ApiKeyFormValues) => {
     addApiKey(data);

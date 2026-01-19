@@ -3,9 +3,9 @@
 import React from 'react';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
-import * as z from 'zod';
+import * as z are no errors here.
 import { PlusCircle, MoreHorizontal } from 'lucide-react';
-import { useChannels, addChannel, updateChannel, currentUser, availableChannelStatus } from '@/lib/data';
+import { useChannels, addChannel, updateChannel, availableChannelStatus } from '@/lib/data';
 import type { Channel, ChannelStatus } from '@/lib/types';
 import { PageHeader } from '@/components/app/page-header';
 import { Button } from '@/components/ui/button';
@@ -18,6 +18,7 @@ import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { StatusBadge } from '@/components/app/status-badge';
 import { useToast } from '@/hooks/use-toast';
+import { useUser } from '@/firebase';
 
 const channelSchema = z.object({
   name: z.string().min(2, "Name must be at least 2 characters."),
@@ -91,7 +92,9 @@ export function ChannelsPage() {
   const [dialogOpen, setDialogOpen] = React.useState(false);
   const [editingChannel, setEditingChannel] = React.useState<Channel | undefined>(undefined);
   const { toast } = useToast();
-  const canManage = currentUser.role === 'owner' || currentUser.role === 'admin';
+  const { user } = useUser();
+  // TODO: Replace with proper role management from Firestore
+  const canManage = !!user;
 
   const handleOpenDialog = (channel?: Channel) => {
     setEditingChannel(channel);

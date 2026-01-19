@@ -27,12 +27,6 @@ let apiKeysStore: ApiKey[] = [
   { id: 'k2', name: 'Reporting System', prefix: 'ia_pk_c3d4', keyHash: 'dummy_hash_2', scopes: ['channels:read'], createdAt: new Date('2023-03-20T14:30:00Z').toISOString() },
 ];
 
-export const currentUser: Member = {
-  id: 'm1',
-  email: 'owner@innovate.com',
-  role: 'owner',
-  status: 'active'
-};
 export const availableRoles: MemberRole[] = ['owner', 'admin', 'agent', 'viewer'];
 export const availablePlans: Tenant['plan'][] = ['free', 'pro', 'enterprise'];
 export const availableTenantStatus: Tenant['status'][] = ['active', 'suspended'];

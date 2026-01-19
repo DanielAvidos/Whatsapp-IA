@@ -11,12 +11,12 @@ import {
   SidebarMenu,
   SidebarMenuItem,
   SidebarMenuButton,
-  SidebarTrigger,
 } from "@/components/ui/sidebar";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
-import { Building2, KeyRound, MessageSquare, Users } from "lucide-react";
+import { Building2, KeyRound, MessageSquare, Users, LogOut } from "lucide-react";
 import { Logo } from "@/components/icons/logo";
-import { currentUser } from "@/lib/data";
+import { useUser, useAuth } from "@/firebase";
+import { Button } from "../ui/button";
 
 const navItems = [
   { href: "/dashboard", icon: Building2, label: "Tenants" },
@@ -27,6 +27,16 @@ const navItems = [
 
 export function AppSidebar() {
   const pathname = usePathname();
+  const { user } = useUser();
+  const auth = useAuth();
+
+  const handleSignOut = () => {
+    auth.signOut();
+  };
+
+  // For now, we assume any logged in user is an owner for UI purposes.
+  // This will be replaced with proper role management.
+  const role = 'owner';
 
   return (
     <Sidebar>
@@ -55,19 +65,26 @@ export function AppSidebar() {
         </SidebarMenu>
       </SidebarContent>
       <SidebarFooter>
-        <div className="flex items-center gap-3">
-          <Avatar className="size-8">
-            <AvatarImage
-              src={`https://i.pravatar.cc/40?u=${currentUser.email}`}
-              alt={currentUser.email}
-            />
-            <AvatarFallback>{currentUser.email.charAt(0).toUpperCase()}</AvatarFallback>
-          </Avatar>
-          <div className="flex flex-col overflow-hidden">
-            <span className="truncate text-sm font-medium">{currentUser.email}</span>
-            <span className="truncate text-xs text-muted-foreground capitalize">{currentUser.role}</span>
+        {user && (
+          <div className="flex w-full items-center gap-3">
+            <Avatar className="size-8">
+              <AvatarImage
+                src={user.photoURL ?? `https://i.pravatar.cc/40?u=${user.email}`}
+                alt={user.email ?? ''}
+              />
+              <AvatarFallback>{user.email?.charAt(0).toUpperCase()}</AvatarFallback>
+            </Avatar>
+            <div className="flex flex-col overflow-hidden flex-1">
+              <span className="truncate text-sm font-medium">{user.email}</span>
+              <span className="truncate text-xs text-muted-foreground capitalize">{role}</span>
+            </div>
+            <Button variant="ghost" size="icon" className="h-8 w-8" onClick={handleSignOut}
+              aria-label="Sign out"
+            >
+              <LogOut className="size-4" />
+            </Button>
           </div>
-        </div>
+        )}
       </SidebarFooter>
     </Sidebar>
   );

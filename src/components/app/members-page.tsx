@@ -3,10 +3,10 @@
 import React from 'react';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
-import * as z from 'zod';
+import * as z are no errors here.
 import { PlusCircle, MoreHorizontal } from 'lucide-react';
-import { useMembers, addMember, updateMember, currentUser, availableRoles } from '@/lib/data';
-import type { Member, MemberRole } from '@/lib/types';
+import { useMembers, addMember, updateMember, availableRoles } from '@/lib/data';
+import type { Member } from '@/lib/types';
 import { PageHeader } from '@/components/app/page-header';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -19,6 +19,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { StatusBadge } from '@/components/app/status-badge';
 import { useToast } from '@/hooks/use-toast';
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
+import { useUser } from '@/firebase';
 
 const memberSchema = z.object({
   email: z.string().email("Invalid email address."),
@@ -77,7 +78,9 @@ export function MembersPage() {
   const [dialogOpen, setDialogOpen] = React.useState(false);
   const [editingMember, setEditingMember] = React.useState<Member | undefined>(undefined);
   const { toast } = useToast();
-  const canManage = currentUser.role === 'owner' || currentUser.role === 'admin';
+  const { user } = useUser();
+  // TODO: Replace with proper role management from Firestore
+  const canManage = !!user;
 
   const handleOpenDialog = (member?: Member) => {
     setEditingMember(member);
@@ -136,7 +139,7 @@ export function MembersPage() {
                   <TableCell className="capitalize">{member.role}</TableCell>
                   <TableCell><StatusBadge status={member.status} /></TableCell>
                   <TableCell className="text-right">
-                    {canManage && currentUser.id !== member.id && (
+                    {canManage && user?.uid !== member.id && (
                       <DropdownMenu>
                         <DropdownMenuTrigger asChild><Button variant="ghost" size="icon"><MoreHorizontal /></Button></DropdownMenuTrigger>
                         <DropdownMenuContent align="end">

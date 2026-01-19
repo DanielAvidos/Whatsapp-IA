@@ -172,8 +172,7 @@
   },
   "auth": {
     "providers": [
-      "password",
-      "anonymous"
+      "password"
     ]
   },
   "firestore": {
@@ -185,7 +184,7 @@
           "schema": {
             "$ref": "#/backend/entities/User"
           },
-          "description": "Collection to store admin roles. Existence of a document grants admin privileges. User ID matches Firebase Auth UID.",
+          "description": "Collection to store admin roles. Existence of a document grants admin privileges. User ID matches Firebase Auth UID. The super admin UID is d6Agbzw3qpgHtykUBnBDs86vg1S2.",
           "params": [
             {
               "name": "userId",
