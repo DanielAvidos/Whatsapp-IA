@@ -1,77 +1,76 @@
 "use client";
 
 import { useState, useEffect } from 'react';
-import QRCode from 'react-qr-code';
-import { Loader2, RefreshCw } from 'lucide-react';
-import { useFirestore } from '@/firebase';
+import { Loader2, RefreshCw, ScanQrCode, LogOut } from 'lucide-react';
+import { useFirestore, useUser } from '@/firebase';
 import { PageHeader } from '@/components/app/page-header';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { useLanguage } from '@/context/language-provider';
 import type { WhatsappChannel } from '@/lib/types';
-import {
-  ensureDefaultChannel,
-  subscribeToDefaultChannel,
-  updateDefaultChannel,
-} from '@/lib/firestore/channels';
+import { subscribeToDefaultChannel } from '@/lib/firestore/channels';
 import { StatusBadge } from '@/components/app/status-badge';
 import { QrCodeDialog } from '@/components/app/qr-code-dialog';
 import { Skeleton } from '@/components/ui/skeleton';
+import { useToast } from '@/hooks/use-toast';
+import { Alert, AlertTitle, AlertDescription } from '@/components/ui/alert';
 
 export function TestsPage() {
   const { t } = useLanguage();
   const firestore = useFirestore();
+  const { user } = useUser();
   const [channel, setChannel] = useState<WhatsappChannel | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isQrModalOpen, setQrModalOpen] = useState(false);
+  const { toast } = useToast();
+
+  const workerUrl = process.env.NEXT_PUBLIC_BAILEYS_WORKER_URL;
 
   useEffect(() => {
-    if (!firestore) return;
+    if (!firestore || !user) return;
 
-    let isMounted = true;
-
-    // 1. Ensure the default document exists
-    ensureDefaultChannel(firestore).then(() => {
-      if (!isMounted) return;
-      // 2. Subscribe to real-time updates
-      const unsubscribe = subscribeToDefaultChannel(firestore, (data) => {
-        setChannel(data);
-        if (isLoading) {
-          setIsLoading(false);
-        }
-      });
-
-      // Cleanup subscription on component unmount
-      return () => unsubscribe();
+    const unsubscribe = subscribeToDefaultChannel(firestore, (data) => {
+      setChannel(data);
+      if (isLoading) {
+        setIsLoading(false);
+      }
     });
 
-    return () => {
-      isMounted = false;
+    return () => unsubscribe();
+  }, [firestore, user, isLoading]);
+
+  const handleGenerateQr = async () => {
+    if (!workerUrl) {
+        toast({ variant: 'destructive', title: 'Worker URL no configurado' });
+        return;
     }
-  }, [firestore, isLoading]);
-
-  const handleToggleConnection = () => {
-    if (!firestore) return;
-
-    const currentStatus = channel?.status;
-    if (currentStatus === 'DISCONNECTED') {
-      updateDefaultChannel(firestore, {
-        status: 'CONNECTING',
-        qr: `DEMO_QR_${Date.now()}`,
-      });
-    } else {
-      updateDefaultChannel(firestore, {
-        status: 'DISCONNECTED',
-        qr: null,
-      });
+    toast({ title: 'Generando nuevo código QR...' });
+    try {
+        await fetch(`${workerUrl}/v1/channels/default/qr`, { method: 'POST' });
+        // No need to set state here, onSnapshot will handle it
+    } catch (error) {
+        toast({ variant: 'destructive', title: 'Fallo al solicitar el código QR', description: String(error) });
     }
   };
-  
+
+  const handleDisconnect = async () => {
+    if (!workerUrl) {
+        toast({ variant: 'destructive', title: 'Worker URL no configurado' });
+        return;
+    }
+    toast({ title: 'Desconectando...' });
+    try {
+        await fetch(`${workerUrl}/v1/channels/default/disconnect`, { method: 'POST' });
+        // No need to set state here, onSnapshot will handle it
+    } catch (error) {
+        toast({ variant: 'destructive', title: 'Fallo al desconectar', description: String(error) });
+    }
+  };
+
   const getStatusForBadge = (status: WhatsappChannel['status'] | undefined) => {
-     if (!status) return 'DISCONNECTED';
-     // The status badge component can handle these directly
-     return status;
-  }
+    if (!status) return 'DISCONNECTED';
+    return status;
+  };
 
   return (
     <>
@@ -80,6 +79,13 @@ export function TestsPage() {
           title={t('linked.device')}
           description={t('manage.connection')}
         />
+        
+        {!workerUrl && (
+            <Alert variant="destructive" className="mb-4">
+                <AlertTitle>Configuración Incompleta</AlertTitle>
+                <AlertDescription>La variable de entorno NEXT_PUBLIC_BAILEYS_WORKER_URL no está configurada.</AlertDescription>
+            </Alert>
+        )}
 
         <div className="grid gap-8 md:grid-cols-2 lg:grid-cols-3">
           <Card className="lg:col-span-2">
@@ -103,14 +109,30 @@ export function TestsPage() {
                     <span className="font-medium">{channel?.displayName ?? '...'}</span>
                     <StatusBadge status={getStatusForBadge(channel?.status)} />
                   </div>
-                  <Button variant="outline" onClick={() => setQrModalOpen(true)}>{t('scan.qr.code')}</Button>
+                   {channel?.status === 'CONNECTED' ? (
+                     <span className="text-sm text-muted-foreground">{channel.phoneE164}</span>
+                   ) : (
+                    <Button variant="outline" onClick={() => setQrModalOpen(true)} disabled={!channel?.qrDataUrl}>{t('scan.qr.code')}</Button>
+                   )}
                 </div>
               )}
 
-              <Button variant="outline" className="w-full" onClick={handleToggleConnection} disabled={isLoading}>
-                <RefreshCw className="mr-2 h-4 w-4" />
-                {t('force.relink')}
-              </Button>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <Button variant="outline" onClick={handleGenerateQr} disabled={isLoading || !workerUrl}>
+                    <ScanQrCode className="mr-2 h-4 w-4" />
+                    Generar/Refrescar QR
+                </Button>
+                <Button variant="destructive" onClick={handleDisconnect} disabled={isLoading || !workerUrl}>
+                    <LogOut className="mr-2 h-4 w-4" />
+                    Desconectar
+                </Button>
+              </div>
+               {channel?.lastError && (
+                 <Alert variant="destructive">
+                   <AlertTitle>Último Error</AlertTitle>
+                   <AlertDescription>{channel.lastError}</AlertDescription>
+                 </Alert>
+               )}
             </CardContent>
           </Card>
 
@@ -118,14 +140,14 @@ export function TestsPage() {
             <CardContent className="p-6 flex flex-col items-center justify-center gap-4 h-full">
               {isLoading ? (
                   <Skeleton className="w-64 h-64" />
-              ) : channel?.qr ? (
+              ) : channel?.qrDataUrl ? (
                  <div className="w-64 h-64 rounded-lg bg-white p-4 flex items-center justify-center">
-                    <QRCode value={channel.qr} size={224} />
+                    <img src={channel.qrDataUrl} alt="WhatsApp QR Code" width={224} height={224} />
                  </div>
               ) : (
                 <div className="w-64 h-64 flex items-center justify-center bg-muted rounded-lg">
                     <p className="text-center text-sm text-muted-foreground p-4">
-                       Aún no hay QR. Genera o espera a que el sistema lo publique.
+                       Aún no hay QR. Genera uno o espera a que el sistema lo publique.
                     </p>
                 </div>
               )}
@@ -137,7 +159,7 @@ export function TestsPage() {
         </div>
       </main>
       <QrCodeDialog 
-        qr={channel?.qr ?? null} 
+        qrDataUrl={channel?.qrDataUrl ?? null} 
         isOpen={isQrModalOpen}
         onOpenChange={setQrModalOpen} 
       />

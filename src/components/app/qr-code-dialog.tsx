@@ -1,6 +1,5 @@
 'use client';
 
-import QRCode from 'react-qr-code';
 import {
   Dialog,
   DialogContent,
@@ -13,12 +12,12 @@ import { Button } from '@/components/ui/button';
 import { useLanguage } from '@/context/language-provider';
 
 interface QrCodeDialogProps {
-  qr: string | null;
+  qrDataUrl: string | null;
   isOpen: boolean;
   onOpenChange: (open: boolean) => void;
 }
 
-export function QrCodeDialog({ qr, isOpen, onOpenChange }: QrCodeDialogProps) {
+export function QrCodeDialog({ qrDataUrl, isOpen, onOpenChange }: QrCodeDialogProps) {
   const { t } = useLanguage();
 
   return (
@@ -27,13 +26,13 @@ export function QrCodeDialog({ qr, isOpen, onOpenChange }: QrCodeDialogProps) {
         <DialogHeader>
           <DialogTitle>{t('scan.qr.code')}</DialogTitle>
           <DialogDescription>
-            {qr ? t('scan.qr.instruction') : "No hay código QR disponible todavía."}
+            {qrDataUrl ? t('scan.qr.instruction') : "No hay código QR disponible todavía."}
           </DialogDescription>
         </DialogHeader>
         <div className="flex items-center justify-center p-4">
-          {qr ? (
+          {qrDataUrl ? (
             <div className="rounded-lg bg-white p-4">
-               <QRCode value={qr} size={256} />
+               <img src={qrDataUrl} alt="WhatsApp QR Code" width={256} height={256} />
             </div>
           ) : (
             <div className="flex items-center justify-center h-64 w-64 bg-muted rounded-lg">

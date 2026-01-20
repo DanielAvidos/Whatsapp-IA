@@ -42,7 +42,9 @@ export type WhatsappChannel = {
   displayName: string;
   status: 'DISCONNECTED' | 'CONNECTING' | 'CONNECTED';
   qr: string | null;
+  qrDataUrl: string | null;
   phoneE164: string | null;
   lastSeenAt: Timestamp | null;
   updatedAt: FieldValue | Timestamp;
+  lastError: string | null;
 };
