@@ -24,7 +24,7 @@ export function TestsPage() {
   const [isQrModalOpen, setQrModalOpen] = useState(false);
   const { toast } = useToast();
 
-  const workerUrl = process.env.NEXT_PUBLIC_BAILEYS_WORKER_URL;
+  const workerUrl = process.env.NEXT_PUBLIC_BAILEYS_WORKER_URL || "https://baileys-worker-701554958520.us-central1.run.app";
 
   useEffect(() => {
     if (!firestore || !user) return;
@@ -44,9 +44,10 @@ export function TestsPage() {
         toast({ variant: 'destructive', title: 'Worker URL no configurado' });
         return;
     }
+    console.log("BAILEYS_WORKER_URL:", workerUrl);
     toast({ title: 'Generando nuevo código QR...' });
     try {
-        await fetch(`${workerUrl}/v1/channels/default/qr`, { method: 'POST' });
+        await fetch(`${workerUrl}/v1/channels/default/qr`, { method: 'POST', mode: 'cors' });
         // No need to set state here, onSnapshot will handle it
     } catch (error) {
         toast({ variant: 'destructive', title: 'Fallo al solicitar el código QR', description: String(error) });
@@ -60,7 +61,7 @@ export function TestsPage() {
     }
     toast({ title: 'Desconectando...' });
     try {
-        await fetch(`${workerUrl}/v1/channels/default/disconnect`, { method: 'POST' });
+        await fetch(`${workerUrl}/v1/channels/default/disconnect`, { method: 'POST', mode: 'cors' });
         // No need to set state here, onSnapshot will handle it
     } catch (error) {
         toast({ variant: 'destructive', title: 'Fallo al desconectar', description: String(error) });

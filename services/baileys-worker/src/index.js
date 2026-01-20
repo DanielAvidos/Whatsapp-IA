@@ -6,6 +6,7 @@ const pino = require('pino');
 const qrcode = require('qrcode');
 const { Boom } = require('@hapi/boom');
 const path = require('path');
+const cors = require('cors');
 
 initializeApp();
 const db = getFirestore();
@@ -14,6 +15,12 @@ const channelDocRef = db.collection('channels').doc('default');
 const logger = pino({ level: 'info' });
 
 const app = express();
+app.use(cors({
+  origin: true,
+  methods: ['GET','POST','OPTIONS'],
+  allowedHeaders: ['Content-Type','Authorization'],
+}));
+app.options('*', cors({ origin: true }));
 app.use(express.json());
 
 const PORT = process.env.PORT || 8080;
@@ -78,7 +85,7 @@ async function startBaileys({ forceRestart = false }) {
     return;
   }
   starting = true;
-  logger.info({ forceRestart }, 'Starting Baileys process...');
+  logger.info({ forceRestart }, 'Starting Baileileys process...');
 
   try {
     if (sock && forceRestart) {
