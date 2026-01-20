@@ -1,8 +1,14 @@
 FROM node:20-slim
 
-# Instalar git (necesario si alguna dependencia se baja por git)
-RUN apt-get update && apt-get install -y --no-install-recommends git \
+# Tools needed for some npm deps (git + ssh client)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+  git openssh-client ca-certificates \
   && rm -rf /var/lib/apt/lists/*
+
+# Force git to use HTTPS instead of SSH for GitHub (avoids missing SSH keys in Cloud Build)
+RUN git config --global url."https://github.com/".insteadOf "ssh://git@github.com/" \
+ && git config --global url."https://github.com/".insteadOf "git@github.com:" \
+ && git config --global url."https://github.com/".insteadOf "ssh://github.com/"
 
 WORKDIR /usr/src/app
 
