@@ -6,6 +6,7 @@ const pino = require('pino');
 const qrcode = require('qrcode');
 const { Boom } = require('@hapi/boom');
 const path = require('path');
+const cors = require('cors');
 
 initializeApp();
 console.log('[BOOT] baileys-worker starting...', new Date().toISOString());
@@ -127,6 +128,27 @@ async function startOrRestartBaileys(reason = 'manual') {
 
     sock.ev.on('connection.update', async (update) => {
       console.log('[BAILEYS] connection.update keys=', Object.keys(update || {}), 'connection=', update?.connection, 'hasQR=', !!update?.qr);
+      
+      if (update?.lastDisconnect?.error) {
+        const err = update.lastDisconnect.error;
+        const msg = err?.message || String(err);
+        const name = err?.name || 'UnknownError';
+        const statusCode = err?.output?.statusCode || err?.output?.payload?.statusCode;
+        const data = err?.data;
+      
+        console.log('[BAILEYS] lastDisconnect.error name=', name, 'statusCode=', statusCode, 'message=', msg);
+        try {
+          console.log('[BAILEYS] lastDisconnect.error raw=', JSON.stringify(err, Object.getOwnPropertyNames(err)));
+        } catch (_) {
+          console.log('[BAILEYS] lastDisconnect.error raw (string)=', String(err));
+        }
+      
+        await safeSet({
+          lastError: `DISCONNECT: ${name} ${statusCode || ''} ${msg}`.trim(),
+          updatedAt: FieldValue.serverTimestamp(),
+        });
+      }
+      
       logger.info({ update }, 'connection.update');
 
       const { connection, lastDisconnect, qr } = update;
@@ -152,6 +174,7 @@ async function startOrRestartBaileys(reason = 'manual') {
       }
 
       if (connection === 'close') {
+        console.log('[BAILEYS] connection closed - lastDisconnect=', !!lastDisconnect, 'hasError=', !!lastDisconnect?.error);
         sock = null;
         const code = (lastDisconnect?.error instanceof Boom)
           ? lastDisconnect.error.output?.statusCode
