@@ -8,6 +8,7 @@ const { Boom } = require('@hapi/boom');
 const path = require('path');
 
 initializeApp();
+console.log('[BOOT] baileys-worker starting...', new Date().toISOString());
 const db = getFirestore();
 const channelDocRef = db.collection('channels').doc('default');
 
@@ -49,6 +50,17 @@ async function safeSet(data) {
 
 app.get('/health', (_req, res) => res.status(200).send('ok'));
 
+app.get('/debug', (req, res) => {
+  res.json({
+    ok: true,
+    now: new Date().toISOString(),
+    version: 'debug-1',
+    hasSock: !!sock,
+    starting,
+    node: process.version
+  });
+});
+
 app.get('/v1/channels/default/status', async (_req, res) => {
   try {
     const snap = await channelDocRef.get();
@@ -76,13 +88,15 @@ app.post('/v1/channels/default/disconnect', async (_req, res) => {
   res.json({ ok: true, message: 'Disconnection process initiated.' });
 });
 
-
+console.log('[BOOT] about to listen on PORT=', PORT);
 app.listen(PORT, () => {
+  console.log('[BOOT] HTTP server listening on', PORT);
   logger.info({ port: PORT }, 'HTTP server listening');
   startOrRestartBaileys('boot');
 });
 
 async function startOrRestartBaileys(reason = 'manual') {
+  console.log('[BAILEYS] startOrRestartBaileys reason=', reason, 'time=', new Date().toISOString());
   if (starting) {
     logger.info({ reason }, 'Baileys already starting, skipping');
     return;
@@ -112,6 +126,7 @@ async function startOrRestartBaileys(reason = 'manual') {
     sock.ev.on('creds.update', saveCreds);
 
     sock.ev.on('connection.update', async (update) => {
+      console.log('[BAILEYS] connection.update keys=', Object.keys(update || {}), 'connection=', update?.connection, 'hasQR=', !!update?.qr);
       logger.info({ update }, 'connection.update');
 
       const { connection, lastDisconnect, qr } = update;
