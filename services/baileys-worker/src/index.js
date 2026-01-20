@@ -1,3 +1,4 @@
+
 const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, Browsers } = require('@whiskeysockets/baileys');
 const { initializeApp } = require('firebase-admin/app');
 const { getFirestore, FieldValue } = require('firebase-admin/firestore');
@@ -7,6 +8,14 @@ const qrcode = require('qrcode');
 const { Boom } = require('@hapi/boom');
 const path = require('path');
 const cors = require('cors');
+
+process.on('uncaughtException', (err) => {
+  console.error('[FATAL] uncaughtException', err?.stack || err);
+});
+
+process.on('unhandledRejection', (reason) => {
+  console.error('[FATAL] unhandledRejection', reason);
+});
 
 initializeApp();
 console.log('[BOOT] baileys-worker starting...', new Date().toISOString());
@@ -85,6 +94,7 @@ app.post('/v1/channels/default/disconnect', async (_req, res) => {
     try { sock.end?.(); } catch (_) {}
     sock = null;
   }
+  starting = false;
   await safeSet({ status:'DISCONNECTED', qr:null, qrDataUrl:null, updatedAt: FieldValue.serverTimestamp() });
   res.json({ ok: true, message: 'Disconnection process initiated.' });
 });
@@ -98,6 +108,13 @@ app.listen(PORT, () => {
 
 async function startOrRestartBaileys(reason = 'manual') {
   console.log('[BAILEYS] startOrRestartBaileys reason=', reason, 'time=', new Date().toISOString());
+
+  if (sock) {
+    console.log('[BAILEYS] socket already exists, skipping new start');
+    starting = false;
+    return;
+  }
+
   if (starting) {
     logger.info({ reason }, 'Baileys already starting, skipping');
     return;
@@ -175,6 +192,12 @@ async function startOrRestartBaileys(reason = 'manual') {
 
       if (connection === 'close') {
         console.log('[BAILEYS] connection closed - lastDisconnect=', !!lastDisconnect, 'hasError=', !!lastDisconnect?.error);
+        try {
+            console.log('[BAILEYS] lastDisconnect full =', JSON.stringify(lastDisconnect, Object.getOwnPropertyNames(lastDisconnect || {})));
+        } catch (e) {
+            console.log('[BAILEYS] lastDisconnect full (string)=', String(lastDisconnect));
+        }
+
         sock = null;
         const code = (lastDisconnect?.error instanceof Boom)
           ? lastDisconnect.error.output?.statusCode
@@ -187,6 +210,7 @@ async function startOrRestartBaileys(reason = 'manual') {
           qr: null,
           qrDataUrl: null,
           updatedAt: FieldValue.serverTimestamp(),
+          lastError: `CLOSE: ${String(lastDisconnect?.error?.message || lastDisconnect?.error || 'no-error')}`,
         });
 
         const shouldReconnect = code !== DisconnectReason.loggedOut;
