@@ -6,7 +6,6 @@ const pino = require('pino');
 const qrcode = require('qrcode');
 const { Boom } = require('@hapi/boom');
 const path = require('path');
-const cors = require('cors');
 
 initializeApp();
 const db = getFirestore();
@@ -15,12 +14,23 @@ const channelDocRef = db.collection('channels').doc('default');
 const logger = pino({ level: 'info' });
 
 const app = express();
-app.use(cors({
-  origin: true,
-  methods: ['GET','POST','OPTIONS'],
-  allowedHeaders: ['Content-Type','Authorization'],
-}));
-app.options('*', cors({ origin: true }));
+
+// --- CORS (manual, infalible para browsers) ---
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  // Si viene origin, lo reflejamos; si no, permitimos cualquiera (curl/server-to-server)
+  res.setHeader('Access-Control-Allow-Origin', origin || '*');
+  res.setHeader('Vary', 'Origin');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+
+  if (req.method === 'OPTIONS') {
+    return res.status(204).send('');
+  }
+  next();
+});
+
 app.use(express.json());
 
 const PORT = process.env.PORT || 8080;
