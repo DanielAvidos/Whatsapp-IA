@@ -73,6 +73,16 @@ export function TestsPage() {
     return status;
   };
 
+  const renderError = (error: any) => {
+    if (typeof error === 'string') {
+      return error;
+    }
+    if (typeof error === 'object' && error !== null) {
+      return error.message || JSON.stringify(error);
+    }
+    return 'Se produjo un error desconocido.';
+  };
+
   return (
     <>
       <main className="container mx-auto p-4 md:p-6 lg:p-8">
@@ -131,7 +141,7 @@ export function TestsPage() {
                {channel?.lastError && (
                  <Alert variant="destructive">
                    <AlertTitle>Último Error</AlertTitle>
-                   <AlertDescription>{channel.lastError}</AlertDescription>
+                   <AlertDescription>{renderError(channel.lastError)}</AlertDescription>
                  </Alert>
                )}
             </CardContent>

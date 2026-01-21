@@ -246,7 +246,7 @@ async function startOrRestartBaileys(reason = 'manual') {
           } catch (e) {
             console.error('[BAILEYS] Failed to save QR', e);
             await upsertChannelStatus('default', {
-              lastError: { message: String(e?.message || e) },
+              lastError: `QR Error: ${String(e?.message || e)}`,
               status: 'ERROR'
             });
           }
@@ -269,13 +269,19 @@ async function startOrRestartBaileys(reason = 'manual') {
         if (connection === 'close') {
           try {
             const err = lastDisconnect?.error;
+            let errorMessage = null;
+            if (err) {
+              const boomError = err as any;
+              const name = boomError.name || 'Error';
+              const msg = boomError.message || 'Unknown disconnect reason';
+              const statusCode = boomError.output?.statusCode;
+              errorMessage = `Disconnect: ${name}${statusCode ? ` (${statusCode})` : ''} - ${msg}`;
+            }
             await upsertChannelStatus('default', {
               status: 'DISCONNECTED',
-              lastError: err ? {
-                message: err?.message || 'unknown',
-                statusCode: err?.output?.statusCode || null,
-                name: err?.name || null
-              } : null
+              qr: null,
+              qrDataUrl: null,
+              lastError: errorMessage,
             });
             console.log('[BAILEYS] DISCONNECTED persisted');
           } catch (e) {

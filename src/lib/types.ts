@@ -16,7 +16,7 @@ export type Member = {
   status: 'active' | 'invited' | 'disabled';
 };
 
-export type ChannelStatus = 'CONNECTED' | 'DISCONNECTED' | 'CONNECTING';
+export type ChannelStatus = 'CONNECTED' | 'DISCONNECTED' | 'CONNECTING' | 'QR';
 
 export type Channel = {
   id: string;
@@ -40,11 +40,11 @@ export type ApiKey = {
 export type WhatsappChannel = {
   id: string;
   displayName: string;
-  status: 'DISCONNECTED' | 'CONNECTING' | 'CONNECTED';
+  status: 'DISCONNECTED' | 'CONNECTING' | 'CONNECTED' | 'QR' | 'ERROR';
   qr: string | null;
   qrDataUrl: string | null;
   phoneE164: string | null;
   lastSeenAt: Timestamp | null;
   updatedAt: FieldValue | Timestamp;
-  lastError: string | null;
+  lastError: any;
 };
