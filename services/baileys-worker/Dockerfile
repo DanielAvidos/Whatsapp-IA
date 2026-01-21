@@ -3,13 +3,14 @@ FROM node:20-slim
 WORKDIR /usr/src/app
 
 RUN apt-get update && apt-get install -y \
+  ca-certificates \
+  openssl \
+  curl \
+  dnsutils \
+  iproute2 \
   git \
   openssh-client \
-  ca-certificates \
   dumb-init \
-  python3 \
-  make \
-  g++ \
   && rm -rf /var/lib/apt/lists/*
 
 COPY package*.json ./

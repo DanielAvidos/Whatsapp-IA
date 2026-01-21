@@ -22,7 +22,7 @@ console.log('[BOOT] baileys-worker starting...', new Date().toISOString());
 const db = getFirestore();
 const channelDocRef = db.collection('channels').doc('default');
 
-const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
+const logger = pino({ level: process.env.LOG_LEVEL || 'debug' });
 logger.info({ service: 'baileys-worker', version: '1' }, 'Booting service');
 
 const app = express();
@@ -138,7 +138,10 @@ async function startOrRestartBaileys(reason = 'manual') {
       auth: state,
       printQRInTerminal: false,
       logger,
-      browser: Browsers.macOS('Desktop'),
+      browser: Browsers.ubuntu('Chrome'),
+      connectTimeoutMs: 60_000,
+      keepAliveIntervalMs: 20_000,
+      defaultQueryTimeoutMs: 60_000,
     });
 
     sock.ev.on('creds.update', saveCreds);
@@ -216,7 +219,8 @@ async function startOrRestartBaileys(reason = 'manual') {
         const shouldReconnect = code !== DisconnectReason.loggedOut;
         if (shouldReconnect) {
           starting = false;
-          setTimeout(() => startOrRestartBaileys('auto-reconnect'), 2000);
+          await new Promise(r => setTimeout(r, 3000));
+          startOrRestartBaileys('auto-reconnect');
         }
       }
 
