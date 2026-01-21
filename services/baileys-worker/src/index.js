@@ -57,13 +57,15 @@ const PORT = process.env.PORT || 8080;
 let sock = null;
 let starting = false;
 
-async function safeSet(data) {
-  try {
-    await channelDocRef.set(data, { merge: true });
-  } catch (e) {
-    logger.error(e, 'Failed writing to Firestore');
-  }
+async function upsertChannelStatus(channelId, patch) {
+    const ref = db.collection('channels').doc(channelId);
+    await ref.set({
+      ...patch,
+      updatedAt: FieldValue.serverTimestamp(),
+      lastSeenAt: FieldValue.serverTimestamp(),
+    }, { merge: true });
 }
+
 
 app.get('/health', (_req, res) => res.status(200).send('ok'));
 
@@ -79,10 +81,11 @@ app.get('/debug', (req, res) => {
 });
 
 app.get('/debug/net', async (req, res) => {
+  const dnsPromises = require('dns').promises;
   const out = { ok: true, ts: new Date().toISOString(), checks: {} };
 
   try {
-    out.checks.dns_web_whatsapp = await dns.promises.lookup('web.whatsapp.com', { all: true });
+    out.checks.dns_web_whatsapp = await dnsPromises.lookup('web.whatsapp.com', { all: true });
   } catch (e) {
     out.ok = false;
     out.checks.dns_web_whatsapp_error = String(e?.message || e);
@@ -129,6 +132,15 @@ app.get('/debug/ws', async (req, res) => {
   }
 });
 
+app.get('/debug/baileys', (req, res) => {
+    const q = global.__LAST_QR__ || null;
+    res.json({
+      ok: true,
+      hasLastQr: !!q,
+      lastQrAt: q?.at || null,
+      nodeOptions: process.env.NODE_OPTIONS || null
+    });
+});
 
 app.get('/v1/channels/default/status', async (_req, res) => {
   try {
@@ -154,7 +166,7 @@ app.post('/v1/channels/default/disconnect', async (_req, res) => {
     sock = null;
   }
   starting = false;
-  await safeSet({ status:'DISCONNECTED', qr:null, qrDataUrl:null, updatedAt: FieldValue.serverTimestamp() });
+  await upsertChannelStatus('default', { status:'DISCONNECTED', qr:null, qrDataUrl:null });
   res.json({ ok: true, message: 'Disconnection process initiated.' });
 });
 
@@ -181,13 +193,11 @@ async function startOrRestartBaileys(reason = 'manual') {
   starting = true;
 
   logger.info({ reason }, 'Starting Baileys...');
-  await safeSet({
+  await upsertChannelStatus('default', {
     status: 'CONNECTING',
     qr: null,
     qrDataUrl: null,
-    lastError: null,
-    updatedAt: FieldValue.serverTimestamp(),
-    lastSeenAt: FieldValue.serverTimestamp(),
+    lastError: null
   });
 
   try {
@@ -206,110 +216,84 @@ async function startOrRestartBaileys(reason = 'manual') {
     sock.ev.on('creds.update', saveCreds);
 
     sock.ev.on('connection.update', async (update) => {
-      console.log('[BAILEYS] connection.update keys=', Object.keys(update || {}), 'connection=', update?.connection, 'hasQR=', !!update?.qr);
+        const { connection, lastDisconnect, qr } = update || {};
+        console.log('[BAILEYS] connection.update', {
+          connection,
+          hasQR: Boolean(qr),
+          lastDisconnect: lastDisconnect ? {
+            message: lastDisconnect?.error?.message,
+            statusCode: lastDisconnect?.error?.output?.statusCode,
+            name: lastDisconnect?.error?.name
+          } : null
+        });
       
-      const { connection, lastDisconnect, qr } = update;
-
-      const err = lastDisconnect?.error;
-      if (err) {
-        console.log('[BAILEYS] lastDisconnect.error name=', err.name, 'statusCode=', err?.output?.statusCode || err?.statusCode, 'message=', err.message);
-        try {
-          console.log('[BAILEYS] lastDisconnect.error raw=', JSON.stringify(err, Object.getOwnPropertyNames(err)));
-        } catch (_) {
-          console.log('[BAILEYS] lastDisconnect.error raw (string)=', String(err));
-        }
-        console.log('[BAILEYS] lastDisconnect.error stack=', err.stack);
-
-        const msg = err?.message || String(err);
-        const name = err?.name || 'UnknownError';
-        const statusCode = err?.output?.statusCode || err?.statusCode;
-        
-        await safeSet({
-          lastError: `DISCONNECT: ${name} ${statusCode || ''} ${msg}`.trim(),
-          updatedAt: FieldValue.serverTimestamp(),
-        });
-      }
+        if (qr) {
+          try {
+            const QRCode = require('qrcode');
+            const qrDataUrl = await QRCode.toDataURL(qr);
       
-      logger.info({ update }, 'connection.update');
-
-      if (qr) {
-        logger.info('QR received from Baileys');
-        try {
-          const qrDataUrl = await qrcode.toDataURL(qr);
-          await safeSet({
-            status: 'CONNECTING',
-            qr,
-            qrDataUrl,
-            updatedAt: FieldValue.serverTimestamp(),
-            lastSeenAt: FieldValue.serverTimestamp(),
-          });
-        } catch (err) {
-          logger.error(err, 'Failed to generate/save QR');
-          await safeSet({
-            lastError: `QR_SAVE_ERROR: ${String(err?.message || err)}`,
-            updatedAt: FieldValue.serverTimestamp(),
-          });
+            global.__LAST_QR__ = { qr, qrDataUrl, at: Date.now() };
+      
+            await upsertChannelStatus('default', {
+              status: 'QR',
+              qr,
+              qrDataUrl,
+              phoneE164: null,
+              lastError: null
+            });
+      
+            console.log('[BAILEYS] QR saved to Firestore', { len: qr.length });
+          } catch (e) {
+            console.error('[BAILEYS] Failed to save QR', e);
+            await upsertChannelStatus('default', {
+              lastError: { message: String(e?.message || e) },
+              status: 'ERROR'
+            });
+          }
         }
-      }
-
-      if (connection === 'close') {
-        console.log('[BAILEYS] connection closed - lastDisconnect=', !!lastDisconnect, 'hasError=', !!lastDisconnect?.error);
-        try {
-            console.log('[BAILEYS] lastDisconnect full =', JSON.stringify(lastDisconnect, Object.getOwnPropertyNames(lastDisconnect || {})));
-        } catch (e) {
-            console.log('[BAILEYS] lastDisconnect full (string)=', String(lastDisconnect));
+      
+        if (connection === 'open') {
+          try {
+            await upsertChannelStatus('default', {
+              status: 'CONNECTED',
+              qr: null,
+              qrDataUrl: null,
+              lastError: null
+            });
+            console.log('[BAILEYS] CONNECTED');
+          } catch (e) {
+            console.error('[BAILEYS] failed to persist CONNECTED', e);
+          }
         }
-
-        sock = null;
-        const code = (lastDisconnect?.error instanceof Boom)
-          ? lastDisconnect.error.output?.statusCode
-          : undefined;
-
-        logger.warn({ code }, 'Connection closed');
-
-        await safeSet({
-          status: 'DISCONNECTED',
-          qr: null,
-          qrDataUrl: null,
-          updatedAt: FieldValue.serverTimestamp(),
-          lastError: `CLOSE: ${String(lastDisconnect?.error?.message || lastDisconnect?.error || 'no-error')}`,
-        });
-
-        const shouldReconnect = code !== DisconnectReason.loggedOut;
-        if (shouldReconnect) {
-          starting = false;
-          await new Promise(r => setTimeout(r, 3000));
-          startOrRestartBaileys('auto-reconnect');
+      
+        if (connection === 'close') {
+          try {
+            const err = lastDisconnect?.error;
+            await upsertChannelStatus('default', {
+              status: 'DISCONNECTED',
+              lastError: err ? {
+                message: err?.message || 'unknown',
+                statusCode: err?.output?.statusCode || null,
+                name: err?.name || null
+              } : null
+            });
+            console.log('[BAILEYS] DISCONNECTED persisted');
+          } catch (e) {
+            console.error('[BAILEYS] failed to persist DISCONNECTED', e);
+          }
         }
-      }
-
-      if (connection === 'open') {
-        logger.info('Connection opened!');
-        const phoneId = sock?.user?.id?.split(':')?.[0] || null;
-
-        await safeSet({
-          status: 'CONNECTED',
-          qr: null,
-          qrDataUrl: null,
-          phoneE164: phoneId ? `+${phoneId}` : null,
-          lastError: null,
-          updatedAt: FieldValue.serverTimestamp(),
-          lastSeenAt: FieldValue.serverTimestamp(),
-        });
-      }
-    });
+      });
 
     starting = false;
     logger.info('Baileys socket created');
   } catch (err) {
     starting = false;
     logger.error(err, 'Baileys failed to start');
-    await safeSet({
+    await upsertChannelStatus('default',{
       status: 'DISCONNECTED',
       qr: null,
       qrDataUrl: null,
       lastError: `START_ERROR: ${String(err?.message || err)}`,
-      updatedAt: FieldValue.serverTimestamp(),
     });
   }
 }
