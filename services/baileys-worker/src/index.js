@@ -8,6 +8,7 @@ const qrcode = require('qrcode');
 const { Boom } = require('@hapi/boom');
 const path = require('path');
 const cors = require('cors');
+const dns = require('dns').promises;
 
 process.on('uncaughtException', (err) => {
   console.error('[FATAL] uncaughtException', err?.stack || err);
@@ -69,6 +70,28 @@ app.get('/debug', (req, res) => {
     starting,
     node: process.version
   });
+});
+
+app.get('/debug/net', async (req, res) => {
+  const out = { ok: true, ts: new Date().toISOString(), checks: {} };
+
+  try {
+    out.checks.dns_web_whatsapp = await dns.lookup('web.whatsapp.com', { all: true });
+  } catch (e) {
+    out.ok = false;
+    out.checks.dns_web_whatsapp_error = String(e?.message || e);
+  }
+
+  try {
+    const r = await fetch('https://web.whatsapp.com', { method: 'GET' });
+    out.checks.https_web_whatsapp_status = r.status;
+  } catch (e) {
+    out.ok = false;
+    out.checks.https_web_whatsapp_error = String(e?.message || e);
+  }
+
+  console.log('[DEBUG_NET]', JSON.stringify(out));
+  res.status(out.ok ? 200 : 500).json(out);
 });
 
 app.get('/v1/channels/default/status', async (_req, res) => {
@@ -149,20 +172,22 @@ async function startOrRestartBaileys(reason = 'manual') {
     sock.ev.on('connection.update', async (update) => {
       console.log('[BAILEYS] connection.update keys=', Object.keys(update || {}), 'connection=', update?.connection, 'hasQR=', !!update?.qr);
       
-      if (update?.lastDisconnect?.error) {
-        const err = update.lastDisconnect.error;
-        const msg = err?.message || String(err);
-        const name = err?.name || 'UnknownError';
-        const statusCode = err?.output?.statusCode || err?.output?.payload?.statusCode;
-        const data = err?.data;
-      
-        console.log('[BAILEYS] lastDisconnect.error name=', name, 'statusCode=', statusCode, 'message=', msg);
+      const { connection, lastDisconnect, qr } = update;
+
+      const err = lastDisconnect?.error;
+      if (err) {
+        console.log('[BAILEYS] lastDisconnect.error name=', err.name, 'statusCode=', err?.output?.statusCode || err?.statusCode, 'message=', err.message);
         try {
           console.log('[BAILEYS] lastDisconnect.error raw=', JSON.stringify(err, Object.getOwnPropertyNames(err)));
         } catch (_) {
           console.log('[BAILEYS] lastDisconnect.error raw (string)=', String(err));
         }
-      
+        console.log('[BAILEYS] lastDisconnect.error stack=', err.stack);
+
+        const msg = err?.message || String(err);
+        const name = err?.name || 'UnknownError';
+        const statusCode = err?.output?.statusCode || err?.statusCode;
+        
         await safeSet({
           lastError: `DISCONNECT: ${name} ${statusCode || ''} ${msg}`.trim(),
           updatedAt: FieldValue.serverTimestamp(),
@@ -170,8 +195,6 @@ async function startOrRestartBaileys(reason = 'manual') {
       }
       
       logger.info({ update }, 'connection.update');
-
-      const { connection, lastDisconnect, qr } = update;
 
       if (qr) {
         logger.info('QR received from Baileys');
