@@ -31,7 +31,8 @@ const db = getFirestore();
 const channelDocRef = db.collection('channels').doc('default');
 
 const logger = pino({ level: process.env.LOG_LEVEL || 'debug' });
-logger.info({ service: 'baileys-worker', version: '1' }, 'Booting service');
+const { version: baileysVersion } = require('@whiskeysockets/baileys/package.json');
+logger.info({ service: 'baileys-worker', version: '1', authStateLocation: 'filesystem:/tmp/baileys_auth_info', baileysVersion }, 'Booting service');
 
 const app = express();
 
@@ -58,6 +59,7 @@ const PORT = process.env.PORT || 8080;
 let sock = null;
 let starting = false;
 let lastDisconnectError = null;
+let lastConnectionState = {};
 
 async function upsertChannelStatus(channelId, patch) {
     const ref = db.collection('channels').doc(channelId);
@@ -134,17 +136,34 @@ app.get('/debug/ws', async (req, res) => {
 
 app.get('/debug/baileys', (req, res) => {
     const q = global.__LAST_QR__ || null;
-    const { version: baileysVersion } = require('@whiskeysockets/baileys/package.json');
     res.json({
       ok: true,
       baileysVersion,
+      nodeVersion: process.version,
+      hasSock: !!sock,
+      lastConnectionState,
+      authStateBackend: 'filesystem',
+      authStatePathOrRef: path.join('/tmp', 'baileys_auth_info'),
       hasLastQr: !!q,
       lastQrAt: q?.at || null,
       lastDisconnect: lastDisconnectError,
-      authStateLocation: `filesystem:${path.join('/tmp', 'baileys_auth_info')}`,
-      nodeOptions: process.env.NODE_OPTIONS || null
     });
 });
+
+app.get('/debug/config', (req, res) => {
+    res.json({
+        ok: true,
+        env: {
+            PORT: process.env.PORT,
+            NODE_OPTIONS: process.env.NODE_OPTIONS,
+            LOG_LEVEL: process.env.LOG_LEVEL,
+        },
+        baileysVersion: baileysVersion,
+        authStateLocation: `filesystem:${path.join('/tmp', 'baileys_auth_info')}`,
+        timestamp: new Date().toISOString(),
+    });
+});
+
 
 app.get('/v1/channels/default/status', async (_req, res) => {
   try {
@@ -158,7 +177,7 @@ app.get('/v1/channels/default/status', async (_req, res) => {
 
 app.post('/v1/channels/default/qr', async (_req, res) => {
   logger.info('Received API request to generate QR code.');
-  await startOrRestartBaileys('api-qr');
+  startOrRestartBaileys('api-qr');
   res.json({ ok: true, message: 'QR generation process started.' });
 });
 
@@ -198,7 +217,8 @@ app.post('/v1/channels/default/resetSession', async (_req, res) => {
         qr:null,
         qrDataUrl:null,
         phoneE164: null,
-        lastError: null
+        lastError: null,
+        lastQrAt: null
     });
     res.json({ ok: true, message: 'Session reset successfully.' });
 });
@@ -255,15 +275,18 @@ async function startOrRestartBaileys(reason = 'manual') {
 
     sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update || {};
-        console.log('[BAILEYS] connection.update', {
-          connection,
-          hasQR: Boolean(qr),
-          lastDisconnect: lastDisconnect ? {
-            message: lastDisconnect?.error?.message,
-            statusCode: lastDisconnect?.error?.output?.statusCode,
-            name: lastDisconnect?.error?.name
-          } : null
-        });
+        const err = lastDisconnect?.error;
+
+        lastConnectionState = {
+            connection,
+            hasQrBoolean: !!qr && typeof qr === 'string',
+            qrLen: qr?.length || 0,
+            lastDisconnectStatusCode: err?.output?.statusCode,
+            lastDisconnectMessage: err?.message,
+            ts: new Date().toISOString(),
+        };
+
+        console.log('[BAILEYS] connection.update', lastConnectionState);
 
         if (qr && typeof qr === 'string' && qr.length > 20) {
           try {
@@ -277,7 +300,6 @@ async function startOrRestartBaileys(reason = 'manual') {
               phoneE164: null,
               lastError: null,
               lastQrAt: FieldValue.serverTimestamp(),
-              lastSeenAt: FieldValue.serverTimestamp(),
             });
             console.log('[BAILEYS] QR saved to Firestore', { len: qr.length });
           } catch (e) {
@@ -292,12 +314,13 @@ async function startOrRestartBaileys(reason = 'manual') {
         if (connection === 'open') {
           retryCount = 0; // Reset retry counter on successful connection
           try {
+            const phoneId = sock?.user?.id?.split(':')?.[0] || null;
             await upsertChannelStatus('default', {
               status: 'CONNECTED',
               qr: null,
               qrDataUrl: null,
               lastError: null,
-              lastSeenAt: FieldValue.serverTimestamp(),
+              phoneE164: phoneId ? `+${phoneId}` : null,
             });
             console.log('[BAILEYS] CONNECTED');
           } catch (e) {
@@ -306,7 +329,6 @@ async function startOrRestartBaileys(reason = 'manual') {
         }
       
         if (connection === 'close') {
-          const err = lastDisconnect?.error;
           lastDisconnectError = err ? {
               message: err?.message,
               name: err?.name,
@@ -338,7 +360,7 @@ async function startOrRestartBaileys(reason = 'manual') {
               logger.info(`Will attempt to reconnect in ${delay}ms (attempt ${retryCount + 1}/${MAX_RETRY})`);
               await new Promise(r => setTimeout(r, delay));
               retryCount++;
-              return startOrRestartBaileys('auto-reconnect');
+              startOrRestartBaileys('auto-reconnect');
             } else {
               logger.error('Max retries reached. Not attempting to reconnect further.');
               await upsertChannelStatus('default', {

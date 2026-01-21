@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect } from 'react';
-import { Loader2, RefreshCw, ScanQrCode, LogOut } from 'lucide-react';
+import { Loader2, RefreshCw, ScanQrCode, LogOut, RotateCcw } from 'lucide-react';
 import { useFirestore, useUser } from '@/firebase';
 import { PageHeader } from '@/components/app/page-header';
 import { Button } from '@/components/ui/button';
@@ -39,46 +39,36 @@ export function TestsPage() {
     return () => unsubscribe();
   }, [firestore, user, isLoading]);
 
-  const handleGenerateQr = async () => {
-    if (!workerUrl) {
+  const handleApiCall = async (endpoint: string, successMessage: string, errorMessage: string) => {
+     if (!workerUrl) {
         toast({ variant: 'destructive', title: 'Worker URL no configurado' });
         return;
     }
-    console.log("BAILEYS_WORKER_URL:", workerUrl);
-    toast({ title: 'Generando nuevo código QR...' });
+    toast({ title: successMessage });
     try {
-        await fetch(`${workerUrl}/v1/channels/default/qr`, { method: 'POST', mode: 'cors' });
-        // No need to set state here, onSnapshot will handle it
+        await fetch(`${workerUrl}${endpoint}`, { method: 'POST', mode: 'cors' });
+        // onSnapshot se encargará de actualizar el estado
     } catch (error) {
-        toast({ variant: 'destructive', title: 'Fallo al solicitar el código QR', description: String(error) });
+        toast({ variant: 'destructive', title: errorMessage, description: String(error) });
     }
-  };
+  }
 
-  const handleDisconnect = async () => {
-    if (!workerUrl) {
-        toast({ variant: 'destructive', title: 'Worker URL no configurado' });
-        return;
-    }
-    toast({ title: 'Desconectando...' });
-    try {
-        await fetch(`${workerUrl}/v1/channels/default/disconnect`, { method: 'POST', mode: 'cors' });
-        // No need to set state here, onSnapshot will handle it
-    } catch (error) {
-        toast({ variant: 'destructive', title: 'Fallo al desconectar', description: String(error) });
-    }
-  };
+  const handleGenerateQr = () => handleApiCall('/v1/channels/default/qr', 'Generando nuevo código QR...', 'Fallo al solicitar el código QR');
+  const handleDisconnect = () => handleApiCall('/v1/channels/default/disconnect', 'Desconectando...', 'Fallo al desconectar');
+  const handleResetSession = () => handleApiCall('/v1/channels/default/resetSession', 'Reseteando sesión...', 'Fallo al resetear la sesión');
+
 
   const getStatusForBadge = (status: WhatsappChannel['status'] | undefined) => {
     if (!status) return 'DISCONNECTED';
+    if (status === 'QR') return 'CONNECTING'; // Treat QR state as 'Connecting' for the badge
     return status;
   };
 
   const renderError = (error: any) => {
-    if (typeof error === 'string') {
-      return error;
-    }
+    if (!error) return null;
+    if (typeof error === 'string') return error;
     if (typeof error === 'object' && error !== null) {
-      return error.message || JSON.stringify(error);
+      return `[${error.statusCode || 'N/A'}] ${error.message || JSON.stringify(error)}`;
     }
     return 'Se produjo un error desconocido.';
   };
@@ -117,23 +107,27 @@ export function TestsPage() {
                 <div className="flex items-center justify-between rounded-lg border p-4">
                   <div className="flex items-center gap-3">
                     {channel?.status === 'CONNECTING' && <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />}
-                    <span className="font-medium">{channel?.displayName ?? '...'}</span>
+                    <span className="font-medium">{channel?.displayName ?? 'Canal Principal'}</span>
                     <StatusBadge status={getStatusForBadge(channel?.status)} />
                   </div>
                    {channel?.status === 'CONNECTED' ? (
                      <span className="text-sm text-muted-foreground">{channel.phoneE164}</span>
                    ) : (
-                    <Button variant="outline" onClick={() => setQrModalOpen(true)} disabled={!channel?.qrDataUrl}>{t('scan.qr.code')}</Button>
+                    <Button variant="outline" onClick={() => setQrModalOpen(true)} disabled={channel?.status === 'CONNECTING' || !channel?.qrDataUrl}>{t('scan.qr.code')}</Button>
                    )}
                 </div>
               )}
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                 <Button variant="outline" onClick={handleGenerateQr} disabled={isLoading || !workerUrl}>
                     <ScanQrCode className="mr-2 h-4 w-4" />
                     Generar/Refrescar QR
                 </Button>
-                <Button variant="destructive" onClick={handleDisconnect} disabled={isLoading || !workerUrl}>
+                <Button variant="outline" color="amber" onClick={handleResetSession} disabled={isLoading || !workerUrl}>
+                    <RotateCcw className="mr-2 h-4 w-4" />
+                    Resetear Sesión
+                </Button>
+                <Button variant="destructive" onClick={handleDisconnect} disabled={isLoading || !workerUrl || channel?.status !== 'CONNECTED'}>
                     <LogOut className="mr-2 h-4 w-4" />
                     Desconectar
                 </Button>
@@ -151,14 +145,14 @@ export function TestsPage() {
             <CardContent className="p-6 flex flex-col items-center justify-center gap-4 h-full">
               {isLoading ? (
                   <Skeleton className="w-64 h-64" />
-              ) : channel?.qrDataUrl ? (
+              ) : channel?.status === 'QR' && channel.qrDataUrl ? (
                  <div className="w-64 h-64 rounded-lg bg-white p-4 flex items-center justify-center">
                     <img src={channel.qrDataUrl} alt="WhatsApp QR Code" width={224} height={224} />
                  </div>
               ) : (
                 <div className="w-64 h-64 flex items-center justify-center bg-muted rounded-lg">
                     <p className="text-center text-sm text-muted-foreground p-4">
-                       Aún no hay QR. Genera uno o espera a que el sistema lo publique.
+                       {channel?.status === 'CONNECTING' ? 'Generando QR...' : 'Aún no hay QR. Genera uno para comenzar.'}
                     </p>
                 </div>
               )}
