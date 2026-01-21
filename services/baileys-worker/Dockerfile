@@ -18,6 +18,7 @@ RUN npm install --omit=dev
 
 COPY . .
 
+ENV NODE_OPTIONS="--dns-result-order=ipv4first"
 ENV PORT=8080
 EXPOSE 8080
 

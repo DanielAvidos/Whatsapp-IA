@@ -8,7 +8,13 @@ const qrcode = require('qrcode');
 const { Boom } = require('@hapi/boom');
 const path = require('path');
 const cors = require('cors');
-const dns = require('dns').promises;
+
+// Force IPv4 first to avoid IPv6 WSS handshake issues in some cloud environments
+const dns = require('dns');
+if (dns.setDefaultResultOrder) {
+  dns.setDefaultResultOrder('ipv4first');
+}
+process.env.NODE_OPTIONS = (process.env.NODE_OPTIONS || '') + ' --dns-result-order=ipv4first';
 
 process.on('uncaughtException', (err) => {
   console.error('[FATAL] uncaughtException', err?.stack || err);
@@ -76,7 +82,7 @@ app.get('/debug/net', async (req, res) => {
   const out = { ok: true, ts: new Date().toISOString(), checks: {} };
 
   try {
-    out.checks.dns_web_whatsapp = await dns.lookup('web.whatsapp.com', { all: true });
+    out.checks.dns_web_whatsapp = await dns.promises.lookup('web.whatsapp.com', { all: true });
   } catch (e) {
     out.ok = false;
     out.checks.dns_web_whatsapp_error = String(e?.message || e);
@@ -93,6 +99,36 @@ app.get('/debug/net', async (req, res) => {
   console.log('[DEBUG_NET]', JSON.stringify(out));
   res.status(out.ok ? 200 : 500).json(out);
 });
+
+app.get('/debug/ws', async (req, res) => {
+  const ts = new Date().toISOString();
+  try {
+    const WebSocket = require('ws');
+    const ws = new WebSocket('wss://web.whatsapp.com/ws/chat', {
+      headers: { 'User-Agent': 'Mozilla/5.0' }
+    });
+
+    const timeout = setTimeout(() => {
+      try { ws.terminate(); } catch {}
+      return res.status(200).json({ ok: false, ts, error: 'timeout' });
+    }, 8000);
+
+    ws.on('open', () => {
+      clearTimeout(timeout);
+      try { ws.close(); } catch {}
+      return res.status(200).json({ ok: true, ts });
+    });
+
+    ws.on('error', (err) => {
+      clearTimeout(timeout);
+      try { ws.terminate(); } catch {}
+      return res.status(200).json({ ok: false, ts, error: String(err && err.message ? err.message : err) });
+    });
+  } catch (e) {
+    return res.status(200).json({ ok: false, ts, error: String(e && e.message ? e.message : e) });
+  }
+});
+
 
 app.get('/v1/channels/default/status', async (_req, res) => {
   try {
