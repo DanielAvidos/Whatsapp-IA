@@ -8,13 +8,7 @@ const qrcode = require('qrcode');
 const { Boom } = require('@hapi/boom');
 const path = require('path');
 const cors = require('cors');
-
-// Force IPv4 first to avoid IPv6 WSS handshake issues in some cloud environments
-const dns = require('dns');
-if (dns.setDefaultResultOrder) {
-  dns.setDefaultResultOrder('ipv4first');
-}
-process.env.NODE_OPTIONS = (process.env.NODE_OPTIONS || '') + ' --dns-result-order=ipv4first';
+const fs = require('fs');
 
 process.on('uncaughtException', (err) => {
   console.error('[FATAL] uncaughtException', err?.stack || err);
@@ -24,8 +18,15 @@ process.on('unhandledRejection', (reason) => {
   console.error('[FATAL] unhandledRejection', reason);
 });
 
-initializeApp();
+// Force IPv4 first to avoid IPv6 WSS handshake issues in some cloud environments
+const dns = require('dns');
+if (dns.setDefaultResultOrder) {
+  dns.setDefaultResultOrder('ipv4first');
+}
+process.env.NODE_OPTIONS = (process.env.NODE_OPTIONS || '') + ' --dns-result-order=ipv4first';
+
 console.log('[BOOT] baileys-worker starting...', new Date().toISOString());
+initializeApp();
 const db = getFirestore();
 const channelDocRef = db.collection('channels').doc('default');
 
@@ -56,16 +57,15 @@ const PORT = process.env.PORT || 8080;
 
 let sock = null;
 let starting = false;
+let lastDisconnectError = null;
 
 async function upsertChannelStatus(channelId, patch) {
     const ref = db.collection('channels').doc(channelId);
     await ref.set({
       ...patch,
       updatedAt: FieldValue.serverTimestamp(),
-      lastSeenAt: FieldValue.serverTimestamp(),
     }, { merge: true });
 }
-
 
 app.get('/health', (_req, res) => res.status(200).send('ok'));
 
@@ -134,10 +134,14 @@ app.get('/debug/ws', async (req, res) => {
 
 app.get('/debug/baileys', (req, res) => {
     const q = global.__LAST_QR__ || null;
+    const { version: baileysVersion } = require('@whiskeysockets/baileys/package.json');
     res.json({
       ok: true,
+      baileysVersion,
       hasLastQr: !!q,
       lastQrAt: q?.at || null,
+      lastDisconnect: lastDisconnectError,
+      authStateLocation: `filesystem:${path.join('/tmp', 'baileys_auth_info')}`,
       nodeOptions: process.env.NODE_OPTIONS || null
     });
 });
@@ -170,12 +174,45 @@ app.post('/v1/channels/default/disconnect', async (_req, res) => {
   res.json({ ok: true, message: 'Disconnection process initiated.' });
 });
 
+app.post('/v1/channels/default/resetSession', async (_req, res) => {
+    logger.info('Received API request to reset session.');
+    if (sock) {
+        try { await sock.logout(); } catch (e) { logger.warn(e, 'logout during reset failed'); }
+        try { sock.end?.(); } catch (_) {}
+        sock = null;
+    }
+    starting = false;
+
+    const authPath = path.join('/tmp', 'baileys_auth_info');
+    if (fs.existsSync(authPath)) {
+        try {
+            fs.rmSync(authPath, { recursive: true, force: true });
+            logger.info('Auth info deleted from filesystem.');
+        } catch (e) {
+            logger.error(e, 'Failed to delete auth info directory.');
+        }
+    }
+
+    await upsertChannelStatus('default', {
+        status:'DISCONNECTED',
+        qr:null,
+        qrDataUrl:null,
+        phoneE164: null,
+        lastError: null
+    });
+    res.json({ ok: true, message: 'Session reset successfully.' });
+});
+
 console.log('[BOOT] about to listen on PORT=', PORT);
 app.listen(PORT, () => {
   console.log('[BOOT] HTTP server listening on', PORT);
   logger.info({ port: PORT }, 'HTTP server listening');
   startOrRestartBaileys('boot');
 });
+
+let retryCount = 0;
+const MAX_RETRY = 5;
+const RETRY_DELAY_MS = [2000, 5000, 10000, 20000, 60000];
 
 async function startOrRestartBaileys(reason = 'manual') {
   console.log('[BAILEYS] startOrRestartBaileys reason=', reason, 'time=', new Date().toISOString());
@@ -197,7 +234,8 @@ async function startOrRestartBaileys(reason = 'manual') {
     status: 'CONNECTING',
     qr: null,
     qrDataUrl: null,
-    lastError: null
+    lastError: null,
+    lastSeenAt: FieldValue.serverTimestamp(),
   });
 
   try {
@@ -226,39 +264,40 @@ async function startOrRestartBaileys(reason = 'manual') {
             name: lastDisconnect?.error?.name
           } : null
         });
-      
-        if (qr) {
+
+        if (qr && typeof qr === 'string' && qr.length > 20) {
           try {
-            const QRCode = require('qrcode');
-            const qrDataUrl = await QRCode.toDataURL(qr);
-      
+            const qrDataUrl = await qrcode.toDataURL(qr);
             global.__LAST_QR__ = { qr, qrDataUrl, at: Date.now() };
-      
+
             await upsertChannelStatus('default', {
               status: 'QR',
               qr,
               qrDataUrl,
               phoneE164: null,
-              lastError: null
+              lastError: null,
+              lastQrAt: FieldValue.serverTimestamp(),
+              lastSeenAt: FieldValue.serverTimestamp(),
             });
-      
             console.log('[BAILEYS] QR saved to Firestore', { len: qr.length });
           } catch (e) {
             console.error('[BAILEYS] Failed to save QR', e);
             await upsertChannelStatus('default', {
-              lastError: `QR Error: ${String(e?.message || e)}`,
+              lastError: { message: `QR_SAVE_ERROR: ${String(e?.message || e)}`, ts: new Date().toISOString() },
               status: 'ERROR'
             });
           }
         }
       
         if (connection === 'open') {
+          retryCount = 0; // Reset retry counter on successful connection
           try {
             await upsertChannelStatus('default', {
               status: 'CONNECTED',
               qr: null,
               qrDataUrl: null,
-              lastError: null
+              lastError: null,
+              lastSeenAt: FieldValue.serverTimestamp(),
             });
             console.log('[BAILEYS] CONNECTED');
           } catch (e) {
@@ -267,25 +306,48 @@ async function startOrRestartBaileys(reason = 'manual') {
         }
       
         if (connection === 'close') {
-          try {
-            const err = lastDisconnect?.error;
-            let errorMessage = null;
-            if (err) {
-              const boomError = err as any;
-              const name = boomError.name || 'Error';
-              const msg = boomError.message || 'Unknown disconnect reason';
-              const statusCode = boomError.output?.statusCode;
-              errorMessage = `Disconnect: ${name}${statusCode ? ` (${statusCode})` : ''} - ${msg}`;
+          const err = lastDisconnect?.error;
+          lastDisconnectError = err ? {
+              message: err?.message,
+              name: err?.name,
+              statusCode: err?.output?.statusCode,
+              stack: err?.stack,
+              ts: new Date().toISOString()
+          } : null;
+
+          if (err) {
+            console.log('[BAILEYS] lastDisconnect.error name=', err.name, 'statusCode=', err?.output?.statusCode, 'message=', err.message);
+          }
+
+          const shouldReconnect = err ? (err instanceof Boom ? err.output.statusCode !== DisconnectReason.loggedOut : true) : true;
+
+          await upsertChannelStatus('default', {
+            status: 'DISCONNECTED',
+            qr: null,
+            qrDataUrl: null,
+            lastError: lastDisconnectError,
+          });
+          console.log('[BAILEYS] DISCONNECTED persisted');
+
+          sock = null;
+          starting = false;
+          
+          if (shouldReconnect) {
+            if (retryCount < MAX_RETRY) {
+              const delay = RETRY_DELAY_MS[retryCount];
+              logger.info(`Will attempt to reconnect in ${delay}ms (attempt ${retryCount + 1}/${MAX_RETRY})`);
+              await new Promise(r => setTimeout(r, delay));
+              retryCount++;
+              return startOrRestartBaileys('auto-reconnect');
+            } else {
+              logger.error('Max retries reached. Not attempting to reconnect further.');
+              await upsertChannelStatus('default', {
+                  lastError: { message: 'Max retries reached.', ts: new Date().toISOString() }
+              });
             }
-            await upsertChannelStatus('default', {
-              status: 'DISCONNECTED',
-              qr: null,
-              qrDataUrl: null,
-              lastError: errorMessage,
-            });
-            console.log('[BAILEYS] DISCONNECTED persisted');
-          } catch (e) {
-            console.error('[BAILEYS] failed to persist DISCONNECTED', e);
+          } else {
+             logger.info('Not reconnecting, reason: logged out.');
+             retryCount = 0; // Reset on clean logout
           }
         }
       });
@@ -299,7 +361,7 @@ async function startOrRestartBaileys(reason = 'manual') {
       status: 'DISCONNECTED',
       qr: null,
       qrDataUrl: null,
-      lastError: `START_ERROR: ${String(err?.message || err)}`,
+      lastError: { message: `START_ERROR: ${String(err?.message || err)}`, ts: new Date().toISOString() },
     });
   }
 }
