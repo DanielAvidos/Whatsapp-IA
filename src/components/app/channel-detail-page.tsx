@@ -1,43 +1,36 @@
 "use client";
 
 import { useState, useEffect } from 'react';
-import { Loader2, RefreshCw, ScanQrCode, LogOut, RotateCcw } from 'lucide-react';
-import { useFirestore, useUser } from '@/firebase';
+import { Loader2, ScanQrCode, LogOut, RotateCcw } from 'lucide-react';
+import { useFirestore, useDoc, useMemoFirebase } from '@/firebase';
+import { doc } from 'firebase/firestore';
 import { PageHeader } from '@/components/app/page-header';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { useLanguage } from '@/context/language-provider';
 import type { WhatsappChannel } from '@/lib/types';
-import { subscribeToDefaultChannel } from '@/lib/firestore/channels';
 import { StatusBadge } from '@/components/app/status-badge';
 import { QrCodeDialog } from '@/components/app/qr-code-dialog';
 import { Skeleton } from '@/components/ui/skeleton';
 import { useToast } from '@/hooks/use-toast';
 import { Alert, AlertTitle, AlertDescription } from '@/components/ui/alert';
+import Link from 'next/link';
 
-export function TestsPage() {
+export function ChannelDetailPage({ channelId }: { channelId: string }) {
   const { t } = useLanguage();
   const firestore = useFirestore();
-  const { user } = useUser();
-  const [channel, setChannel] = useState<WhatsappChannel | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
-  const [isQrModalOpen, setQrModalOpen] = useState(false);
   const { toast } = useToast();
+  
+  const channelRef = useMemoFirebase(() => {
+    if (!firestore) return null;
+    return doc(firestore, 'channels', channelId);
+  }, [firestore, channelId]);
+
+  const { data: channel, isLoading } = useDoc<WhatsappChannel>(channelRef);
+
+  const [isQrModalOpen, setQrModalOpen] = useState(false);
 
   const workerUrl = process.env.NEXT_PUBLIC_BAILEYS_WORKER_URL || "https://baileys-worker-701554958520.us-central1.run.app";
-
-  useEffect(() => {
-    if (!firestore || !user) return;
-
-    const unsubscribe = subscribeToDefaultChannel(firestore, (data) => {
-      setChannel(data);
-      if (isLoading) {
-        setIsLoading(false);
-      }
-    });
-
-    return () => unsubscribe();
-  }, [firestore, user, isLoading]);
 
   const handleApiCall = async (endpoint: string, successMessage: string, errorMessage: string) => {
      if (!workerUrl) {
@@ -46,23 +39,16 @@ export function TestsPage() {
     }
     toast({ title: successMessage });
     try {
-        await fetch(`${workerUrl}${endpoint}`, { method: 'POST', mode: 'cors' });
+        await fetch(`${workerUrl}/v1/channels/${channelId}${endpoint}`, { method: 'POST', mode: 'cors' });
         // onSnapshot se encargará de actualizar el estado
     } catch (error) {
         toast({ variant: 'destructive', title: errorMessage, description: String(error) });
     }
   }
 
-  const handleGenerateQr = () => handleApiCall('/v1/channels/default/qr', 'Generando nuevo código QR...', 'Fallo al solicitar el código QR');
-  const handleDisconnect = () => handleApiCall('/v1/channels/default/disconnect', 'Desconectando...', 'Fallo al desconectar');
-  const handleResetSession = () => handleApiCall('/v1/channels/default/resetSession', 'Reseteando sesión...', 'Fallo al resetear la sesión');
-
-
-  const getStatusForBadge = (status: WhatsappChannel['status'] | undefined) => {
-    if (!status) return 'DISCONNECTED';
-    if (status === 'QR') return 'CONNECTING'; // Treat QR state as 'Connecting' for the badge
-    return status;
-  };
+  const handleGenerateQr = () => handleApiCall('/qr', 'Generando nuevo código QR...', 'Fallo al solicitar el código QR');
+  const handleDisconnect = () => handleApiCall('/disconnect', 'Desconectando...', 'Fallo al desconectar');
+  const handleResetSession = () => handleApiCall('/resetSession', 'Reseteando sesión...', 'Fallo al resetear la sesión');
 
   const renderError = (error: any) => {
     if (!error) return null;
@@ -73,13 +59,23 @@ export function TestsPage() {
     return 'Se produjo un error desconocido.';
   };
 
+  const getStatusForBadge = (status: WhatsappChannel['status'] | undefined) => {
+    if (!status) return 'DISCONNECTED';
+    if (status === 'QR') return 'CONNECTING'; // Treat QR state as 'Connecting' for the badge
+    return status;
+  };
+  
   return (
     <>
       <main className="container mx-auto p-4 md:p-6 lg:p-8">
         <PageHeader
-          title={t('linked.device')}
+          title={channel?.displayName || 'Loading...'}
           description={t('manage.connection')}
-        />
+        >
+          <Button variant="outline" asChild>
+            <Link href="/channels">Back to Channels</Link>
+          </Button>
+        </PageHeader>
         
         {!workerUrl && (
             <Alert variant="destructive" className="mb-4">
