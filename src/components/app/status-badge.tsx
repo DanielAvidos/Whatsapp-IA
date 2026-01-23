@@ -1,7 +1,7 @@
 import { cn } from "@/lib/utils";
 import { Badge, type BadgeProps } from "@/components/ui/badge";
 
-type Status = 'active' | 'suspended' | 'invited' | 'disabled' | 'CONNECTED' | 'DISCONNECTED' | 'CONNECTING';
+type Status = 'active' | 'suspended' | 'invited' | 'disabled' | 'CONNECTED' | 'DISCONNECTED' | 'CONNECTING' | 'ERROR';
 
 const statusMap: Record<Status, { text: string; className: string }> = {
   active: { text: 'Active', className: 'bg-green-100 text-green-800 border-green-200 dark:bg-green-900/50 dark:text-green-300 dark:border-green-800' },
@@ -11,11 +11,23 @@ const statusMap: Record<Status, { text: string; className: string }> = {
   CONNECTED: { text: 'Connected', className: 'bg-green-100 text-green-800 border-green-200 dark:bg-green-900/50 dark:text-green-300 dark:border-green-800' },
   DISCONNECTED: { text: 'Disconnected', className: 'bg-red-100 text-red-800 border-red-200 dark:bg-red-900/50 dark:text-red-300 dark:border-red-800' },
   CONNECTING: { text: 'Connecting', className: 'bg-yellow-100 text-yellow-800 border-yellow-200 dark:bg-yellow-900/50 dark:text-yellow-300 dark:border-yellow-800' },
+  ERROR: { text: 'Error', className: 'bg-red-100 text-red-800 border-red-200 dark:bg-red-900/50 dark:text-red-300 dark:border-red-800' },
 };
 
 
-export function StatusBadge({ status, ...props }: BadgeProps & { status: Status }) {
-  const { text, className } = statusMap[status];
+export function StatusBadge({ status, ...props }: BadgeProps & { status: string }) {
+  const statusInfo = statusMap[status as Status];
+
+  if (!statusInfo) {
+    const defaultStyle = 'bg-stone-100 text-stone-800 border-stone-200 dark:bg-stone-800/50 dark:text-stone-300 dark:border-stone-700';
+    return (
+      <Badge variant="outline" className={cn("font-medium capitalize", defaultStyle)} {...props}>
+        {status}
+      </Badge>
+    );
+  }
+
+  const { text, className } = statusInfo;
 
   return (
     <Badge variant="outline" className={cn("font-medium", className)} {...props}>
