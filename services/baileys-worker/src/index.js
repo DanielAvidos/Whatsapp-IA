@@ -60,6 +60,55 @@ let sock = null;
 let starting = false;
 let lastDisconnectError = null;
 let lastConnectionState = {};
+let heartbeatTimer = null;
+let connectedAtMs = null;
+
+function getRuntimeStatus() {
+  const connection = lastConnectionState?.connection || null;
+  const isConnected = connection === 'open' && !!sock;
+  const me = sock?.user ? sock.user : null;
+
+  return {
+    isConnected,
+    connection,
+    hasSock: !!sock,
+    starting,
+    me,
+    connectedAt: connectedAtMs ? new Date(connectedAtMs).toISOString() : null,
+    now: new Date().toISOString(),
+    lastDisconnect: lastDisconnectError || null,
+  };
+}
+
+async function startHeartbeat(channelId) {
+  stopHeartbeat();
+  heartbeatTimer = setInterval(async () => {
+    try {
+      // Mantén vivo “lastSeenAt” para UI (sin spamear demasiadas cosas)
+      await upsertChannelStatus(channelId, {
+        lastSeenAt: FieldValue.serverTimestamp(),
+        // refleja runtime (mínimo)
+        runtime: {
+          connection: lastConnectionState?.connection || null,
+          hasSock: !!sock,
+        }
+      });
+    } catch (e) {
+      console.error('[HEARTBEAT] failed', e?.message || e);
+    }
+  }, 15000);
+
+  console.log('[HEARTBEAT] started');
+}
+
+function stopHeartbeat() {
+  if (heartbeatTimer) {
+    clearInterval(heartbeatTimer);
+    heartbeatTimer = null;
+    connectedAtMs = null;
+    console.log('[HEARTBEAT] stopped');
+  }
+}
 
 async function upsertChannelStatus(channelId, patch) {
     const ref = db.collection('channels').doc(channelId);
@@ -302,11 +351,20 @@ app.get('/debug/config', (req, res) => {
     });
 });
 
+app.get('/debug/runtime', (_req, res) => {
+  res.json({ ok: true, runtime: getRuntimeStatus() });
+});
+
 
 app.get('/v1/channels/default/status', async (_req, res) => {
   try {
     const snap = await channelDocRef.get();
-    res.json(snap.exists ? snap.data() : null);
+    const data = snap.exists ? snap.data() : null;
+
+    res.json({
+      ...(data || {}),
+      runtime: getRuntimeStatus(),
+    });
   } catch (e) {
      logger.error(e, 'Failed to get status');
      res.status(500).json({ ok: false, error: String(e?.message || e) });
@@ -321,6 +379,7 @@ app.post('/v1/channels/default/qr', async (_req, res) => {
 
 app.post('/v1/channels/default/disconnect', async (_req, res) => {
   logger.info('Received API request to disconnect.');
+  stopHeartbeat();
   if (sock) {
     try { await sock.logout(); } catch (e) { logger.warn(e, 'logout failed'); }
     try { sock.end?.(); } catch (_) {}
@@ -333,6 +392,7 @@ app.post('/v1/channels/default/disconnect', async (_req, res) => {
 
 app.post('/v1/channels/default/resetSession', async (_req, res) => {
     logger.info('Received API request to reset session.');
+    stopHeartbeat();
     if (sock) {
         try { await sock.logout(); } catch (e) { logger.warn(e, 'logout during reset failed'); }
         try { sock.end?.(); } catch (_) {}
@@ -377,8 +437,8 @@ app.post('/v1/channels/default/messages/send', async (req, res) => {
 
     const result = await sock.sendMessage(jid, { text: String(text) });
 
-    const messageId = result && result.key && result.key.id ? result.key.id : null;
-    const conversationId = result && result.key && result.key.remoteJid ? result.key.remoteJid : jid;
+    const messageId = result?.key?.id || null;
+    const conversationId = result?.key?.remoteJid || jid;
 
     if (messageId) {
       await persistOutgoingMessage({
@@ -391,7 +451,7 @@ app.post('/v1/channels/default/messages/send', async (req, res) => {
 
     return res.json({ ok: true, result });
   } catch (e) {
-    console.error('[API][SEND] error', e && e.stack ? e.stack : e);
+    console.error('[API][SEND] error', e?.stack || e);
     return res.status(500).json({ ok: false, error: String((e && e.message) ? e.message : e) });
   }
 });
@@ -488,23 +548,33 @@ async function startOrRestartBaileys(reason = 'manual') {
         }
       
         if (connection === 'open') {
-          retryCount = 0; // Reset retry counter on successful connection
+          retryCount = 0;
+          connectedAtMs = Date.now();
+        
           try {
             const phoneId = sock?.user?.id?.split(':')?.[0] || null;
             await upsertChannelStatus('default', {
               status: 'CONNECTED',
+              linked: true,
               qr: null,
               qrDataUrl: null,
               lastError: null,
               phoneE164: phoneId ? `+${phoneId}` : null,
+              me: sock?.user || null,
+              connectedAt: FieldValue.serverTimestamp(),
+              lastSeenAt: FieldValue.serverTimestamp(),
             });
             console.log('[BAILEYS] CONNECTED');
           } catch (e) {
             console.error('[BAILEYS] failed to persist CONNECTED', e);
           }
+        
+          // NUEVO: heartbeat
+          startHeartbeat('default');
         }
       
         if (connection === 'close') {
+          stopHeartbeat();
           lastDisconnectError = err ? {
               message: err?.message,
               name: err?.name,
@@ -524,6 +594,7 @@ async function startOrRestartBaileys(reason = 'manual') {
             qr: null,
             qrDataUrl: null,
             lastError: lastDisconnectError,
+            linked: false,
           });
           console.log('[BAILEYS] DISCONNECTED persisted');
 
