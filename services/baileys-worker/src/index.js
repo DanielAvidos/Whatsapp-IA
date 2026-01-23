@@ -69,6 +69,144 @@ async function upsertChannelStatus(channelId, patch) {
     }, { merge: true });
 }
 
+function getMessageType(message) {
+  if (!message) return 'unknown';
+  if (message.conversation || message.extendedTextMessage) return 'text';
+  if (message.imageMessage) return 'image';
+  if (message.videoMessage) return 'video';
+  if (message.documentMessage) return 'document';
+  if (message.audioMessage) return 'audio';
+  if (message.stickerMessage) return 'sticker';
+  return 'unknown';
+}
+
+function getMessageText(message) {
+  if (!message) return null;
+  if (message.conversation) return message.conversation;
+  if (message.extendedTextMessage && message.extendedTextMessage.text) return message.extendedTextMessage.text;
+  return null;
+}
+
+function channelConversationsRef(channelId) {
+  return db.collection('channels').doc(channelId).collection('conversations');
+}
+
+function conversationMessagesRef(channelId, conversationId) {
+  return channelConversationsRef(channelId).doc(conversationId).collection('messages');
+}
+
+async function persistIncomingMessage({ channelId, msg }) {
+  const key = msg && msg.key ? msg.key : null;
+  const messageId = key && key.id ? key.id : null;
+  const conversationId = key && key.remoteJid ? key.remoteJid : null;
+  if (!messageId || !conversationId) return;
+
+  // Ignorar status broadcast
+  if (conversationId === 'status@broadcast') return;
+
+  const type = getMessageType(msg.message);
+  const text = getMessageText(msg.message);
+
+  // En grupos viene participant; en 1:1 no
+  const from = (key.participant || conversationId);
+  const to = conversationId;
+
+  const messageRef = conversationMessagesRef(channelId, conversationId).doc(messageId);
+
+  await messageRef.set({
+    messageId,
+    channelId,
+    conversationId,
+    direction: 'in',
+    from,
+    to,
+    pushName: msg.pushName || null,
+    type,
+    text: text || null,
+    status: 'received',
+    waTimestamp: typeof msg.messageTimestamp === 'number' ? msg.messageTimestamp : null,
+    createdAt: FieldValue.serverTimestamp(),
+    updatedAt: FieldValue.serverTimestamp(),
+  }, { merge: true });
+
+  // “head” de conversación para UI (orden y preview)
+  const convoRef = channelConversationsRef(channelId).doc(conversationId);
+  await convoRef.set({
+    channelId,
+    conversationId,
+    updatedAt: FieldValue.serverTimestamp(),
+    lastMessage: {
+      messageId,
+      direction: 'in',
+      type,
+      text: (text ? String(text).slice(0, 500) : null),
+    }
+  }, { merge: true });
+
+  console.log('[MSG][IN] saved', { channelId, conversationId, messageId, type });
+}
+
+async function persistOutgoingMessage({ channelId, conversationId, messageId, text }) {
+  if (!channelId || !conversationId || !messageId) return;
+
+  const messageRef = conversationMessagesRef(channelId, conversationId).doc(messageId);
+  await messageRef.set({
+    messageId,
+    channelId,
+    conversationId,
+    direction: 'out',
+    from: 'me',
+    to: conversationId,
+    pushName: null,
+    type: 'text',
+    text: text || null,
+    status: 'sent',
+    createdAt: FieldValue.serverTimestamp(),
+    updatedAt: FieldValue.serverTimestamp(),
+  }, { merge: true });
+
+  const convoRef = channelConversationsRef(channelId).doc(conversationId);
+  await convoRef.set({
+    channelId,
+    conversationId,
+    updatedAt: FieldValue.serverTimestamp(),
+    lastMessage: {
+      messageId,
+      direction: 'out',
+      type: 'text',
+      text: (text ? String(text).slice(0, 500) : null),
+    }
+  }, { merge: true });
+
+  console.log('[MSG][OUT] saved', { channelId, conversationId, messageId });
+}
+
+function registerMessageListeners(sockInstance, channelId) {
+  // Entrantes
+  sockInstance.ev.on('messages.upsert', async (upsert) => {
+    try {
+      if (!upsert || !Array.isArray(upsert.messages) || upsert.messages.length === 0) return;
+
+      for (const msg of upsert.messages) {
+        // Ignorar mensajes enviados por este mismo WA Web
+        if (msg && msg.key && msg.key.fromMe) continue;
+
+        await persistIncomingMessage({ channelId, msg });
+      }
+    } catch (e) {
+      console.error('[MSG][IN] upsert error', e && e.stack ? e.stack : e);
+    }
+  });
+
+  // (Fase siguiente) Estados delivered/read si se requiere
+  sockInstance.ev.on('messages.update', async (updates) => {
+    // No-op por ahora. Solo dejamos el hook para futura UI.
+    // console.log('[MSG][UPDATE]', updates);
+  });
+
+  console.log('[BOOT] Message listeners registered for channel', channelId);
+}
+
 app.get('/health', (_req, res) => res.status(200).send('ok'));
 
 app.get('/debug', (req, res) => {
@@ -223,6 +361,41 @@ app.post('/v1/channels/default/resetSession', async (_req, res) => {
     res.json({ ok: true, message: 'Session reset successfully.' });
 });
 
+app.post('/v1/channels/default/messages/send', async (req, res) => {
+  try {
+    const { to, text } = req.body || {};
+    if (!to || !text) {
+      return res.status(400).json({ ok: false, error: 'to y text son requeridos' });
+    }
+
+    if (!sock) {
+      return res.status(409).json({ ok: false, error: 'Baileys no está listo (sock=null). Conecta primero.' });
+    }
+
+    // Normalizar JID: si no incluye @, asumimos s.whatsapp.net (1:1)
+    const jid = String(to).includes('@') ? String(to) : `${String(to)}@s.whatsapp.net`;
+
+    const result = await sock.sendMessage(jid, { text: String(text) });
+
+    const messageId = result && result.key && result.key.id ? result.key.id : null;
+    const conversationId = result && result.key && result.key.remoteJid ? result.key.remoteJid : jid;
+
+    if (messageId) {
+      await persistOutgoingMessage({
+        channelId: 'default',
+        conversationId,
+        messageId,
+        text: String(text),
+      });
+    }
+
+    return res.json({ ok: true, result });
+  } catch (e) {
+    console.error('[API][SEND] error', e && e.stack ? e.stack : e);
+    return res.status(500).json({ ok: false, error: String((e && e.message) ? e.message : e) });
+  }
+});
+
 console.log('[BOOT] about to listen on PORT=', PORT);
 app.listen(PORT, () => {
   console.log('[BOOT] HTTP server listening on', PORT);
@@ -272,6 +445,9 @@ async function startOrRestartBaileys(reason = 'manual') {
     });
 
     sock.ev.on('creds.update', saveCreds);
+
+    // NUEVO: listeners para mensajes
+    registerMessageListeners(sock, 'default');
 
     sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update || {};
@@ -387,3 +563,5 @@ async function startOrRestartBaileys(reason = 'manual') {
     });
   }
 }
+
+    
