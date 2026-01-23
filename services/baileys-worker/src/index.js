@@ -52,7 +52,7 @@ const useFirestoreAuthState = async (channelId) => {
     const readData = async (id) => {
         const docRef = authCollection.doc(id.replace(/\//g, '__'));
         const docSnap = await docRef.get();
-        return docSnap.exists() ? docSnap.data() : null;
+        return docSnap.exists ? docSnap.data() : null;
     };
 
     const removeData = async (id) => {
