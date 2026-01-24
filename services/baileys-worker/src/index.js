@@ -27,13 +27,21 @@ if (dns.setDefaultResultOrder) {
 }
 process.env.NODE_OPTIONS = (process.env.NODE_OPTIONS || '') + ' --dns-result-order=ipv4first';
 
-console.log('[BOOT] baileys-worker starting...', new Date().toISOString());
+console.log('[BOOT] baileys-worker starting...', {
+    revision: process.env.K_REVISION || 'unknown',
+    timestamp: new Date().toISOString()
+});
 // --- FIREBASE ADMIN ---
 initializeApp();
 const db = getFirestore();
 
 const logger = pino({ level: process.env.LOG_LEVEL || 'debug' });
-logger.info({ service: 'baileys-worker', version: 'firestore-auth-multi-channel', baileysVersion }, 'Booting service');
+logger.info({ 
+    service: 'baileys-worker', 
+    version: 'firestore-auth-multi-channel', 
+    baileysVersion,
+    revision: process.env.K_REVISION || 'unknown',
+}, 'Booting service');
 
 // --- GLOBAL STATE ---
 const activeSockets = new Map(); // <channelId, WASocket>
@@ -392,7 +400,7 @@ app.post('/v1/channels/:channelId/qr', async (req, res) => {
   if (sock || isStarting) {
       logger.warn({ channelId, hasSock: !!sock, isStarting }, 'QR requested but a process is already active. No-op.');
       const snap = await db.collection('channels').doc(channelId).get();
-      return res.status(200).json({ ok: true, message: 'Process already active', status: snap.data() });
+      return res.status(200).json({ ok: true, message: 'Process already active', status: snap.exists ? snap.data() : null });
   }
   
   startOrRestartBaileys(channelId);
