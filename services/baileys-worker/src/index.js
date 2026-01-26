@@ -216,11 +216,58 @@ async function startOrRestartBaileys(channelId) {
       if (connection === 'close') {
         const err = lastDisconnect?.error;
         const statusCode = err instanceof Boom ? err.output.statusCode : 500;
-        const msg = err?.message || '';
+        const msg = String(err?.message || '');
         const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
 
         logger.warn({ channelId, statusCode, shouldReconnect, message: msg }, 'Connection closed');
 
+        // limpiar socket activo siempre
+        activeSockets.delete(channelId);
+
+        // Clasificar causas típicas
+        const isQrAttemptsEnded =
+          statusCode === 408 && msg.toLowerCase().includes('qr') && msg.toLowerCase().includes('attempts');
+
+        const isUnsupportedState =
+          msg.toLowerCase().includes('unsupported state') ||
+          msg.toLowerCase().includes('authenticate data');
+
+        const isTerminated428 =
+          statusCode === 428 || msg.toLowerCase().includes('connection terminated');
+
+        // 1) QR se agotó: NO reconectar en loop; esperar acción del usuario
+        if (isQrAttemptsEnded) {
+          logger.warn({ channelId, statusCode, msg }, 'QR attempts ended -> stopping auto-reconnect, clearing auth');
+          await resetFirestoreAuthState(channelId);
+
+          await upsertChannelStatus(channelId, {
+            status: 'QR_EXPIRED',
+            linked: false,
+            qr: null,
+            qrDataUrl: null,
+            lastError: { message: msg, statusCode },
+          });
+
+          return; // CLAVE: cortar aquí, NO auto-reconnect
+        }
+
+        // 2) Auth corrupto / terminated: limpiar auth y parar
+        if (isUnsupportedState || isTerminated428) {
+          logger.warn({ channelId, statusCode, msg }, 'Auth/termination issue -> clearing auth and stopping auto-reconnect');
+          await resetFirestoreAuthState(channelId);
+
+          await upsertChannelStatus(channelId, {
+            status: 'ERROR',
+            linked: false,
+            qr: null,
+            qrDataUrl: null,
+            lastError: { message: msg, statusCode },
+          });
+
+          return; // CLAVE: cortar aquí, NO auto-reconnect
+        }
+
+        // Estado normal de disconnected
         await upsertChannelStatus(channelId, {
           status: 'DISCONNECTED',
           linked: false,
@@ -233,33 +280,27 @@ async function startOrRestartBaileys(channelId) {
           } : null,
         });
 
-        activeSockets.delete(channelId);
-
-        // ✅ Casos que indican auth state corrupto / QR agotado: limpiar auth para permitir QR limpio
-        const isQrAttemptsEnded = statusCode === 408 && msg.includes('QR');
-        const isUnsupportedState = msg.includes('Unsupported state') || msg.includes('authenticate data');
-        if (isQrAttemptsEnded || isUnsupportedState) {
-          logger.warn({ channelId, statusCode, msg }, 'Clearing auth state due to QR/auth error');
-          await resetFirestoreAuthState(channelId);
-        }
-
-        if (shouldReconnect) {
-          const currentRetry = retryCounts.get(channelId) || 0;
-          if (currentRetry < MAX_RETRY) {
-            const delay = (RETRY_DELAY_MS[currentRetry] || 60000) + Math.floor(Math.random() * 1000);
-            retryCounts.set(channelId, currentRetry + 1);
-            logger.info({ channelId, delay, attempt: currentRetry + 1 }, 'Scheduling reconnect');
-            scheduleRestart(channelId, delay);
-          } else {
-            logger.error({ channelId }, 'Max retries reached');
-            await upsertChannelStatus(channelId, {
-              status: 'ERROR',
-              lastError: { message: 'Max retries reached.' }
-            });
-          }
-        } else {
+        // 3) Si fue loggedOut, limpiar auth y parar
+        if (!shouldReconnect) {
           logger.info({ channelId }, 'Not reconnecting (logged out). Clearing auth state.');
           await resetFirestoreAuthState(channelId);
+          return;
+        }
+
+        // 4) Reconexión controlada (solo cierres “normales”)
+        let currentRetry = retryCounts.get(channelId) || 0;
+        if (currentRetry < MAX_RETRY) {
+          const delay = (RETRY_DELAY_MS[currentRetry] || 60000) + Math.floor(Math.random() * 1000);
+          retryCounts.set(channelId, currentRetry + 1);
+
+          logger.info({ channelId, delay, attempt: currentRetry + 1 }, 'Reconnecting (scheduled)...');
+          setTimeout(() => startOrRestartBaileys(channelId), delay);
+        } else {
+          logger.error({ channelId }, 'Max retries reached.');
+          await upsertChannelStatus(channelId, {
+            status: 'ERROR',
+            lastError: { message: 'Max retries reached.' }
+          });
         }
       }
     });
