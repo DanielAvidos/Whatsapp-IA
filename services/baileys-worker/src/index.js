@@ -42,7 +42,6 @@ logger.info({
     baileysVersion,
     revision: process.env.K_REVISION || 'unknown',
 }, 'Booting service');
-
 // --- GLOBAL STATE ---
 const activeSockets = new Map(); // <channelId, WASocket>
 const startingChannels = new Set(); // <channelId> is being started
