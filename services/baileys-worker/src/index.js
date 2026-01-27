@@ -151,7 +151,7 @@ async function startOrRestartBaileys(channelId) {
   logger.info({ channelId }, 'Starting Baileys...');
   await upsertChannelStatus(channelId, {
     status: 'CONNECTING',
-    qr: null,
+    qr: { raw: null, public: null },
     qrDataUrl: null,
     lastError: null,
     linked: false,
@@ -195,7 +195,10 @@ async function startOrRestartBaileys(channelId) {
           const qrDataUrl = await qrcode.toDataURL(qr);
           await upsertChannelStatus(channelId, {
             status: 'QR',
-            qr,
+            qr: {
+              raw: qr,
+              public: qrDataUrl
+            },
             qrDataUrl,
             lastQrAt: FieldValue.serverTimestamp(),
           });
@@ -214,7 +217,7 @@ async function startOrRestartBaileys(channelId) {
         await upsertChannelStatus(channelId, {
           status: 'CONNECTED',
           linked: true,
-          qr: null,
+          qr: { raw: null, public: null },
           qrDataUrl: null,
           lastError: null,
           phoneE164: phoneId ? `+${phoneId}` : null,
@@ -256,7 +259,7 @@ async function startOrRestartBaileys(channelId) {
           await upsertChannelStatus(channelId, {
             status: 'QR_EXPIRED',
             linked: false,
-            qr: null,
+            qr: { raw: null, public: null },
             qrDataUrl: null,
             lastError: { message: msg, statusCode },
           });
@@ -272,7 +275,7 @@ async function startOrRestartBaileys(channelId) {
           await upsertChannelStatus(channelId, {
             status: 'ERROR',
             linked: false,
-            qr: null,
+            qr: { raw: null, public: null },
             qrDataUrl: null,
             lastError: { message: msg, statusCode },
           });
@@ -284,7 +287,7 @@ async function startOrRestartBaileys(channelId) {
         await upsertChannelStatus(channelId, {
           status: 'DISCONNECTED',
           linked: false,
-          qr: null,
+          qr: { raw: null, public: null },
           qrDataUrl: null,
           lastError: err ? {
             message: err.message,
@@ -528,7 +531,7 @@ app.post('/v1/channels/:channelId/resetSession', async (req, res) => {
   await upsertChannelStatus(channelId, {
     status: 'DISCONNECTED',
     linked: false,
-    qr: null,
+    qr: { raw: null, public: null },
     qrDataUrl: null,
     phoneE164: null,
     lastError: null,
