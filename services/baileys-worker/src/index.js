@@ -195,10 +195,7 @@ async function startOrRestartBaileys(channelId) {
           const qrDataUrl = await qrcode.toDataURL(qr);
           await upsertChannelStatus(channelId, {
             status: 'QR',
-            qr: {
-              raw: qr,
-              public: qrDataUrl
-            },
+            qr: { raw: qr, public: qrDataUrl },
             qrDataUrl,
             lastQrAt: FieldValue.serverTimestamp(),
           });
@@ -461,13 +458,35 @@ app.post('/v1/channels', async (req, res) => {
 });
 
 app.get('/v1/channels/:channelId/status', async (req, res) => {
-  const { channelId } = req.params;
   try {
+    const { channelId } = req.params;
     const snap = await db.collection('channels').doc(channelId).get();
-    res.json(snap.exists ? { id: snap.id, ...snap.data() } : null);
+    if (!snap.exists) return res.json(null);
+
+    const data = snap.data() || {};
+
+    // Normalización defensiva: NUNCA devolver qr null/undefined
+    const qrDataUrl = data.qrDataUrl ?? null;
+
+    let raw = null;
+    if (typeof data.qr === 'string') raw = data.qr;
+    if (data.qr && typeof data.qr === 'object') raw = data.qr.raw ?? null;
+
+    const normalized = {
+      id: snap.id,
+      ...data,
+      qr: {
+        raw,
+        public: (data.qr && typeof data.qr === 'object' && 'public' in data.qr) ? (data.qr.public ?? qrDataUrl) : qrDataUrl,
+      },
+      // Campo extra por compatibilidad si el front lo usa de otra forma:
+      imageSource: { public: qrDataUrl },
+    };
+
+    return res.json(normalized);
   } catch (e) {
-    logger.error({ error: e?.stack || e, channelId }, 'Failed to get status for channel');
-    res.status(500).json({ ok: false, error: 'Failed to get channel status' });
+    logger.error(e, 'Failed to get status for channel', req.params.channelId);
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 });
 
@@ -547,5 +566,7 @@ app.post('/v1/channels/:channelId/resetSession', async (req, res) => {
 app.listen(PORT, () => {
   logger.info({ port: PORT }, 'HTTP server listening');
 });
+
+    
 
     
