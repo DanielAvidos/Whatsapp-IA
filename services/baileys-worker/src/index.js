@@ -1,5 +1,5 @@
 
-const { default: makeWASocket, DisconnectReason, Browsers, initAuthCreds, BufferJSON } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, DisconnectReason, Browsers, initAuthCreds, BufferJSON, proto } = require('@whiskeysockets/baileys');
 const { initializeApp } = require('firebase-admin/app');
 const { getFirestore, FieldValue } = require('firebase-admin/firestore');
 const express = require('express');
@@ -48,29 +48,27 @@ const activeSockets = new Map();      // <channelId, WASocket>
 const startingChannels = new Set();   // <channelId> is being started
 const retryCounts = new Map();        // <channelId, number>
 
-// --- FIRESTORE AUTH STATE ---
+// --- FIRESTORE AUTH STATE (FIXED: initAuthCreds + BufferJSON) ---
 const useFirestoreAuthState = async (channelId) => {
   const authCollection = db.collection('channels').doc(channelId).collection('auth');
+
   const sanitizeId = (id) => id.replace(/\//g, '__');
 
-  // Guardamos TODO como string para evitar que Firestore altere Buffers/Bytes
   const writeData = async (data, id) => {
     const docRef = authCollection.doc(sanitizeId(id));
-    const json = JSON.stringify(data, BufferJSON.replacer);
-    await docRef.set({ v: json });
+    // IMPORTANT: serialize with BufferJSON to preserve Buffers/Keys
+    const json = JSON.parse(JSON.stringify(data, BufferJSON.replacer));
+    await docRef.set(json);
   };
 
   const readData = async (id) => {
     const docRef = authCollection.doc(sanitizeId(id));
-    const snap = await docRef.get();
-    if (!snap.exists) return null;
-    const json = snap.data()?.v;
-    if (!json || typeof json !== 'string') return null;
-    try {
-      return JSON.parse(json, BufferJSON.reviver);
-    } catch {
-      return null;
-    }
+    const docSnap = await docRef.get();
+    if (!docSnap.exists) return null;
+
+    // IMPORTANT: revive with BufferJSON to restore Buffers
+    const data = docSnap.data();
+    return JSON.parse(JSON.stringify(data), BufferJSON.reviver);
   };
 
   const removeData = async (id) => {
@@ -78,18 +76,23 @@ const useFirestoreAuthState = async (channelId) => {
     await docRef.delete();
   };
 
-  const creds = (await readData('creds')) || initAuthCreds();
+  // ✅ CRITICAL FIX:
+  // If creds don't exist yet, must use initAuthCreds() (NOT {})
+  const storedCreds = await readData('creds');
+  const creds = storedCreds || initAuthCreds();
 
   const state = {
     creds,
     keys: {
       get: async (type, ids) => {
-        const out = {};
-        await Promise.all(ids.map(async (id) => {
-          const value = await readData(`${type}-${id}`);
-          if (value) out[id] = value;
-        }));
-        return out;
+        const data = {};
+        await Promise.all(
+          ids.map(async (id) => {
+            const value = await readData(`${type}-${id}`);
+            if (value) data[id] = value;
+          })
+        );
+        return data;
       },
       set: async (data) => {
         const tasks = [];
@@ -101,16 +104,15 @@ const useFirestoreAuthState = async (channelId) => {
           }
         }
         await Promise.all(tasks);
-      }
-    }
+      },
+    },
   };
 
-  // IMPORTANTE: guardar el objeto real que Baileys muta
-  const saveCreds = async () => {
-    await writeData(state.creds, 'creds');
+  return {
+    state,
+    // ✅ IMPORTANT: write the *current* creds (mutated by Baileys), not a stale ref
+    saveCreds: async () => writeData(state.creds, 'creds'),
   };
-
-  return { state, saveCreds };
 };
 
 async function resetFirestoreAuthState(channelId) {
