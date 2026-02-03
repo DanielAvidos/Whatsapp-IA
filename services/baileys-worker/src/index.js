@@ -1,5 +1,5 @@
 
-const { default: makeWASocket, DisconnectReason, Browsers } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, DisconnectReason, Browsers, initAuthCreds, BufferJSON } = require('@whiskeysockets/baileys');
 const { initializeApp } = require('firebase-admin/app');
 const { getFirestore, FieldValue } = require('firebase-admin/firestore');
 const express = require('express');
@@ -51,54 +51,66 @@ const retryCounts = new Map();        // <channelId, number>
 // --- FIRESTORE AUTH STATE ---
 const useFirestoreAuthState = async (channelId) => {
   const authCollection = db.collection('channels').doc(channelId).collection('auth');
+  const sanitizeId = (id) => id.replace(/\//g, '__');
 
-  const writeData = (data, id) => {
-    const docRef = authCollection.doc(id.replace(/\//g, '__'));
-    return docRef.set(JSON.parse(JSON.stringify(data)));
+  // Guardamos TODO como string para evitar que Firestore altere Buffers/Bytes
+  const writeData = async (data, id) => {
+    const docRef = authCollection.doc(sanitizeId(id));
+    const json = JSON.stringify(data, BufferJSON.replacer);
+    await docRef.set({ v: json });
   };
 
   const readData = async (id) => {
-    const docRef = authCollection.doc(id.replace(/\//g, '__'));
-    const docSnap = await docRef.get();
-    return docSnap.exists ? docSnap.data() : null;
+    const docRef = authCollection.doc(sanitizeId(id));
+    const snap = await docRef.get();
+    if (!snap.exists) return null;
+    const json = snap.data()?.v;
+    if (!json || typeof json !== 'string') return null;
+    try {
+      return JSON.parse(json, BufferJSON.reviver);
+    } catch {
+      return null;
+    }
   };
 
   const removeData = async (id) => {
-    const docRef = authCollection.doc(id.replace(/\//g, '__'));
-    return docRef.delete();
+    const docRef = authCollection.doc(sanitizeId(id));
+    await docRef.delete();
   };
 
-  const creds = await readData('creds') || {};
+  const creds = (await readData('creds')) || initAuthCreds();
 
-  return {
-    state: {
-      creds,
-      keys: {
-        get: async (type, ids) => {
-          const data = {};
-          await Promise.all(
-            ids.map(async (id) => {
-              const value = await readData(`${type}-${id}`);
-              if (value) data[id] = value;
-            })
-          );
-          return data;
-        },
-        set: async (data) => {
-          const tasks = [];
-          for (const category in data) {
-            for (const id in data[category]) {
-              const value = data[category][id];
-              const file = `${category}-${id}`;
-              tasks.push(value ? writeData(value, file) : removeData(file));
-            }
+  const state = {
+    creds,
+    keys: {
+      get: async (type, ids) => {
+        const out = {};
+        await Promise.all(ids.map(async (id) => {
+          const value = await readData(`${type}-${id}`);
+          if (value) out[id] = value;
+        }));
+        return out;
+      },
+      set: async (data) => {
+        const tasks = [];
+        for (const category in data) {
+          for (const id in data[category]) {
+            const value = data[category][id];
+            const key = `${category}-${id}`;
+            tasks.push(value ? writeData(value, key) : removeData(key));
           }
-          await Promise.all(tasks);
         }
+        await Promise.all(tasks);
       }
-    },
-    saveCreds: () => writeData(creds, 'creds'),
+    }
   };
+
+  // IMPORTANTE: guardar el objeto real que Baileys muta
+  const saveCreds = async () => {
+    await writeData(state.creds, 'creds');
+  };
+
+  return { state, saveCreds };
 };
 
 async function resetFirestoreAuthState(channelId) {
@@ -134,12 +146,6 @@ function serializeError(err, extras = {}) {
 // --- BAILEYS CORE ---
 const MAX_RETRY = 5;
 const RETRY_DELAY_MS = [2000, 5000, 10000, 20000, 60000];
-
-function scheduleRestart(channelId, delayMs) {
-  setTimeout(() => {
-    startOrRestartBaileys(channelId);
-  }, delayMs);
-}
 
 async function startOrRestartBaileys(channelId) {
   if (startingChannels.has(channelId)) {
@@ -566,7 +572,3 @@ app.post('/v1/channels/:channelId/resetSession', async (req, res) => {
 app.listen(PORT, () => {
   logger.info({ port: PORT }, 'HTTP server listening');
 });
-
-    
-
-    
