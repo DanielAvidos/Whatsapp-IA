@@ -18,7 +18,6 @@ const qrcode = require('qrcode');
 const { Boom } = require('@hapi/boom');
 const cors = require('cors');
 const dns = require('dns');
-const WebSocket = require('ws');
 
 const { version: baileysVersionFromPkg } = require('@whiskeysockets/baileys/package.json');
 
@@ -46,11 +45,11 @@ console.log('[BOOT] baileys-worker starting...', {
 initializeApp();
 const db = getFirestore();
 
-const logger = pino({ level: process.env.LOG_LEVEL || 'debug' });
+const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
 logger.info(
   {
     service: 'baileys-worker',
-    version: 'firestore-auth-multi-channel',
+    version: 'firestore-auth-multi-channel-messaging',
     baileysVersionFromPkg,
     revision: process.env.K_REVISION || 'unknown',
   },
@@ -58,9 +57,11 @@ logger.info(
 );
 
 // --- GLOBAL STATE ---
-const activeSockets = new Map(); // <channelId, WASocket>
-const startingChannels = new Set(); // <channelId> is being started
-const retryCounts = new Map(); // <channelId, number>
+const activeSockets = new Map();      // <channelId, WASocket>
+const startingChannels = new Set();   // <channelId> is being started
+const retryCounts = new Map();        // <channelId, number>
+const startPromises = new Map();      // <channelId, Promise<void>>
+const channelConnState = new Map();   // <channelId, { connected: boolean, lastSeenAt: number }>
 
 // --- HELPERS ---
 async function upsertChannelStatus(channelId, patch) {
@@ -78,12 +79,12 @@ function emptyQrObject() {
   return { raw: null, public: null };
 }
 
-function normalizeJid(jid) {
-  if (!jid) return jid;
-  if (jid.includes(':')) {
-    return jid.split(':')[0] + '@' + jid.split('@')[1];
+function safeJson(obj) {
+  try {
+    return JSON.parse(JSON.stringify(obj));
+  } catch (e) {
+    return null;
   }
-  return jid;
 }
 
 function extractText(message) {
@@ -95,14 +96,6 @@ function extractText(message) {
                message.videoMessage?.caption || 
                null;
   return text;
-}
-
-function safeJson(obj) {
-  try {
-    return JSON.parse(JSON.stringify(obj));
-  } catch (e) {
-    return null;
-  }
 }
 
 // --- FIRESTORE AUTH STATE (BufferJSON + initAuthCreds) ---
@@ -190,17 +183,42 @@ async function resetFirestoreAuthState(channelId) {
   logger.info({ channelId }, 'Firestore auth state reset.');
 }
 
-// --- BAILEYS CORE ---
-const MAX_RETRY = 5;
-const RETRY_DELAY_MS = [2000, 5000, 10000, 20000, 60000];
+// --- MESSAGES PERSISTENCE ---
+async function saveMessageToFirestore(channelId, jid, messageId, doc) {
+  const convRef = db.collection('channels').doc(channelId).collection('conversations').doc(jid);
+  const msgRef = convRef.collection('messages').doc(messageId);
 
-async function startOrRestartBaileys(channelId) {
+  // message
+  await msgRef.set({
+    ...doc,
+    createdAt: FieldValue.serverTimestamp(),
+  }, { merge: true });
+
+  // conversation upsert
+  const isIn = doc.direction === 'IN';
+  await convRef.set({
+    jid,
+    type: jid.endsWith('@g.us') ? 'group' : 'user',
+    lastMessageText: doc.text || '[media]',
+    lastMessageAt: FieldValue.serverTimestamp(),
+    lastMessageId: messageId,
+    unreadCount: isIn ? FieldValue.increment(1) : FieldValue.increment(0),
+    updatedAt: FieldValue.serverTimestamp(),
+  }, { merge: true });
+}
+
+// --- BAILEYS CORE ---
+const MAX_RETRY = 6;
+const RETRY_DELAY_MS = [2000, 5000, 10000, 20000, 60000, 120000];
+
+async function startOrRestartBaileys(channelId, reason = 'manual') {
   if (startingChannels.has(channelId)) {
-    logger.info({ channelId }, 'Baileys already starting, skipping');
+    logger.info({ channelId, reason }, 'Baileys already starting, skipping');
     return;
   }
   startingChannels.add(channelId);
 
+  logger.info({ channelId, reason }, 'Starting Baileys...');
   await upsertChannelStatus(channelId, {
     status: 'CONNECTING',
     qr: emptyQrObject(),
@@ -211,14 +229,8 @@ async function startOrRestartBaileys(channelId) {
 
   try {
     if (activeSockets.has(channelId)) {
-      logger.info({ channelId }, 'Found existing socket, logging out before restart.');
-      try {
-        await activeSockets.get(channelId).logout();
-      } catch (e) {
-        logger.warn({ channelId, error: String(e?.message || e) }, 'Existing socket logout failed, proceeding.');
-      } finally {
-        activeSockets.delete(channelId);
-      }
+      try { await activeSockets.get(channelId).logout(); } catch {}
+      activeSockets.delete(channelId);
     }
 
     const { state, saveCreds } = await useFirestoreAuthState(channelId);
@@ -243,65 +255,12 @@ async function startOrRestartBaileys(channelId) {
     });
 
     activeSockets.set(channelId, sock);
+    channelConnState.set(channelId, { connected: false, lastSeenAt: Date.now() });
 
     sock.ev.on('creds.update', () => {
       saveCreds().catch((e) => {
         logger.warn({ channelId, error: String(e?.message || e) }, 'saveCreds failed');
       });
-    });
-
-    sock.ev.on('messages.upsert', async (m) => {
-      const { messages, type } = m;
-      if (type !== 'notify' && type !== 'append') return;
-
-      for (const msg of messages) {
-        if (!msg.key?.remoteJid || !msg.key?.id) continue;
-
-        const jid = msg.key.remoteJid;
-        const messageId = msg.key.id;
-        const fromMe = !!msg.key.fromMe;
-        const text = extractText(msg.message);
-        const timestampMs = (msg.messageTimestamp || Math.floor(Date.now() / 1000)) * 1000;
-
-        const conversationRef = db.collection('channels').doc(channelId).collection('conversations').doc(jid);
-        const messageRef = conversationRef.collection('messages').doc(messageId);
-
-        const messageData = {
-          id: messageId,
-          jid,
-          fromMe,
-          direction: fromMe ? 'OUT' : 'IN',
-          text,
-          raw: safeJson(msg),
-          status: fromMe ? 'sent' : 'received',
-          timestamp: timestampMs,
-          createdAt: FieldValue.serverTimestamp(),
-        };
-
-        const conversationPatch = {
-          jid,
-          type: jid.endsWith('@g.us') ? 'group' : 'user',
-          name: msg.pushName || jid.split('@')[0],
-          lastMessageText: text || '[media]',
-          lastMessageAt: FieldValue.serverTimestamp(),
-          lastMessageId: messageId,
-          updatedAt: FieldValue.serverTimestamp(),
-        };
-
-        if (!fromMe) {
-          conversationPatch.unreadCount = FieldValue.increment(1);
-        }
-
-        try {
-          await Promise.allSettled([
-            messageRef.set(messageData, { merge: true }),
-            conversationRef.set(conversationPatch, { merge: true }),
-          ]);
-          logger.info({ channelId, jid, messageId }, '[MSG] persisted');
-        } catch (e) {
-          logger.error({ channelId, jid, messageId, error: String(e?.message || e) }, '[MSG] failed to persist');
-        }
-      }
     });
 
     sock.ev.on('connection.update', async (update) => {
@@ -329,6 +288,7 @@ async function startOrRestartBaileys(channelId) {
 
       if (connection === 'open') {
         retryCounts.set(channelId, 0);
+        channelConnState.set(channelId, { connected: true, lastSeenAt: Date.now() });
         const phoneId = sock?.user?.id?.split(':')?.[0] || null;
         await upsertChannelStatus(channelId, {
           status: 'CONNECTED',
@@ -337,13 +297,15 @@ async function startOrRestartBaileys(channelId) {
           qrDataUrl: null,
           lastError: null,
           phoneE164: phoneId ? `+${phoneId}` : null,
-          me: sock?.user || null,
+          me: safeJson(sock?.user || null),
           connectedAt: FieldValue.serverTimestamp(),
+          lastSeenAt: FieldValue.serverTimestamp(),
         });
         logger.info({ channelId, jid: sock.user?.id }, 'Connection opened');
       }
 
       if (connection === 'close') {
+        channelConnState.set(channelId, { connected: false, lastSeenAt: Date.now() });
         const err = lastDisconnect?.error;
         const statusCode = err instanceof Boom ? err.output.statusCode : 500;
         const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
@@ -361,6 +323,7 @@ async function startOrRestartBaileys(channelId) {
           lastError: err
             ? { message: String(err.message || err), stack: err.stack || null, statusCode }
             : null,
+          lastSeenAt: FieldValue.serverTimestamp(),
         });
 
         activeSockets.delete(channelId);
@@ -372,7 +335,7 @@ async function startOrRestartBaileys(channelId) {
             logger.info({ channelId, delay, attempt: currentRetry + 1 }, 'Reconnecting...');
             await new Promise((r) => setTimeout(r, delay));
             retryCounts.set(channelId, currentRetry + 1);
-            startOrRestartBaileys(channelId);
+            startOrRestartBaileys(channelId, 'auto-reconnect');
           } else {
             logger.error({ channelId }, 'Max retries reached.');
             await upsertChannelStatus(channelId, {
@@ -386,17 +349,72 @@ async function startOrRestartBaileys(channelId) {
         }
       }
     });
+
+    sock.ev.on('messages.upsert', async (m) => {
+      try {
+        const msgs = m?.messages || [];
+        const tasks = msgs.map(async (msg) => {
+          const jid = msg?.key?.remoteJid;
+          const messageId = msg?.key?.id;
+          if (!jid || !messageId) return;
+
+          const fromMe = !!msg?.key?.fromMe;
+          const text = extractText(msg?.message);
+          const tsSec = typeof msg?.messageTimestamp === 'number' ? msg.messageTimestamp : null;
+          const timestampMs = tsSec ? tsSec * 1000 : Date.now();
+
+          await saveMessageToFirestore(channelId, jid, messageId, {
+            messageId,
+            jid,
+            fromMe,
+            direction: fromMe ? 'OUT' : 'IN',
+            text,
+            status: fromMe ? 'sent' : 'received',
+            timestamp: timestampMs,
+            raw: null, 
+          });
+
+          await upsertChannelStatus(channelId, { lastSeenAt: FieldValue.serverTimestamp() });
+        });
+
+        await Promise.allSettled(tasks);
+      } catch (e) {
+        logger.error({ channelId, err: String(e?.message || e) }, 'messages.upsert handler failed');
+      }
+    });
+
+    return sock;
   } catch (err) {
     logger.error({ channelId, error: String(err?.message || err), stack: err?.stack }, 'START_ERROR');
     await upsertChannelStatus(channelId, {
       status: 'ERROR',
       qr: emptyQrObject(),
       qrDataUrl: null,
-      lastError: { message: `START_ERROR: ${String(err?.message || err)}`, stack: err?.stack || null },
+      lastError: { message: `START_ERROR: ${String(err?.message || err)}`, stack: err?.stack || null, statusCode: 500 },
     });
   } finally {
     startingChannels.delete(channelId);
   }
+}
+
+async function ensureSocketReady(channelId, timeoutMs = 25000) {
+  const existing = activeSockets.get(channelId);
+  if (existing && channelConnState.get(channelId)?.connected) return existing;
+
+  if (!startPromises.has(channelId)) {
+    startPromises.set(channelId, (async () => {
+      await startOrRestartBaileys(channelId, 'ensure-socket');
+    })().finally(() => startPromises.delete(channelId)));
+  }
+  await startPromises.get(channelId);
+
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const sock = activeSockets.get(channelId);
+    if (sock && channelConnState.get(channelId)?.connected && sock.user) return sock;
+    await new Promise(r => setTimeout(r, 500));
+  }
+  return null;
 }
 
 // --- EXPRESS APP ---
@@ -406,8 +424,22 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 8080;
 
-// --- DEBUG ENDPOINTS ---
 app.get('/health', (_req, res) => res.status(200).send('ok'));
+
+app.get('/debug/baileys', (_req, res) => {
+  const socketsInfo = Array.from(activeSockets.keys()).map((channelId) => ({
+    channelId,
+    connected: !!channelConnState.get(channelId)?.connected,
+    user: activeSockets.get(channelId)?.user || null,
+  }));
+  res.json({
+    ok: true,
+    activeSocketsCount: activeSockets.size,
+    socketsInfo,
+    startingChannels: Array.from(startingChannels),
+    ts: new Date().toISOString(),
+  });
+});
 
 // --- API V1 ENDPOINTS ---
 app.get('/v1/channels', async (_req, res) => {
@@ -481,7 +513,7 @@ app.post('/v1/channels/:channelId/qr', async (req, res) => {
     });
   }
 
-  startOrRestartBaileys(channelId);
+  startOrRestartBaileys(channelId, 'qr-request');
   res.json({ ok: true, message: 'QR generation process started.' });
 });
 
@@ -497,67 +529,6 @@ app.post('/v1/channels/:channelId/disconnect', async (req, res) => {
     }
   }
   res.json({ ok: true, message: 'Disconnection process initiated.' });
-});
-
-app.post('/v1/channels/:channelId/messages/send', async (req, res) => {
-  const { channelId } = req.params;
-  const { to, text } = req.body;
-
-  if (!to || !text) return res.status(400).json({ error: 'to and text are required' });
-
-  const sock = activeSockets.get(channelId);
-  if (!sock) return res.status(404).json({ error: 'Socket not found for this channel' });
-
-  try {
-    const result = await sock.sendMessage(to, { text });
-    
-    // Baileys doesn't trigger upsert for sent messages in some cases, persist manually
-    const messageId = result.key.id;
-    const conversationRef = db.collection('channels').doc(channelId).collection('conversations').doc(to);
-    const messageRef = conversationRef.collection('messages').doc(messageId);
-
-    const messageData = {
-      id: messageId,
-      jid: to,
-      fromMe: true,
-      direction: 'OUT',
-      text,
-      raw: safeJson(result),
-      status: 'sent',
-      timestamp: Date.now(),
-      createdAt: FieldValue.serverTimestamp(),
-    };
-
-    await Promise.allSettled([
-      messageRef.set(messageData, { merge: true }),
-      conversationRef.set({
-        jid: to,
-        lastMessageText: text,
-        lastMessageAt: FieldValue.serverTimestamp(),
-        lastMessageId: messageId,
-        updatedAt: FieldValue.serverTimestamp(),
-      }, { merge: true }),
-    ]);
-
-    res.json({ ok: true, messageId });
-  } catch (e) {
-    logger.error({ channelId, to, error: String(e?.message || e) }, '[SEND] failed');
-    res.status(500).json({ error: 'Failed to send message' });
-  }
-});
-
-app.post('/v1/channels/:channelId/conversations/:jid/markRead', async (req, res) => {
-  const { channelId, jid } = req.params;
-  const decodedJid = decodeURIComponent(jid);
-  try {
-    await db.collection('channels').doc(channelId).collection('conversations').doc(decodedJid).set({
-      unreadCount: 0,
-      updatedAt: FieldValue.serverTimestamp(),
-    }, { merge: true });
-    res.json({ ok: true });
-  } catch (e) {
-    res.status(500).json({ error: 'Failed to mark as read' });
-  }
 });
 
 app.post('/v1/channels/:channelId/resetSession', async (req, res) => {
@@ -576,6 +547,7 @@ app.post('/v1/channels/:channelId/resetSession', async (req, res) => {
   activeSockets.delete(channelId);
   startingChannels.delete(channelId);
   retryCounts.delete(channelId);
+  channelConnState.delete(channelId);
 
   await resetFirestoreAuthState(channelId);
 
@@ -594,7 +566,100 @@ app.post('/v1/channels/:channelId/resetSession', async (req, res) => {
   res.json({ ok: true, message: 'Session reset successfully.' });
 });
 
+// --- MESSAGING API ---
+app.get('/v1/channels/:channelId/conversations', async (req, res) => {
+  try {
+    const { channelId } = req.params;
+    const limit = Math.min(parseInt(req.query.limit || '30', 10), 100);
+
+    const snap = await db.collection('channels').doc(channelId)
+      .collection('conversations')
+      .orderBy('lastMessageAt', 'desc')
+      .limit(limit)
+      .get();
+
+    res.json({ ok: true, conversations: snap.docs.map(d => ({ id: d.id, ...d.data() })) });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+app.get('/v1/channels/:channelId/conversations/:jid/messages', async (req, res) => {
+  try {
+    const { channelId, jid: jidParam } = req.params;
+    const jid = decodeURIComponent(jidParam);
+    const limit = Math.min(parseInt(req.query.limit || '50', 10), 200);
+
+    const snap = await db.collection('channels').doc(channelId)
+      .collection('conversations').doc(jid)
+      .collection('messages')
+      .orderBy('timestamp', 'desc')
+      .limit(limit)
+      .get();
+
+    const msgs = snap.docs.map(d => ({ id: d.id, ...d.data() })).reverse();
+    res.json({ ok: true, jid, messages: msgs });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+app.post('/v1/channels/:channelId/messages/send', async (req, res) => {
+  try {
+    const { channelId } = req.params;
+    const { to, text } = req.body || {};
+    if (!to || !text) return res.status(400).json({ ok: false, error: '`to` and `text` required' });
+
+    const sock = await ensureSocketReady(channelId, 25000);
+    if (!sock) return res.status(409).json({ ok: false, error: 'Socket not ready for this channel' });
+
+    const jid = to.includes('@') ? to : `${to}@s.whatsapp.net`;
+    const r = await sock.sendMessage(jid, { text });
+
+    const messageId = r?.key?.id || `${Date.now()}`;
+    await saveMessageToFirestore(channelId, jid, messageId, {
+      messageId,
+      jid,
+      fromMe: true,
+      direction: 'OUT',
+      text,
+      status: 'sent',
+      timestamp: Date.now(),
+      raw: null,
+    });
+
+    res.json({ ok: true, messageId });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+app.post('/v1/channels/:channelId/conversations/:jid/markRead', async (req, res) => {
+  try {
+    const { channelId, jid: jidParam } = req.params;
+    const jid = decodeURIComponent(jidParam);
+    await db.collection('channels').doc(channelId).collection('conversations').doc(jid)
+      .set({ unreadCount: 0, updatedAt: FieldValue.serverTimestamp() }, { merge: true });
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+// --- AUTO-START linked channels on boot ---
+async function bootStartLinkedChannels() {
+  try {
+    const snap = await db.collection('channels').where('linked', '==', true).get();
+    const ids = snap.docs.map(d => d.id);
+    if (ids.length) logger.info({ ids }, 'Boot: starting linked channels');
+    ids.forEach(id => startOrRestartBaileys(id, 'boot-linked'));
+  } catch (e) {
+    logger.error({ err: String(e?.message || e) }, 'Boot start linked channels failed');
+  }
+}
+
 // --- SERVER LISTEN ---
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   logger.info({ port: PORT }, 'HTTP server listening');
+  await bootStartLinkedChannels();
 });
