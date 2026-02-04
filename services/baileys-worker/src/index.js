@@ -78,9 +78,35 @@ function emptyQrObject() {
   return { raw: null, public: null };
 }
 
+function normalizeJid(jid) {
+  if (!jid) return jid;
+  if (jid.includes(':')) {
+    return jid.split(':')[0] + '@' + jid.split('@')[1];
+  }
+  return jid;
+}
+
+function extractText(message) {
+  if (!message) return null;
+  if (typeof message === 'string') return message;
+  const text = message.conversation || 
+               message.extendedTextMessage?.text || 
+               message.imageMessage?.caption || 
+               message.videoMessage?.caption || 
+               null;
+  return text;
+}
+
+function safeJson(obj) {
+  try {
+    return JSON.parse(JSON.stringify(obj));
+  } catch (e) {
+    return null;
+  }
+}
+
 // --- FIRESTORE AUTH STATE (BufferJSON + initAuthCreds) ---
 function serializeToString(data) {
-  // IMPORTANT: BufferJSON keeps Buffers/Uint8Arrays safe
   return JSON.stringify(data, BufferJSON.replacer);
 }
 function parseFromString(str) {
@@ -94,7 +120,6 @@ const useFirestoreAuthState = async (channelId) => {
 
   const writeData = async (data, id) => {
     const docRef = authCollection.doc(safeId(id));
-    // store as a single string field to avoid Firestore type pitfalls
     const payload = { data: serializeToString(data), updatedAt: FieldValue.serverTimestamp() };
     await docRef.set(payload, { merge: false });
   };
@@ -118,7 +143,6 @@ const useFirestoreAuthState = async (channelId) => {
     await docRef.delete();
   };
 
-  // creds must be initialized with initAuthCreds()
   const loadedCreds = await readData('creds');
   const creds = loadedCreds || initAuthCreds();
 
@@ -152,7 +176,6 @@ const useFirestoreAuthState = async (channelId) => {
   return {
     state,
     saveCreds: async () => {
-      // IMPORTANT: always save current creds (with BufferJSON)
       await writeData(state.creds, 'creds');
     },
   };
@@ -178,7 +201,6 @@ async function startOrRestartBaileys(channelId) {
   }
   startingChannels.add(channelId);
 
-  // Set UI-compatible contract immediately
   await upsertChannelStatus(channelId, {
     status: 'CONNECTING',
     qr: emptyQrObject(),
@@ -201,7 +223,6 @@ async function startOrRestartBaileys(channelId) {
 
     const { state, saveCreds } = await useFirestoreAuthState(channelId);
 
-    // Helps reduce WA protocol mismatch issues
     let latest = null;
     try {
       latest = await fetchLatestBaileysVersion();
@@ -218,7 +239,7 @@ async function startOrRestartBaileys(channelId) {
       connectTimeoutMs: 60_000,
       keepAliveIntervalMs: 20_000,
       defaultQueryTimeoutMs: 60_000,
-      version: latest?.version, // if available
+      version: latest?.version,
     });
 
     activeSockets.set(channelId, sock);
@@ -227,6 +248,60 @@ async function startOrRestartBaileys(channelId) {
       saveCreds().catch((e) => {
         logger.warn({ channelId, error: String(e?.message || e) }, 'saveCreds failed');
       });
+    });
+
+    sock.ev.on('messages.upsert', async (m) => {
+      const { messages, type } = m;
+      if (type !== 'notify' && type !== 'append') return;
+
+      for (const msg of messages) {
+        if (!msg.key?.remoteJid || !msg.key?.id) continue;
+
+        const jid = msg.key.remoteJid;
+        const messageId = msg.key.id;
+        const fromMe = !!msg.key.fromMe;
+        const text = extractText(msg.message);
+        const timestampMs = (msg.messageTimestamp || Math.floor(Date.now() / 1000)) * 1000;
+
+        const conversationRef = db.collection('channels').doc(channelId).collection('conversations').doc(jid);
+        const messageRef = conversationRef.collection('messages').doc(messageId);
+
+        const messageData = {
+          id: messageId,
+          jid,
+          fromMe,
+          direction: fromMe ? 'OUT' : 'IN',
+          text,
+          raw: safeJson(msg),
+          status: fromMe ? 'sent' : 'received',
+          timestamp: timestampMs,
+          createdAt: FieldValue.serverTimestamp(),
+        };
+
+        const conversationPatch = {
+          jid,
+          type: jid.endsWith('@g.us') ? 'group' : 'user',
+          name: msg.pushName || jid.split('@')[0],
+          lastMessageText: text || '[media]',
+          lastMessageAt: FieldValue.serverTimestamp(),
+          lastMessageId: messageId,
+          updatedAt: FieldValue.serverTimestamp(),
+        };
+
+        if (!fromMe) {
+          conversationPatch.unreadCount = FieldValue.increment(1);
+        }
+
+        try {
+          await Promise.allSettled([
+            messageRef.set(messageData, { merge: true }),
+            conversationRef.set(conversationPatch, { merge: true }),
+          ]);
+          logger.info({ channelId, jid, messageId }, '[MSG] persisted');
+        } catch (e) {
+          logger.error({ channelId, jid, messageId, error: String(e?.message || e) }, '[MSG] failed to persist');
+        }
+      }
     });
 
     sock.ev.on('connection.update', async (update) => {
@@ -238,7 +313,7 @@ async function startOrRestartBaileys(channelId) {
           const qrDataUrl = await qrcode.toDataURL(qr);
           await upsertChannelStatus(channelId, {
             status: 'QR',
-            qr: { raw: qr, public: qr }, // <-- UI contract
+            qr: { raw: qr, public: qr },
             qrDataUrl,
             lastQrAt: FieldValue.serverTimestamp(),
             lastError: null,
@@ -334,84 +409,6 @@ const PORT = process.env.PORT || 8080;
 // --- DEBUG ENDPOINTS ---
 app.get('/health', (_req, res) => res.status(200).send('ok'));
 
-app.get('/debug/config', (_req, res) => {
-  res.json({
-    ok: true,
-    env: {
-      PORT: process.env.PORT,
-      NODE_OPTIONS: process.env.NODE_OPTIONS,
-      LOG_LEVEL: process.env.LOG_LEVEL,
-    },
-    baileysVersionFromPkg,
-    authStateLocation: `firestore:channels/{channelId}/auth`,
-    timestamp: new Date().toISOString(),
-  });
-});
-
-app.get('/debug/baileys', (_req, res) => {
-  const socketsInfo = Array.from(activeSockets.keys()).map((channelId) => ({
-    channelId,
-    user: activeSockets.get(channelId)?.user,
-    state: activeSockets.get(channelId)?.ws?.readyState,
-  }));
-  res.json({
-    ok: true,
-    baileysVersionFromPkg,
-    activeSocketsCount: activeSockets.size,
-    socketsInfo,
-    startingChannels: Array.from(startingChannels),
-  });
-});
-
-app.get('/debug/net', async (_req, res) => {
-  const out = { ok: true, ts: new Date().toISOString(), checks: {} };
-  try {
-    out.checks.dns_web_whatsapp = await dns.promises.lookup('web.whatsapp.com', { all: true });
-  } catch (e) {
-    out.ok = false;
-    out.checks.dns_web_whatsapp_error = String(e?.message || e);
-  }
-  try {
-    const r = await fetch('https://web.whatsapp.com', { method: 'GET' });
-    out.checks.https_web_whatsapp_status = r.status;
-  } catch (e) {
-    out.ok = false;
-    out.checks.https_web_whatsapp_error = String(e?.message || e);
-  }
-  res.status(out.ok ? 200 : 500).json(out);
-});
-
-app.get('/debug/ws', async (_req, res) => {
-  const ts = new Date().toISOString();
-  try {
-    const ws = new WebSocket('wss://web.whatsapp.com/ws/chat', {
-      headers: { 'User-Agent': 'Mozilla/5.0' },
-    });
-    const timeout = setTimeout(() => {
-      try {
-        ws.terminate();
-      } catch {}
-      return res.status(200).json({ ok: false, ts, error: 'timeout' });
-    }, 8000);
-    ws.on('open', () => {
-      clearTimeout(timeout);
-      try {
-        ws.close();
-      } catch {}
-      return res.status(200).json({ ok: true, ts });
-    });
-    ws.on('error', (err) => {
-      clearTimeout(timeout);
-      try {
-        ws.terminate();
-      } catch {}
-      return res.status(200).json({ ok: false, ts, error: String(err?.message || err) });
-    });
-  } catch (e) {
-    return res.status(200).json({ ok: false, ts, error: String(e?.message || e) });
-  }
-});
-
 // --- API V1 ENDPOINTS ---
 app.get('/v1/channels', async (_req, res) => {
   try {
@@ -459,7 +456,6 @@ app.get('/v1/channels/:channelId/status', async (req, res) => {
     if (!snap.exists) return res.json(null);
 
     const data = snap.data() || {};
-    // Normalize qr contract for UI
     const qr = data.qr && typeof data.qr === 'object' ? data.qr : emptyQrObject();
 
     res.json({ id: snap.id, ...data, qr });
@@ -477,7 +473,6 @@ app.post('/v1/channels/:channelId/qr', async (req, res) => {
   const isStarting = startingChannels.has(channelId);
 
   if (sock || isStarting) {
-    logger.warn({ channelId, hasSock: !!sock, isStarting }, 'QR requested but process already active (no-op).');
     const snap = await db.collection('channels').doc(channelId).get();
     return res.status(200).json({
       ok: true,
@@ -486,7 +481,6 @@ app.post('/v1/channels/:channelId/qr', async (req, res) => {
     });
   }
 
-  // fire & forget
   startOrRestartBaileys(channelId);
   res.json({ ok: true, message: 'QR generation process started.' });
 });
@@ -503,6 +497,67 @@ app.post('/v1/channels/:channelId/disconnect', async (req, res) => {
     }
   }
   res.json({ ok: true, message: 'Disconnection process initiated.' });
+});
+
+app.post('/v1/channels/:channelId/messages/send', async (req, res) => {
+  const { channelId } = req.params;
+  const { to, text } = req.body;
+
+  if (!to || !text) return res.status(400).json({ error: 'to and text are required' });
+
+  const sock = activeSockets.get(channelId);
+  if (!sock) return res.status(404).json({ error: 'Socket not found for this channel' });
+
+  try {
+    const result = await sock.sendMessage(to, { text });
+    
+    // Baileys doesn't trigger upsert for sent messages in some cases, persist manually
+    const messageId = result.key.id;
+    const conversationRef = db.collection('channels').doc(channelId).collection('conversations').doc(to);
+    const messageRef = conversationRef.collection('messages').doc(messageId);
+
+    const messageData = {
+      id: messageId,
+      jid: to,
+      fromMe: true,
+      direction: 'OUT',
+      text,
+      raw: safeJson(result),
+      status: 'sent',
+      timestamp: Date.now(),
+      createdAt: FieldValue.serverTimestamp(),
+    };
+
+    await Promise.allSettled([
+      messageRef.set(messageData, { merge: true }),
+      conversationRef.set({
+        jid: to,
+        lastMessageText: text,
+        lastMessageAt: FieldValue.serverTimestamp(),
+        lastMessageId: messageId,
+        updatedAt: FieldValue.serverTimestamp(),
+      }, { merge: true }),
+    ]);
+
+    res.json({ ok: true, messageId });
+  } catch (e) {
+    logger.error({ channelId, to, error: String(e?.message || e) }, '[SEND] failed');
+    res.status(500).json({ error: 'Failed to send message' });
+  }
+});
+
+app.post('/v1/channels/:channelId/conversations/:jid/markRead', async (req, res) => {
+  const { channelId, jid } = req.params;
+  const decodedJid = decodeURIComponent(jid);
+  try {
+    await db.collection('channels').doc(channelId).collection('conversations').doc(decodedJid).set({
+      unreadCount: 0,
+      updatedAt: FieldValue.serverTimestamp(),
+    }, { merge: true });
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: 'Failed to mark as read' });
+  }
 });
 
 app.post('/v1/channels/:channelId/resetSession', async (req, res) => {

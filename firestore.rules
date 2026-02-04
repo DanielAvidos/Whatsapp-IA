@@ -212,6 +212,16 @@ service cloud.firestore {
      */
     match /channels/{channelId} {
       allow read, write: if isSignedIn();
+
+      match /conversations/{jid} {
+        allow read: if isSignedIn();
+        allow write: if false;
+
+        match /messages/{messageId} {
+          allow read: if isSignedIn();
+          allow write: if false;
+        }
+      }
     }
   }
 }
