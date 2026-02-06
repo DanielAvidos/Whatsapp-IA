@@ -3,60 +3,9 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    function isSignedIn() {
-      return request.auth != null;
-    }
-
-    // Define super admin by specific UID (from backend.json) or by existence in roles_admin collection
-    function isSuperAdmin() {
-      return isSignedIn() && (
-        request.auth.uid == 'd6Agbzw3qpgHtykUBnBDs86vg1S2' || 
-        exists(/databases/$(database)/documents/roles_admin/$(request.auth.uid))
-      );
-    }
-
-    function isOwner(userId) {
-      return isSignedIn() && request.auth.uid == userId;
-    }
-
-    // Companies / Clientes
-    match /companies/{companyId} {
-      allow read, write: if isSuperAdmin();
-    }
-
-    match /roles_admin/{userId} {
-      allow get, list: if isSuperAdmin();
-    }
-
-    match /users/{userId} {
-      allow get: if isOwner(userId) || isSuperAdmin();
-      allow list: if isSuperAdmin();
-      allow create: if isOwner(userId);
-      allow update: if isOwner(userId);
-    }
-
-    match /tenants/{tenantId} {
-      allow read, write: if isSuperAdmin();
-      
-      match /members/{memberId} {
-        allow read, write: if isSuperAdmin();
-      }
-      match /channels/{channelId} {
-        allow read, write: if isSuperAdmin();
-      }
-      match /apiKeys/{apiKeyId} {
-        allow read, write: if isSuperAdmin();
-      }
-    }
-
-    match /channels/{channelId} {
-      allow read, write: if isSignedIn();
-      match /conversations/{jid} {
-        allow read: if isSignedIn();
-        match /messages/{messageId} {
-          allow read: if isSignedIn();
-        }
-      }
+    // ✅ Regla global simple: si está autenticado, puede leer/escribir
+    match /{document=**} {
+      allow read, write: if request.auth != null;
     }
   }
 }
