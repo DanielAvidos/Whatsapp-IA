@@ -3,13 +3,15 @@ import { User } from "firebase/auth";
 import { collection, query, where, getDocs, Firestore } from "firebase/firestore";
 
 export const SUPERADMIN_EMAIL = "superadmin@avidos.com";
+export const ADMIN_EMAILS = [SUPERADMIN_EMAIL, "daniel@avidos.mx", "rogegzll96@gmail.com"];
 
 /**
- * Checks if the current user is the Superadmin.
+ * Checks if the current user is a Superadmin.
  */
 export function getIsSuperAdmin(user: User | null | { email: string | null }): boolean {
   if (!user?.email) return false;
-  return user.email.toLowerCase() === SUPERADMIN_EMAIL.toLowerCase();
+  const email = user.email.toLowerCase();
+  return ADMIN_EMAILS.some(adminEmail => adminEmail.toLowerCase() === email);
 }
 
 /**

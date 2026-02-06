@@ -26,6 +26,7 @@ import { useToast } from '@/hooks/use-toast';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Badge } from '@/components/ui/badge';
+import { getIsSuperAdmin } from '@/lib/auth-helpers';
 
 const companySchema = z.object({
   name: z.string().min(2, "Name must be at least 2 characters."),
@@ -45,18 +46,21 @@ export function DashboardPage() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [selectedCompany, setSelectedCompany] = useState<Company | null>(null);
 
+  const isSuperAdmin = getIsSuperAdmin(currentUser);
+
   const companiesQuery = useMemoFirebase(() => {
-    if (!firestore) return null;
+    // Only run query if services are ready and user is confirmed superadmin
+    if (!firestore || !isSuperAdmin) return null;
     return query(collection(firestore, 'companies'), orderBy('createdAt', 'desc'));
-  }, [firestore]);
+  }, [firestore, isSuperAdmin]);
 
   const { data: companies, isLoading } = useCollection<Company>(companiesQuery);
 
   // Channels for assignment
   const channelsQuery = useMemoFirebase(() => {
-    if (!firestore) return null;
+    if (!firestore || !isSuperAdmin) return null;
     return collection(firestore, 'channels');
-  }, [firestore]);
+  }, [firestore, isSuperAdmin]);
   const { data: allChannels } = useCollection<WhatsappChannel>(channelsQuery);
 
   const form = useForm<CompanyFormValues>({
