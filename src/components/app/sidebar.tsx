@@ -1,3 +1,4 @@
+
 "use client";
 
 import React from "react";
@@ -19,12 +20,13 @@ import { useUser, useAuth } from "@/firebase";
 import { Button } from "../ui/button";
 import { useLanguage } from "@/context/language-provider";
 import { TranslationKey } from "@/lib/locales";
+import { getIsSuperAdmin } from "@/lib/auth-helpers";
 
-const navItems: { href: string; icon: React.ElementType; labelKey: TranslationKey }[] = [
-  { href: "/dashboard", icon: Building2, labelKey: "nav.tenants" },
-  { href: "/channels", icon: MessageSquare, labelKey: "nav.channels" },
-  { href: "/api-keys", icon: KeyRound, labelKey: "nav.api-keys" },
-  { href: "/members", icon: Users, labelKey: "nav.members" },
+const navItems: { href: string; icon: React.ElementType; labelKey: TranslationKey; adminOnly: boolean }[] = [
+  { href: "/dashboard", icon: Building2, labelKey: "nav.tenants", adminOnly: true },
+  { href: "/channels", icon: MessageSquare, labelKey: "nav.channels", adminOnly: false },
+  { href: "/api-keys", icon: KeyRound, labelKey: "nav.api-keys", adminOnly: true },
+  { href: "/members", icon: Users, labelKey: "nav.members", adminOnly: true },
 ];
 
 export function AppSidebar() {
@@ -37,9 +39,8 @@ export function AppSidebar() {
     auth.signOut();
   };
 
-  // For now, we assume any logged in user is an owner for UI purposes.
-  // This will be replaced with proper role management.
-  const role = 'owner';
+  const isSuperAdmin = getIsSuperAdmin(user);
+  const role = isSuperAdmin ? 'superadmin' : 'admin';
 
   return (
     <Sidebar>
@@ -51,7 +52,9 @@ export function AppSidebar() {
       </SidebarHeader>
       <SidebarContent>
         <SidebarMenu>
-          {navItems.map((item) => (
+          {navItems
+            .filter(item => !item.adminOnly || isSuperAdmin)
+            .map((item) => (
             <SidebarMenuItem key={item.href}>
               <SidebarMenuButton
                 asChild

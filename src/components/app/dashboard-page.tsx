@@ -1,16 +1,17 @@
+
 "use client";
 
 import React, { useState } from 'react';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import * as z from 'zod';
-import { PlusCircle, MoreHorizontal, Loader2, Building2 } from 'lucide-react';
-import { useFirestore, useCollection, useMemoFirebase } from '@/firebase';
+import { PlusCircle, MoreHorizontal, Loader2, Building2, Link as LinkIcon } from 'lucide-react';
+import { useFirestore, useCollection, useMemoFirebase, useUser } from '@/firebase';
 import { collection, addDoc, updateDoc, doc, serverTimestamp, query, orderBy } from 'firebase/firestore';
-import { initializeApp, getApps } from 'firebase/app';
+import { initializeApp } from 'firebase/app';
 import { getAuth, createUserWithEmailAndPassword, signOut } from 'firebase/auth';
 import { firebaseConfig } from '@/firebase/config';
-import type { Company, CompanyPlan, CompanyStatus } from '@/lib/types';
+import type { Company, CompanyPlan, CompanyStatus, WhatsappChannel } from '@/lib/types';
 import { PageHeader } from '@/components/app/page-header';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -23,6 +24,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { StatusBadge } from '@/components/app/status-badge';
 import { useToast } from '@/hooks/use-toast';
 import { Skeleton } from '@/components/ui/skeleton';
+import { Checkbox } from '@/components/ui/checkbox';
 
 const companySchema = z.object({
   name: z.string().min(2, "Name must be at least 2 characters."),
@@ -35,9 +37,12 @@ type CompanyFormValues = z.infer<typeof companySchema>;
 
 export function DashboardPage() {
   const firestore = useFirestore();
+  const { user: currentUser } = useUser();
   const { toast } = useToast();
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [assignDialogOpen, setAssignDialogOpen] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [selectedCompany, setSelectedCompany] = useState<Company | null>(null);
 
   const companiesQuery = useMemoFirebase(() => {
     if (!firestore) return null;
@@ -45,6 +50,13 @@ export function DashboardPage() {
   }, [firestore]);
 
   const { data: companies, isLoading } = useCollection<Company>(companiesQuery);
+
+  // Channels for assignment
+  const channelsQuery = useMemoFirebase(() => {
+    if (!firestore) return null;
+    return collection(firestore, 'channels');
+  }, [firestore]);
+  const { data: allChannels } = useCollection<WhatsappChannel>(channelsQuery);
 
   const form = useForm<CompanyFormValues>({
     resolver: zodResolver(companySchema),
@@ -55,21 +67,15 @@ export function DashboardPage() {
     if (!firestore) return;
     setIsSubmitting(true);
     try {
-      // 1. Create secondary auth instance to create user without logging out
       const secondaryAppName = `secondary-auth-${Date.now()}`;
       const secondaryApp = initializeApp(firebaseConfig, secondaryAppName);
       const secondaryAuth = getAuth(secondaryApp);
 
-      // 2. Create user in Firebase Auth
       const userCred = await createUserWithEmailAndPassword(secondaryAuth, values.email, "welcomm");
       const adminUid = userCred.user.uid;
 
-      // 3. Clean up secondary instance
       await signOut(secondaryAuth);
-      // Note: In some environments we might want to delete the app instance to avoid memory leaks
-      // but standard initializeApp with random name is safe for occasional use.
 
-      // 4. Create document in Firestore
       await addDoc(collection(firestore, 'companies'), {
         name: values.name,
         adminEmail: values.email,
@@ -80,14 +86,14 @@ export function DashboardPage() {
         updatedAt: serverTimestamp(),
       });
 
-      toast({ title: 'Cliente creado', description: `La empresa "${values.name}" ha sido registrada con éxito.` });
+      toast({ title: 'Cliente creado', description: `La empresa "${values.name}" ha sido registrada.` });
       setDialogOpen(false);
       form.reset();
     } catch (error: any) {
       console.error(error);
       let errorMessage = "No se pudo crear el cliente.";
       if (error.code === 'auth/email-already-in-use') {
-        errorMessage = "El correo electrónico ya está en uso por otro usuario.";
+        errorMessage = "El correo ya está en uso.";
       }
       toast({ variant: 'destructive', title: 'Error', description: errorMessage });
     } finally {
@@ -104,22 +110,33 @@ export function DashboardPage() {
       });
       toast({ title: 'Estatus actualizado' });
     } catch (error) {
-      toast({ variant: 'destructive', title: 'Error', description: "No se pudo actualizar el estatus." });
+      toast({ variant: 'destructive', title: 'Error', description: "Fallo al actualizar." });
     }
   };
 
-  const handleUpdatePlan = async (companyId: string, newPlan: CompanyPlan) => {
-    if (!firestore) return;
+  const toggleChannelAssignment = async (channel: WhatsappChannel, company: Company, isChecked: boolean) => {
+    if (!firestore || !currentUser) return;
     try {
-      await updateDoc(doc(firestore, 'companies', companyId), {
-        plan: newPlan,
-        updatedAt: serverTimestamp(),
-      });
-      toast({ title: 'Plan actualizado' });
-    } catch (error) {
-      toast({ variant: 'destructive', title: 'Error', description: "No se pudo actualizar el plan." });
+      const channelRef = doc(firestore, 'channels', channel.id);
+      if (isChecked) {
+        await updateDoc(channelRef, {
+          companyId: company.id,
+          companyName: company.name,
+          assignedAt: serverTimestamp(),
+          assignedBy: currentUser.email,
+        });
+      } else {
+        await updateDoc(channelRef, {
+          companyId: null,
+          companyName: null,
+          assignedAt: serverTimestamp(),
+          assignedBy: currentUser.email,
+        });
+      }
+    } catch (e) {
+      toast({ variant: 'destructive', title: "Error en asignación", description: String(e) });
     }
-  };
+  }
 
   return (
     <main className="container mx-auto p-4 md:p-6 lg:p-8">
@@ -180,11 +197,16 @@ export function DashboardPage() {
                           <Button variant="ghost" size="icon"><MoreHorizontal /></Button>
                         </DropdownMenuTrigger>
                         <DropdownMenuContent align="end">
+                          <DropdownMenuItem onClick={() => {
+                            setSelectedCompany(company);
+                            setAssignDialogOpen(true);
+                          }}>
+                            <LinkIcon className="mr-2 h-4 w-4" />
+                            Asignar Canales
+                          </DropdownMenuItem>
                           <DropdownMenuItem onClick={() => handleUpdateStatus(company.id, company.status === 'Active' ? 'Suspended' : 'Active')}>
                             {company.status === 'Active' ? 'Suspender' : 'Activar'}
                           </DropdownMenuItem>
-                          <DropdownMenuItem onClick={() => handleUpdatePlan(company.id, 'Pro')}>Cambiar a Pro</DropdownMenuItem>
-                          <DropdownMenuItem onClick={() => handleUpdatePlan(company.id, 'Enterprise')}>Cambiar a Enterprise</DropdownMenuItem>
                         </DropdownMenuContent>
                       </DropdownMenu>
                     </TableCell>
@@ -196,6 +218,7 @@ export function DashboardPage() {
         </CardContent>
       </Card>
       
+      {/* Create Company Dialog */}
       <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
         <DialogContent>
           <DialogHeader>
@@ -271,6 +294,48 @@ export function DashboardPage() {
               </DialogFooter>
             </form>
           </Form>
+        </DialogContent>
+      </Dialog>
+
+      {/* Assign Channels Dialog */}
+      <Dialog open={assignDialogOpen} onOpenChange={setAssignDialogOpen}>
+        <DialogContent className="sm:max-w-[500px]">
+          <DialogHeader>
+            <DialogTitle>Asignar Canales a {selectedCompany?.name}</DialogTitle>
+            <DialogDescription>Selecciona los canales de WhatsApp que pertenecen a este cliente.</DialogDescription>
+          </DialogHeader>
+          <div className="py-4 space-y-4 max-h-[400px] overflow-y-auto">
+            {allChannels?.map((channel) => (
+              <div key={channel.id} className="flex items-center justify-between border-b pb-2 last:border-0">
+                <div className="flex items-center gap-3">
+                  <Checkbox 
+                    id={`assign-${channel.id}`}
+                    checked={channel.companyId === selectedCompany?.id}
+                    onCheckedChange={(checked) => {
+                      if (selectedCompany) toggleChannelAssignment(channel, selectedCompany, !!checked);
+                    }}
+                  />
+                  <div className="grid gap-0.5">
+                    <label htmlFor={`assign-${channel.id}`} className="text-sm font-medium leading-none cursor-pointer">
+                      {channel.displayName || channel.id}
+                    </label>
+                    <p className="text-xs text-muted-foreground">{channel.phoneE164 || 'Sin número'}</p>
+                  </div>
+                </div>
+                {channel.companyId && channel.companyId !== selectedCompany?.id && (
+                  <Badge variant="secondary" className="text-[10px]">
+                    Asignado a: {channel.companyName}
+                  </Badge>
+                )}
+              </div>
+            ))}
+            {allChannels?.length === 0 && (
+              <p className="text-center text-muted-foreground text-sm">No hay canales disponibles.</p>
+            )}
+          </div>
+          <DialogFooter>
+            <Button onClick={() => setAssignDialogOpen(false)}>Cerrar</Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
     </main>

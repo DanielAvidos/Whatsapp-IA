@@ -1,11 +1,13 @@
+
 "use client";
 
 import { AppSidebar } from "@/components/app/sidebar";
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import { useUser } from "@/firebase";
-import { useRouter } from "next/navigation";
+import { useRouter, usePathname } from "next/navigation";
 import { useEffect } from "react";
 import { Skeleton } from "@/components/ui/skeleton";
+import { getIsSuperAdmin } from "@/lib/auth-helpers";
 
 export default function AppLayout({
   children,
@@ -14,12 +16,24 @@ export default function AppLayout({
 }) {
   const { user, isUserLoading } = useUser();
   const router = useRouter();
+  const pathname = usePathname();
 
   useEffect(() => {
     if (!isUserLoading && !user) {
       router.replace('/login');
     }
   }, [user, isUserLoading, router]);
+
+  useEffect(() => {
+    if (!isUserLoading && user) {
+      const isSuperAdmin = getIsSuperAdmin(user);
+      // Protect admin-only routes
+      const adminOnlyRoutes = ['/dashboard', '/api-keys', '/members'];
+      if (!isSuperAdmin && adminOnlyRoutes.some(route => pathname.startsWith(route))) {
+        router.replace('/channels');
+      }
+    }
+  }, [user, isUserLoading, pathname, router]);
 
   if (isUserLoading || !user) {
     return (

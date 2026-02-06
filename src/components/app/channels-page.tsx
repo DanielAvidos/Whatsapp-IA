@@ -1,14 +1,15 @@
+
 "use client";
 
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import Link from 'next/link';
-import { useFirestore, useMemoFirebase, useCollection } from '@/firebase';
-import { collection } from 'firebase/firestore';
+import { useFirestore, useMemoFirebase, useCollection, useUser } from '@/firebase';
+import { collection, query, where } from 'firebase/firestore';
 import { PageHeader } from '@/components/app/page-header';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Button } from '@/components/ui/button';
-import { PlusCircle, MoreHorizontal, RotateCcw, Wrench, Edit2 } from 'lucide-react';
+import { PlusCircle, MoreHorizontal, RotateCcw, Wrench, Edit2, Building2 } from 'lucide-react';
 import { StatusBadge } from '@/components/app/status-badge';
 import type { WhatsappChannel } from '@/lib/types';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -20,6 +21,8 @@ import { Input } from '@/components/ui/input';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import * as z from 'zod';
+import { getIsSuperAdmin, getMyCompany } from '@/lib/auth-helpers';
+import { Badge } from '@/components/ui/badge';
 
 const channelSchema = z.object({
   displayName: z.string().min(2, "Alias must be at least 2 characters."),
@@ -29,17 +32,39 @@ type ChannelFormValues = z.infer<typeof channelSchema>;
 
 export function ChannelsPage() {
     const firestore = useFirestore();
+    const { user } = useUser();
     const { toast } = useToast();
-    const [addDialogOpen, setAddDialogOpen] = React.useState(false);
-    const [editDialogOpen, setEditDialogOpen] = React.useState(false);
-    const [selectedChannel, setSelectedChannel] = React.useState<WhatsappChannel | null>(null);
+    const [addDialogOpen, setAddDialogOpen] = useState(false);
+    const [editDialogOpen, setEditDialogOpen] = useState(false);
+    const [selectedChannel, setSelectedChannel] = useState<WhatsappChannel | null>(null);
+    const [myCompanyId, setMyCompanyId] = useState<string | null>(null);
+    const [isResolvingCompany, setIsResolvingCompany] = useState(false);
     
     const workerUrl = process.env.NEXT_PUBLIC_BAILEYS_WORKER_URL || "https://baileys-worker-701554958520.us-central1.run.app";
+    const isSuperAdmin = getIsSuperAdmin(user);
+
+    useEffect(() => {
+      async function resolve() {
+        if (!firestore || !user || isSuperAdmin) return;
+        setIsResolvingCompany(true);
+        const company = await getMyCompany(firestore, user);
+        setMyCompanyId(company?.id || null);
+        setIsResolvingCompany(false);
+      }
+      resolve();
+    }, [firestore, user, isSuperAdmin]);
 
     const channelsQuery = useMemoFirebase(() => {
         if (!firestore) return null;
-        return collection(firestore, 'channels');
-    }, [firestore]);
+        const colRef = collection(firestore, 'channels');
+        if (isSuperAdmin) {
+          return colRef;
+        }
+        // If not superadmin, we must wait for myCompanyId or it will return nothing
+        if (!myCompanyId) return null;
+        return query(colRef, where('companyId', '==', myCompanyId));
+    }, [firestore, isSuperAdmin, myCompanyId]);
+
     const { data: channels, isLoading } = useCollection<WhatsappChannel>(channelsQuery);
 
     const addForm = useForm<ChannelFormValues>({
@@ -62,11 +87,11 @@ export function ChannelsPage() {
 
             if (!response.ok) throw new Error('Failed to create channel');
             
-            toast({ title: "Channel created", description: `Channel "${values.displayName}" has been added.` });
+            toast({ title: "Canal creado", description: `El canal "${values.displayName}" ha sido añadido.` });
             setAddDialogOpen(false);
             addForm.reset();
         } catch (error) {
-            toast({ variant: 'destructive', title: "Error creating channel", description: String(error) });
+            toast({ variant: 'destructive', title: "Error al crear canal", description: String(error) });
         }
     };
 
@@ -81,11 +106,11 @@ export function ChannelsPage() {
 
           if (!response.ok) throw new Error('Failed to update alias');
           
-          toast({ title: "Alias updated", description: `Channel alias updated to "${values.displayName}".` });
+          toast({ title: "Alias actualizado", description: `Alias actualizado a "${values.displayName}".` });
           setEditDialogOpen(false);
           setSelectedChannel(null);
       } catch (error) {
-          toast({ variant: 'destructive', title: "Error updating alias", description: String(error) });
+          toast({ variant: 'destructive', title: "Error al actualizar alias", description: String(error) });
       }
     };
 
@@ -97,7 +122,7 @@ export function ChannelsPage() {
             if (!response.ok) throw new Error(`Action failed with status ${response.status}`);
             toast({ title: successTitle });
         } catch (error) {
-            toast({ variant: 'destructive', title: "Action failed", description: String(error) });
+            toast({ variant: 'destructive', title: "Acción fallida", description: String(error) });
         }
     };
 
@@ -107,31 +132,36 @@ export function ChannelsPage() {
         return status;
     };
 
+    const showLoading = isLoading || (isResolvingCompany && !isSuperAdmin);
+
     return (
         <main className="container mx-auto p-4 md:p-6 lg:p-8">
-            <PageHeader title="WhatsApp Channels" description="Manage your connected WhatsApp numbers.">
-                <Button onClick={() => setAddDialogOpen(true)}>
-                    <PlusCircle className="mr-2 h-4 w-4" />
-                    Add Channel
-                </Button>
+            <PageHeader title="Canales de WhatsApp" description="Gestiona tus números de WhatsApp conectados.">
+                {isSuperAdmin && (
+                  <Button onClick={() => setAddDialogOpen(true)}>
+                      <PlusCircle className="mr-2 h-4 w-4" />
+                      Añadir Canal
+                  </Button>
+                )}
             </PageHeader>
 
             <Card>
-                <CardHeader><CardTitle>Channel List</CardTitle></CardHeader>
+                <CardHeader><CardTitle>Lista de Canales</CardTitle></CardHeader>
                 <CardContent>
                     <Table>
                         <TableHeader>
                             <TableRow>
-                                <TableHead>Display Name</TableHead>
-                                <TableHead>Status</TableHead>
-                                <TableHead>Phone Number</TableHead>
-                                <TableHead className="text-right">Actions</TableHead>
+                                <TableHead>Nombre</TableHead>
+                                <TableHead>Estado</TableHead>
+                                <TableHead>Teléfono</TableHead>
+                                {isSuperAdmin && <TableHead>Empresa</TableHead>}
+                                <TableHead className="text-right">Acciones</TableHead>
                             </TableRow>
                         </TableHeader>
                         <TableBody>
-                            {isLoading && (
+                            {showLoading && (
                                 <TableRow>
-                                    <TableCell colSpan={4}>
+                                    <TableCell colSpan={isSuperAdmin ? 5 : 4}>
                                         <div className="space-y-2">
                                             <Skeleton className="h-8 w-full" />
                                             <Skeleton className="h-8 w-full" />
@@ -145,11 +175,23 @@ export function ChannelsPage() {
                                       {channel.displayName || channel.id}
                                     </TableCell>
                                     <TableCell><StatusBadge status={getStatusForBadge(channel.status)} /></TableCell>
-                                    <TableCell>{channel.phoneE164 || 'Not linked'}</TableCell>
+                                    <TableCell>{channel.phoneE164 || 'Sin vincular'}</TableCell>
+                                    {isSuperAdmin && (
+                                      <TableCell>
+                                        {channel.companyName ? (
+                                          <Badge variant="outline" className="flex items-center gap-1 w-fit">
+                                            <Building2 className="h-3 w-3" />
+                                            {channel.companyName}
+                                          </Badge>
+                                        ) : (
+                                          <span className="text-muted-foreground text-xs">Sin asignar</span>
+                                        )}
+                                      </TableCell>
+                                    )}
                                     <TableCell className="text-right">
                                         <div className="flex justify-end gap-2">
                                             <Button asChild variant="outline" size="sm">
-                                                <Link href={`/channels/${channel.id}`}>Manage</Link>
+                                                <Link href={`/channels/${channel.id}`}>Gestionar</Link>
                                             </Button>
                                             
                                             <DropdownMenu>
@@ -159,23 +201,25 @@ export function ChannelsPage() {
                                                     </Button>
                                                 </DropdownMenuTrigger>
                                                 <DropdownMenuContent align="end">
-                                                    <DropdownMenuItem onClick={() => {
-                                                      setSelectedChannel(channel);
-                                                      editForm.setValue('displayName', channel.displayName || '');
-                                                      setEditDialogOpen(true);
-                                                    }}>
-                                                        <Edit2 className="mr-2 h-4 w-4" />
-                                                        Edit Alias
-                                                    </DropdownMenuItem>
-                                                    {channel.status === 'ERROR' && (
-                                                        <DropdownMenuItem onClick={() => handleAction(channel.id, '/repair', 'Repair initiated')}>
+                                                    {isSuperAdmin && (
+                                                      <DropdownMenuItem onClick={() => {
+                                                        setSelectedChannel(channel);
+                                                        editForm.setValue('displayName', channel.displayName || '');
+                                                        setEditDialogOpen(true);
+                                                      }}>
+                                                          <Edit2 className="mr-2 h-4 w-4" />
+                                                          Editar Alias
+                                                      </DropdownMenuItem>
+                                                    )}
+                                                    {(channel.status === 'ERROR' || isSuperAdmin) && (
+                                                        <DropdownMenuItem onClick={() => handleAction(channel.id, '/repair', 'Reparación iniciada')}>
                                                             <Wrench className="mr-2 h-4 w-4" />
-                                                            Repair Channel
+                                                            Reparar Canal
                                                         </DropdownMenuItem>
                                                     )}
-                                                    <DropdownMenuItem onClick={() => handleAction(channel.id, '/resetSession', 'Session reset')}>
+                                                    <DropdownMenuItem onClick={() => handleAction(channel.id, '/resetSession', 'Sesión reseteada')}>
                                                         <RotateCcw className="mr-2 h-4 w-4" />
-                                                        Reset Session
+                                                        Resetear Sesión
                                                     </DropdownMenuItem>
                                                 </DropdownMenuContent>
                                             </DropdownMenu>
@@ -183,10 +227,15 @@ export function ChannelsPage() {
                                     </TableCell>
                                 </TableRow>
                             ))}
-                             {!isLoading && channels?.length === 0 && (
+                             {!showLoading && channels?.length === 0 && (
                                 <TableRow>
-                                    <TableCell colSpan={4} className="text-center">
-                                        No channels found. Add one to get started.
+                                    <TableCell colSpan={isSuperAdmin ? 5 : 4} className="text-center py-12">
+                                        <div className="flex flex-col items-center gap-2">
+                                          <MessageSquare className="h-8 w-8 text-muted-foreground opacity-20" />
+                                          <p className="text-muted-foreground">
+                                            {isSuperAdmin ? "No hay canales. Añade uno para empezar." : "Aún no tienes canales asignados a tu empresa."}
+                                          </p>
+                                        </div>
                                     </TableCell>
                                 </TableRow>
                             )}
@@ -199,8 +248,8 @@ export function ChannelsPage() {
             <Dialog open={addDialogOpen} onOpenChange={setAddDialogOpen}>
               <DialogContent>
                 <DialogHeader>
-                  <DialogTitle>Add New WhatsApp Channel</DialogTitle>
-                  <DialogDescription>Enter a display name for the new channel.</DialogDescription>
+                  <DialogTitle>Añadir Nuevo Canal de WhatsApp</DialogTitle>
+                  <DialogDescription>Ingresa un nombre para el nuevo canal.</DialogDescription>
                 </DialogHeader>
                 <Form {...addForm}>
                   <form onSubmit={addForm.handleSubmit(onAddChannel)} className="space-y-4">
@@ -209,17 +258,17 @@ export function ChannelsPage() {
                       name="displayName"
                       render={({ field }) => (
                         <FormItem>
-                          <FormLabel>Display Name</FormLabel>
+                          <FormLabel>Nombre Visible</FormLabel>
                           <FormControl>
-                            <Input placeholder="e.g. Sales Support" {...field} />
+                            <Input placeholder="Ej: Soporte Ventas" {...field} />
                           </FormControl>
                           <FormMessage />
                         </FormItem>
                       )}
                     />
                     <DialogFooter>
-                      <Button type="button" variant="outline" onClick={() => setAddDialogOpen(false)}>Cancel</Button>
-                      <Button type="submit">Create</Button>
+                      <Button type="button" variant="outline" onClick={() => setAddDialogOpen(false)}>Cancelar</Button>
+                      <Button type="submit">Crear</Button>
                     </DialogFooter>
                   </form>
                 </Form>
@@ -230,8 +279,8 @@ export function ChannelsPage() {
             <Dialog open={editDialogOpen} onOpenChange={setEditDialogOpen}>
               <DialogContent>
                 <DialogHeader>
-                  <DialogTitle>Edit Channel Alias</DialogTitle>
-                  <DialogDescription>Update the display name for this channel.</DialogDescription>
+                  <DialogTitle>Editar Alias del Canal</DialogTitle>
+                  <DialogDescription>Actualiza el nombre visible de este canal.</DialogDescription>
                 </DialogHeader>
                 <Form {...editForm}>
                   <form onSubmit={editForm.handleSubmit(onEditAlias)} className="space-y-4">
@@ -240,17 +289,17 @@ export function ChannelsPage() {
                       name="displayName"
                       render={({ field }) => (
                         <FormItem>
-                          <FormLabel>Display Name</FormLabel>
+                          <FormLabel>Nombre Visible</FormLabel>
                           <FormControl>
-                            <Input placeholder="e.g. Sales Support" {...field} />
+                            <Input placeholder="Ej: Soporte Ventas" {...field} />
                           </FormControl>
                           <FormMessage />
                         </FormItem>
                       )}
                     />
                     <DialogFooter>
-                      <Button type="button" variant="outline" onClick={() => setEditDialogOpen(false)}>Cancel</Button>
-                      <Button type="submit">Save Changes</Button>
+                      <Button type="button" variant="outline" onClick={() => setEditDialogOpen(false)}>Cancelar</Button>
+                      <Button type="submit">Guardar Cambios</Button>
                     </DialogFooter>
                   </form>
                 </Form>
@@ -259,3 +308,5 @@ export function ChannelsPage() {
         </main>
     );
 }
+
+import { MessageSquare } from 'lucide-react';
