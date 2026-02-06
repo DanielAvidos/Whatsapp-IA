@@ -1,225 +1,56 @@
-/**
- * Core Philosophy:
- * This ruleset enforces a multi-tenant, role-based access control (RBAC) model.
- * A special collection, `/roles_admin`, grants global super-admin privileges to specific users.
- * For all other users, access to a tenant's data is strictly determined by their membership
- * and role within that tenant, which is verified by checking the `/tenants/{tenantId}/members` subcollection.
- *
- * Data Structure:
- * The primary data is organized under the top-level `/tenants/{tenantId}` collection.
- * Each tenant contains its own subcollections for `members`, `channels`, and `apiKeys`.
- * A top-level `/users` collection stores user profile data, scoped to the individual user.
- * A top-level `/roles_admin` collection identifies global administrators by their UID.
- *
- * Key Security Decisions:
- * - Super Admins: The existence of a user's UID as a document ID in `/roles_admin`
- *   grants that user full read/write access to the entire database.
- * - Tenant Isolation: All rules are designed to prevent users from accessing data in tenants
- *   they are not a member of. Listing all tenants is disabled for non-admins.
- * - Role-Based Access: Within a tenant, users with 'owner' or 'admin' roles can manage the
- *   tenant and its resources. Other members ('agent', 'viewer') have read-only access.
- * - User Profiles: Users can create and manage their own profile in `/users/{userId}`.
- *   These profiles are private and not listable or viewable by other non-admin users.
- *
- * Denormalization for Authorization:
- * Authorization within a tenant relies on checking for a corresponding document in the
- * `/tenants/{tenantId}/members/{userId}` subcollection. This requires a `get()` call in the
- * security rules for most tenant-related operations. While this adds one read operation cost,
- * it correctly models membership and ensures that rules are secure and based on data in the database.
- * Each document in a tenant's subcollections (e.g., channels, members) contains a denormalized
- * `tenantId` field, which is validated to ensure relational integrity.
- *
- * Structural Segregation:
- * Public user profiles (`/users`), tenant data (`/tenants`), and admin roles (`/roles_admin`)
- * are stored in separate top-level collections, each with a distinct and uniform security model.
- * This clear separation improves security and simplifies rule logic.
- */
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // --------------------------------
-    // Helper Functions
-    // --------------------------------
-
-    /**
-     * Verifies that the user is authenticated.
-     */
     function isSignedIn() {
       return request.auth != null;
     }
 
-    /**
-     * Checks if the currently authenticated user is a global super admin.
-     * Super admin status is granted by the existence of a document with the user's UID
-     * in the /roles_admin collection.
-     */
     function isSuperAdmin() {
       return exists(/databases/$(database)/documents/roles_admin/$(request.auth.uid));
     }
 
-    /**
-     * Checks if the authenticated user's UID matches the provided userId.
-     * This is the standard pattern for verifying resource ownership.
-     */
     function isOwner(userId) {
       return isSignedIn() && request.auth.uid == userId;
     }
 
-    /**
-     * Checks if a document already exists.
-     * Used in update/delete rules to prevent acting on non-existent documents.
-     */
-    function isExistingDoc() {
-      return resource != null;
+    // Companies / Clientes
+    match /companies/{companyId} {
+      allow read, write: if isSuperAdmin();
     }
 
-    /**
-     * Retrieves the role of the current user for a given tenant.
-     * Assumes the member document ID is the user's UID.
-     * Returns null if the user is not a member.
-     */
-    function getTenantRole(tenantId) {
-      return get(/databases/$(database)/documents/tenants/$(tenantId)/members/$(request.auth.uid)).data.role;
-    }
-
-    /**
-     * Checks if the current user is a member of the specified tenant.
-     * This is the primary check for any read access within a tenant.
-     */
-    function isTenantMember(tenantId) {
-      return isSignedIn() && exists(/databases/$(database)/documents/tenants/$(tenantId)/members/$(request.auth.uid));
-    }
-
-    /**
-     * Checks if the current user has an administrative role ('owner' or 'admin')
-     * within the specified tenant. This is the primary check for write access.
-     */
-    function isTenantAdmin(tenantId) {
-      return isSignedIn() && getTenantRole(tenantId) in ['owner', 'admin'];
-    }
-
-    // --------------------------------
-    // Collection Rules
-    // --------------------------------
-
-    /**
-     * @description Defines super-admin users. This collection should be managed
-     *              server-side or via the Firebase Console. Client writes are disabled.
-     * @path        /roles_admin/{userId}
-     * @allow       (get) A super admin checking another admin's status.
-     * @deny        (create) A regular user trying to make themselves an admin.
-     * @principle   Restricts sensitive role management to trusted actors, disabling client modifications.
-     */
     match /roles_admin/{userId} {
       allow get: if isSuperAdmin();
       allow list: if isSuperAdmin();
-      allow create: if false;
-      allow update: if false;
-      allow delete: if false;
     }
 
-    /**
-     * @description User profile data. Each user can create and manage their own document.
-     *              User data is private and cannot be listed or read by other users.
-     * @path        /users/{userId}
-     * @allow       (create) A new user creating their own profile document with a matching UID.
-     * @deny        (list) A regular user trying to enumerate all users in the system.
-     * @deny        (get) A user trying to read another user's profile.
-     * @principle   Enforces user ownership and privacy for personal data.
-     */
     match /users/{userId} {
       allow get: if isOwner(userId) || isSuperAdmin();
       allow list: if isSuperAdmin();
-      allow create: if isOwner(userId) && request.resource.data.id == userId;
-      allow update: if isOwner(userId) && isExistingDoc() && request.resource.data.id == resource.data.id;
-      allow delete: if isOwner(userId) && isExistingDoc();
+      allow create: if isOwner(userId);
+      allow update: if isOwner(userId);
     }
 
-    /**
-     * @description Tenant documents. Any signed-in user can create a tenant,
-     *              but only tenant members can read it and only tenant admins can modify it.
-     * @path        /tenants/{tenantId}
-     * @allow       (create) Any authenticated user creating a new tenant document.
-     * @deny        (list) A regular user trying to list all tenants in the system.
-     * @deny        (update) A tenant member with a 'viewer' role trying to change the tenant name.
-     * @principle   Restricts data visibility to tenant members and modification to tenant admins.
-     */
     match /tenants/{tenantId} {
-      allow get: if isSuperAdmin() || isTenantMember(tenantId);
-      allow list: if isSuperAdmin();
-      allow create: if isSignedIn();
-      allow update: if (isSuperAdmin() || isTenantAdmin(tenantId)) && isExistingDoc();
-      allow delete: if (isSuperAdmin() || isTenantAdmin(tenantId)) && isExistingDoc();
-
-      /**
-       * @description Membership documents linking users and their roles to a tenant.
-       *              Managed by tenant admins. Read by any tenant member.
-       * @path        /tenants/{tenantId}/members/{memberId}
-       * @allow       (create) A tenant admin adding a new member to the tenant.
-       * @deny        (create) A regular user trying to add themselves to a tenant.
-       * @deny        (update) A user trying to elevate their own role from 'viewer' to 'admin'.
-       * @principle   Access to child documents is controlled by role-based permissions derived from the parent context.
-       */
+      allow read, write: if isSuperAdmin();
+      
       match /members/{memberId} {
-        allow get: if isSuperAdmin() || isTenantMember(tenantId);
-        allow list: if isSuperAdmin() || isTenantMember(tenantId);
-        allow create: if (isSuperAdmin() || isTenantAdmin(tenantId)) && request.resource.data.tenantId == tenantId;
-        allow update: if (isSuperAdmin() || isTenantAdmin(tenantId)) && isExistingDoc() && request.resource.data.tenantId == resource.data.tenantId && request.resource.data.userId == resource.data.userId;
-        allow delete: if (isSuperAdmin() || isTenantAdmin(tenantId)) && isExistingDoc();
+        allow read, write: if isSuperAdmin();
       }
-
-      /**
-       * @description Communication channels associated with a tenant.
-       *              Managed by tenant admins. Read by any tenant member.
-       * @path        /tenants/{tenantId}/channels/{channelId}
-       * @allow       (create) A tenant admin adding a new channel.
-       * @deny        (update) A non-admin tenant member trying to modify a channel.
-       * @principle   Access to child documents is controlled by role-based permissions derived from the parent context.
-       */
       match /channels/{channelId} {
-        allow get: if isSuperAdmin() || isTenantMember(tenantId);
-        allow list: if isSuperAdmin() || isTenantMember(tenantId);
-        allow create: if (isSuperAdmin() || isTenantAdmin(tenantId)) && request.resource.data.tenantId == tenantId;
-        allow update: if (isSuperAdmin() || isTenantAdmin(tenantId)) && isExistingDoc() && request.resource.data.tenantId == resource.data.tenantId;
-        allow delete: if (isSuperAdmin() || isTenantAdmin(tenantId)) && isExistingDoc();
+        allow read, write: if isSuperAdmin();
       }
-
-      /**
-       * @description API Keys associated with a tenant.
-       *              Managed by tenant admins. Read by any tenant member.
-       * @path        /tenants/{tenantId}/apiKeys/{apiKeyId}
-       * @allow       (create) A tenant admin creating a new API key.
-       * @deny        (delete) A non-admin tenant member trying to delete an API key.
-       * @principle   Access to child documents is controlled by role-based permissions derived from the parent context.
-       */
       match /apiKeys/{apiKeyId} {
-        allow get: if isSuperAdmin() || isTenantMember(tenantId);
-        allow list: if isSuperAdmin() || isTenantMember(tenantId);
-        allow create: if (isSuperAdmin() || isTenantAdmin(tenantId)) && request.resource.data.tenantId == tenantId;
-        allow update: if (isSuperAdmin() || isTenantAdmin(tenantId)) && isExistingDoc() && request.resource.data.tenantId == resource.data.tenantId;
-        allow delete: if (isSuperAdmin() || isTenantAdmin(tenantId)) && isExistingDoc();
+        allow read, write: if isSuperAdmin();
       }
     }
 
-    /**
-     * @description Stores connection state for the test WhatsApp channel.
-     *              The primary document is 'default'. Allows any authenticated
-     *              user to read/write for testing purposes.
-     * @path        /channels/{channelId}
-     * @allow       (read, write) Any authenticated user.
-     * @principle   Provides open access for the system-wide test channel functionality.
-     */
     match /channels/{channelId} {
       allow read, write: if isSignedIn();
-
       match /conversations/{jid} {
         allow read: if isSignedIn();
-        allow write: if false;
-
         match /messages/{messageId} {
           allow read: if isSignedIn();
-          allow write: if false;
         }
       }
     }

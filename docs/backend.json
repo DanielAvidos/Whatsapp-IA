@@ -1,34 +1,53 @@
 {
   "entities": {
-    "Tenant": {
+    "Company": {
       "$schema": "http://json-schema.org/draft-07/schema#",
-      "title": "Tenant",
+      "title": "Company",
       "type": "object",
-      "description": "Represents a tenant (company/team) within the application.",
+      "description": "Represents a company (client) within the application.",
       "properties": {
         "id": {
           "type": "string",
-          "description": "Unique identifier for the Tenant entity."
+          "description": "Unique identifier for the Company entity."
         },
         "name": {
           "type": "string",
-          "description": "The name of the tenant."
+          "description": "The name of the company."
         },
         "status": {
           "type": "string",
-          "description": "The status of the tenant (e.g., active, suspended).",
-          "format": "string"
+          "description": "The status of the company (Active, Suspended).",
+          "enum": ["Active", "Suspended"]
         },
         "plan": {
           "type": "string",
-          "description": "The plan associated with the tenant."
+          "description": "The plan associated with the company (Free, Pro, Enterprise).",
+          "enum": ["Free", "Pro", "Enterprise"]
+        },
+        "adminEmail": {
+          "type": "string",
+          "format": "email",
+          "description": "The email of the company administrator."
+        },
+        "adminUid": {
+          "type": "string",
+          "description": "The Firebase Auth UID of the company administrator."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
         }
       },
       "required": [
-        "id",
         "name",
         "status",
-        "plan"
+        "plan",
+        "adminEmail",
+        "adminUid"
       ]
     },
     "Member": {
@@ -236,6 +255,22 @@
   "firestore": {
     "structure": [
       {
+        "path": "/companies/{companyId}",
+        "definition": {
+          "entityName": "Company",
+          "schema": {
+            "$ref": "#/backend/entities/Company"
+          },
+          "description": "Collection to store company clients.",
+          "params": [
+            {
+              "name": "companyId",
+              "description": "The unique identifier of the company."
+            }
+          ]
+        }
+      },
+      {
         "path": "/roles_admin/{userId}",
         "definition": {
           "entityName": "User",
@@ -359,7 +394,6 @@
           ]
         }
       }
-    ],
-    "reasoning": "This Firestore structure prioritizes security, scalability, and debuggability using Authorization Independence, Structural Segregation, Access Modeling, and Data Clarity principles. It avoids hierarchical authorization dependencies (`get()` calls in rules) by denormalizing authorization data (Membership Maps) into subcollections. This enables atomic operations and simplifies security rules. Segregation ensures that each collection has a homogeneous security posture. The structure facilitates secure `list` operations. It incorporates Tenant-based multi-tenancy where each tenant has its own members, channels and API keys.  Users are stored separately to maintain authentication information separate from tenant-specific membership data.\n\n**Authorization Independence:** The `members` map within each `tenant/{tenantId}` document enables role-based access control without needing to read parent documents. This ensures atomic operations (transactions/batches) are possible.\n\n**QAPs (Rules are not Filters):** Segregation of data into tenants, members, channels and api keys means that `list` operations can be efficiently secured by enforcing authorization rules at the collection level. Membership maps also ensure user can only access the tenants where they are members.\n\n**DBAC:** Roles are stored in the database (`members` documents) and authorization relies solely on `request.auth.uid`.\n\n**Admin Role:** The `/roles_admin/{uid}` collection allows for granting global admin privileges. The existence of a document in this collection grants admin access.\n\n**Data Invariants:** Ownership and relationships are maintained by `tenantId` fields in the `members`, `channels` and `apiKeys` collections.\n\n**Denormalization:** The `tenantId` field is denormalized into each `members`, `channels` and `apiKeys` document, which facilitates QAP (Rules are not Filters) and authorization independence (no `get()` calls).\n\nThe data structure is designed to support the core features of the Whatsapp IA app effectively:\n\n*   **Multi-tenant Dashboard:** The top-level `/tenants` collection allows for listing all tenants.\n*   **Tenant Management:**  The `/tenants/{tenantId}` path allows for CRUD operations on individual tenants.\n*   **Member Management:**  The `/tenants/{tenantId}/members/{memberId}` path manages members within each tenant. The denormalized tenant ID enables efficient querying of members for a specific tenant.\n*   **Channel Management:** The `/tenants/{tenantId}/channels/{channelId}` path manages channels within each tenant. The denormalized tenant ID enables efficient querying of channels for a specific tenant.\n*   **API Key Generation (Dummy):** The `/tenants/{tenantId}/apiKeys/{apiKeyId}` path manages API keys within each tenant. The denormalized tenant ID enables efficient querying of API keys for a specific tenant.\n*   **Role-Based Access Control:** Firestore rules will use the `members` map in `/tenants/{tenantId}` and the `/tenants/{tenantId}/members/{memberId}` documents to determine user roles and permissions.\n*   **Demo Data Generation:** The structure allows for easy population of demo data within a tenant by creating documents in the `/tenants/{tenantId}/channels`, `/tenants/{tenantId}/apiKeys`, and `/tenants/{tenantId}/members` collections."
+    ]
   }
 }

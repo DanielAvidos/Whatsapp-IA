@@ -1,10 +1,17 @@
 import { FieldValue, Timestamp } from 'firebase/firestore';
 
-export type Tenant = {
+export type CompanyPlan = 'Free' | 'Pro' | 'Enterprise';
+export type CompanyStatus = 'Active' | 'Suspended';
+
+export type Company = {
   id: string;
   name: string;
-  status: 'active' | 'suspended';
-  plan: 'free' | 'pro' | 'enterprise';
+  status: CompanyStatus;
+  plan: CompanyPlan;
+  adminEmail: string;
+  adminUid: string;
+  createdAt: Timestamp | FieldValue;
+  updatedAt: Timestamp | FieldValue;
 };
 
 export type MemberRole = 'owner' | 'admin' | 'agent' | 'viewer';
