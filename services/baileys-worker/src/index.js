@@ -65,7 +65,6 @@ async function acquireChannelLock(channelId) {
     const lockSnap = await lockRef.get();
     if (lockSnap.exists) {
       const data = lockSnap.data();
-      // If lock is held by someone else and not expired (60s)
       if (data.holder !== REVISION && data.expiresAt > now) {
         logger.warn({ channelId, holder: data.holder }, 'Lock held by another instance');
         return false;
@@ -147,7 +146,6 @@ function safeJson(obj) {
 function extractText(message) {
   if (!message) return null;
 
-  // Unwrap ephemeral/view-once/edited wrappers
   let msg = message;
   if (msg.ephemeralMessage) msg = msg.ephemeralMessage.message;
   if (msg.viewOnceMessageV2) msg = msg.viewOnceMessageV2.message;
@@ -283,7 +281,6 @@ async function startOrRestartBaileys(channelId, reason = 'manual') {
   }
   startingChannels.add(channelId);
 
-  // Distributed Lock Check
   const lockAcquired = await acquireChannelLock(channelId);
   if (!lockAcquired) {
     logger.warn({ channelId, reason }, 'Could not acquire lock, skipping start');
@@ -342,7 +339,7 @@ async function startOrRestartBaileys(channelId, reason = 'manual') {
           const qrDataUrl = await qrcode.toDataURL(qr);
           await upsertChannelStatus(channelId, {
             status: 'QR',
-            qr: { raw: qr, public: qr },
+            qr: { raw: qr, public: qrDataUrl },
             qrDataUrl,
             lastQrAt: FieldValue.serverTimestamp(),
             lastError: null,
@@ -537,6 +534,23 @@ app.post('/v1/channels', async (req, res) => {
   }
 });
 
+app.patch('/v1/channels/:channelId', async (req, res) => {
+  try {
+    const { channelId } = req.params;
+    const { displayName } = req.body;
+    if (!displayName) return res.status(400).json({ error: 'displayName is required' });
+
+    await db.collection('channels').doc(channelId).set({
+      displayName,
+      updatedAt: FieldValue.serverTimestamp(),
+    }, { merge: true });
+
+    res.json({ ok: true, message: 'Alias updated' });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: 'Failed to update alias' });
+  }
+});
+
 app.get('/v1/channels/:channelId/status', async (req, res) => {
   try {
     const { channelId } = req.params;
@@ -714,7 +728,6 @@ async function bootStartLinkedChannels() {
     const docs = snap.docs;
     if (docs.length) logger.info({ count: docs.length }, 'Boot: starting linked channels');
     
-    // Start sequentially with delay to avoid overloading
     for (const docSnap of docs) {
       const status = docSnap.data().status;
       if (['CONNECTED', 'DISCONNECTED'].includes(status)) {
