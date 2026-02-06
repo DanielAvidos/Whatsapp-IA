@@ -25,6 +25,7 @@ import { StatusBadge } from '@/components/app/status-badge';
 import { useToast } from '@/hooks/use-toast';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Checkbox } from '@/components/ui/checkbox';
+import { Badge } from '@/components/ui/badge';
 
 const companySchema = z.object({
   name: z.string().min(2, "Name must be at least 2 characters."),
