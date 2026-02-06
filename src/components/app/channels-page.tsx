@@ -4,20 +4,21 @@
 import React, { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useFirestore, useMemoFirebase, useCollection, useUser } from '@/firebase';
-import { collection, query, where } from 'firebase/firestore';
+import { collection, query, where, doc, updateDoc, serverTimestamp } from 'firebase/firestore';
 import { PageHeader } from '@/components/app/page-header';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Button } from '@/components/ui/button';
-import { PlusCircle, MoreHorizontal, RotateCcw, Wrench, Edit2, Building2, MessageSquare } from 'lucide-react';
+import { PlusCircle, MoreHorizontal, RotateCcw, Wrench, Edit2, Building2, MessageSquare, Link as LinkIcon } from 'lucide-react';
 import { StatusBadge } from '@/components/app/status-badge';
-import type { WhatsappChannel } from '@/lib/types';
+import type { WhatsappChannel, Company } from '@/lib/types';
 import { Skeleton } from '@/components/ui/skeleton';
 import { useToast } from '@/hooks/use-toast';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from '@/components/ui/dialog';
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from '@/components/ui/form';
 import { Input } from '@/components/ui/input';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import * as z from 'zod';
@@ -36,6 +37,7 @@ export function ChannelsPage() {
     const { toast } = useToast();
     const [addDialogOpen, setAddDialogOpen] = useState(false);
     const [editDialogOpen, setEditDialogOpen] = useState(false);
+    const [assignDialogOpen, setAssignDialogOpen] = useState(false);
     const [selectedChannel, setSelectedChannel] = useState<WhatsappChannel | null>(null);
     const [myCompanyId, setMyCompanyId] = useState<string | null>(null);
     const [isResolvingCompany, setIsResolvingCompany] = useState(false);
@@ -54,6 +56,7 @@ export function ChannelsPage() {
       resolve();
     }, [firestore, user, isSuperAdmin]);
 
+    // Queries for channels
     const channelsQuery = useMemoFirebase(() => {
         if (!firestore) return null;
         const colRef = collection(firestore, 'channels');
@@ -65,6 +68,13 @@ export function ChannelsPage() {
     }, [firestore, isSuperAdmin, myCompanyId]);
 
     const { data: channels, isLoading } = useCollection<WhatsappChannel>(channelsQuery);
+
+    // Query for companies (only for superadmin assignment)
+    const companiesQuery = useMemoFirebase(() => {
+      if (!firestore || !isSuperAdmin) return null;
+      return collection(firestore, 'companies');
+    }, [firestore, isSuperAdmin]);
+    const { data: companiesList } = useCollection<Company>(companiesQuery);
 
     const addForm = useForm<ChannelFormValues>({
       resolver: zodResolver(channelSchema),
@@ -123,6 +133,23 @@ export function ChannelsPage() {
         } catch (error) {
             toast({ variant: 'destructive', title: "Acción fallida", description: String(error) });
         }
+    };
+
+    const handleAssignChannel = async (channelId: string, companyId: string | null) => {
+      if (!firestore) return;
+      try {
+        const company = companyId === "none" ? null : companiesList?.find(c => c.id === companyId);
+        const channelRef = doc(firestore, 'channels', channelId);
+        await updateDoc(channelRef, {
+          companyId: company?.id || null,
+          companyName: company?.name || null,
+          updatedAt: serverTimestamp(),
+        });
+        toast({ title: company ? "Canal asignado" : "Asignación quitada" });
+        setAssignDialogOpen(false);
+      } catch (error) {
+        toast({ variant: 'destructive', title: "Error en asignación", description: String(error) });
+      }
     };
 
     const getStatusForBadge = (status: WhatsappChannel['status'] | undefined) => {
@@ -201,20 +228,27 @@ export function ChannelsPage() {
                                                 </DropdownMenuTrigger>
                                                 <DropdownMenuContent align="end">
                                                     {isSuperAdmin && (
-                                                      <DropdownMenuItem onSelect={() => {
-                                                        setSelectedChannel(channel);
-                                                        editForm.setValue('displayName', channel.displayName || '');
-                                                        setEditDialogOpen(true);
-                                                      }}>
-                                                          <Edit2 className="mr-2 h-4 w-4" />
-                                                          Editar Alias
-                                                      </DropdownMenuItem>
-                                                    )}
-                                                    {(channel.status === 'ERROR' || isSuperAdmin) && (
+                                                      <>
+                                                        <DropdownMenuItem onSelect={() => {
+                                                          setSelectedChannel(channel);
+                                                          editForm.setValue('displayName', channel.displayName || '');
+                                                          setEditDialogOpen(true);
+                                                        }}>
+                                                            <Edit2 className="mr-2 h-4 w-4" />
+                                                            Editar Alias
+                                                        </DropdownMenuItem>
+                                                        <DropdownMenuItem onSelect={() => {
+                                                          setSelectedChannel(channel);
+                                                          setAssignDialogOpen(true);
+                                                        }}>
+                                                            <LinkIcon className="mr-2 h-4 w-4" />
+                                                            {channel.companyId ? "Reasignar Empresa" : "Asignar a Empresa"}
+                                                        </DropdownMenuItem>
                                                         <DropdownMenuItem onSelect={() => handleAction(channel.id, '/repair', 'Reparación iniciada')}>
                                                             <Wrench className="mr-2 h-4 w-4" />
                                                             Reparar Canal
                                                         </DropdownMenuItem>
+                                                      </>
                                                     )}
                                                     <DropdownMenuItem onSelect={() => handleAction(channel.id, '/resetSession', 'Sesión reseteada')}>
                                                         <RotateCcw className="mr-2 h-4 w-4" />
@@ -302,6 +336,37 @@ export function ChannelsPage() {
                     </DialogFooter>
                   </form>
                 </Form>
+              </DialogContent>
+            </Dialog>
+
+            {/* Assign Company Dialog */}
+            <Dialog open={assignDialogOpen} onOpenChange={setAssignDialogOpen}>
+              <DialogContent>
+                <DialogHeader>
+                  <DialogTitle>Asignar Canal a Empresa</DialogTitle>
+                  <DialogDescription>
+                    Selecciona la empresa a la que pertenece el canal <strong>{selectedChannel?.displayName || selectedChannel?.id}</strong>.
+                  </DialogDescription>
+                </DialogHeader>
+                <div className="py-4">
+                  <Select 
+                    onValueChange={(val) => handleAssignChannel(selectedChannel?.id!, val)}
+                    defaultValue={selectedChannel?.companyId || "none"}
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder="Seleccionar empresa" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="none">Sin asignar (Quitar)</SelectItem>
+                      {companiesList?.map(c => (
+                        <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <DialogFooter>
+                  <Button variant="outline" onClick={() => setAssignDialogOpen(false)}>Cerrar</Button>
+                </DialogFooter>
               </DialogContent>
             </Dialog>
         </main>
