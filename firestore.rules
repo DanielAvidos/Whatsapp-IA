@@ -6,8 +6,12 @@ service cloud.firestore {
       return request.auth != null;
     }
 
+    // Define super admin by specific UID (from backend.json) or by existence in roles_admin collection
     function isSuperAdmin() {
-      return exists(/databases/$(database)/documents/roles_admin/$(request.auth.uid));
+      return isSignedIn() && (
+        request.auth.uid == 'd6Agbzw3qpgHtykUBnBDs86vg1S2' || 
+        exists(/databases/$(database)/documents/roles_admin/$(request.auth.uid))
+      );
     }
 
     function isOwner(userId) {
@@ -16,12 +20,12 @@ service cloud.firestore {
 
     // Companies / Clientes
     match /companies/{companyId} {
+      // allow read covers both get and list
       allow read, write: if isSuperAdmin();
     }
 
     match /roles_admin/{userId} {
-      allow get: if isSuperAdmin();
-      allow list: if isSuperAdmin();
+      allow get, list: if isSuperAdmin();
     }
 
     match /users/{userId} {
