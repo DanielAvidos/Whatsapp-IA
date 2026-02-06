@@ -1,3 +1,4 @@
+
 "use client";
 
 import { useForm } from "react-hook-form";
@@ -21,6 +22,7 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/com
 import { Eye, EyeOff } from "lucide-react";
 import { useLanguage } from "@/context/language-provider";
 import { LanguageSwitcher } from "@/components/language-switcher";
+import { getIsSuperAdmin } from "@/lib/auth-helpers";
 
 const loginSchema = z.object({
   email: z.string().email({ message: "Invalid email address." }),
@@ -50,7 +52,8 @@ export default function LoginPage() {
 
   useEffect(() => {
     if (!isUserLoading && user) {
-      router.replace("/dashboard");
+      const isAdmin = getIsSuperAdmin(user);
+      router.replace(isAdmin ? "/dashboard" : "/channels");
     }
   }, [user, isUserLoading, router]);
 

@@ -1,3 +1,4 @@
+
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
@@ -10,8 +11,6 @@ service cloud.firestore {
     function isSuperAdmin() {
       return isSignedIn() && (
         request.auth.uid == 'd6Agbzw3qpgHtykUBnBDs86vg1S2' || 
-        request.auth.uid == 'moupp91HEvb5XuKqQw8yKGilkdr1' ||
-        request.auth.uid == 'newzGI8e0UNoTzq11bQr2Dib2sA3' ||
         exists(/databases/$(database)/documents/roles_admin/$(request.auth.uid))
       );
     }
@@ -22,7 +21,6 @@ service cloud.firestore {
 
     // Companies / Clientes
     match /companies/{companyId} {
-      // allow read covers both get and list
       allow read, write: if isSuperAdmin();
     }
 

@@ -1,9 +1,11 @@
+
 "use client";
 
 import { useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { useUser } from '@/firebase';
 import { Skeleton } from '@/components/ui/skeleton';
+import { getIsSuperAdmin } from '@/lib/auth-helpers';
 
 export default function Home() {
   const router = useRouter();
@@ -12,7 +14,8 @@ export default function Home() {
   useEffect(() => {
     if (!isUserLoading) {
       if (user) {
-        router.replace('/dashboard');
+        const isAdmin = getIsSuperAdmin(user);
+        router.replace(isAdmin ? '/dashboard' : '/channels');
       } else {
         router.replace('/login');
       }

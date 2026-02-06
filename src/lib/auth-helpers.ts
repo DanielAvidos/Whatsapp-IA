@@ -3,7 +3,7 @@ import { User } from "firebase/auth";
 import { collection, query, where, getDocs, Firestore } from "firebase/firestore";
 
 export const SUPERADMIN_EMAIL = "superadmin@avidos.com";
-export const ADMIN_EMAILS = [SUPERADMIN_EMAIL, "daniel@avidos.mx", "rogegzll96@gmail.com"];
+export const ADMIN_EMAILS = [SUPERADMIN_EMAIL];
 
 /**
  * Checks if the current user is a Superadmin.
