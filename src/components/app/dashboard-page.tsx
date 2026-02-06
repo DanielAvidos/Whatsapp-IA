@@ -72,7 +72,7 @@ export function DashboardPage() {
       const secondaryApp = initializeApp(firebaseConfig, secondaryAppName);
       const secondaryAuth = getAuth(secondaryApp);
 
-      const userCred = await createUserWithEmailAndPassword(secondaryAuth, values.email, "welcomm");
+      const userCred = await createUserWithEmailAndPassword(secondaryAuth, values.email, "welcome");
       const adminUid = userCred.user.uid;
 
       await signOut(secondaryAuth);
@@ -224,7 +224,7 @@ export function DashboardPage() {
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Registrar Nuevo Cliente</DialogTitle>
-            <DialogDescription>Se creará un acceso para el administrador con la contraseña "welcomm".</DialogDescription>
+            <DialogDescription>Se creará un acceso para el administrador con la contraseña "welcome".</DialogDescription>
           </DialogHeader>
           <Form {...form}>
             <form onSubmit={form.handleSubmit(handleCreateCompany)} className="space-y-4">
