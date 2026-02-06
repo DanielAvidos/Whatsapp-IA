@@ -9,7 +9,7 @@ import { PageHeader } from '@/components/app/page-header';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Button } from '@/components/ui/button';
-import { PlusCircle, MoreHorizontal, RotateCcw, Wrench, Edit2, Building2 } from 'lucide-react';
+import { PlusCircle, MoreHorizontal, RotateCcw, Wrench, Edit2, Building2, MessageSquare } from 'lucide-react';
 import { StatusBadge } from '@/components/app/status-badge';
 import type { WhatsappChannel } from '@/lib/types';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -60,7 +60,6 @@ export function ChannelsPage() {
         if (isSuperAdmin) {
           return colRef;
         }
-        // If not superadmin, we must wait for myCompanyId or it will return nothing
         if (!myCompanyId) return null;
         return query(colRef, where('companyId', '==', myCompanyId));
     }, [firestore, isSuperAdmin, myCompanyId]);
@@ -194,7 +193,7 @@ export function ChannelsPage() {
                                                 <Link href={`/channels/${channel.id}`}>Gestionar</Link>
                                             </Button>
                                             
-                                            <DropdownMenu>
+                                            <DropdownMenu modal={false}>
                                                 <DropdownMenuTrigger asChild>
                                                     <Button variant="ghost" size="icon" className="h-8 w-8">
                                                         <MoreHorizontal className="h-4 w-4" />
@@ -202,7 +201,7 @@ export function ChannelsPage() {
                                                 </DropdownMenuTrigger>
                                                 <DropdownMenuContent align="end">
                                                     {isSuperAdmin && (
-                                                      <DropdownMenuItem onClick={() => {
+                                                      <DropdownMenuItem onSelect={() => {
                                                         setSelectedChannel(channel);
                                                         editForm.setValue('displayName', channel.displayName || '');
                                                         setEditDialogOpen(true);
@@ -212,12 +211,12 @@ export function ChannelsPage() {
                                                       </DropdownMenuItem>
                                                     )}
                                                     {(channel.status === 'ERROR' || isSuperAdmin) && (
-                                                        <DropdownMenuItem onClick={() => handleAction(channel.id, '/repair', 'Reparación iniciada')}>
+                                                        <DropdownMenuItem onSelect={() => handleAction(channel.id, '/repair', 'Reparación iniciada')}>
                                                             <Wrench className="mr-2 h-4 w-4" />
                                                             Reparar Canal
                                                         </DropdownMenuItem>
                                                     )}
-                                                    <DropdownMenuItem onClick={() => handleAction(channel.id, '/resetSession', 'Sesión reseteada')}>
+                                                    <DropdownMenuItem onSelect={() => handleAction(channel.id, '/resetSession', 'Sesión reseteada')}>
                                                         <RotateCcw className="mr-2 h-4 w-4" />
                                                         Resetear Sesión
                                                     </DropdownMenuItem>
@@ -308,5 +307,3 @@ export function ChannelsPage() {
         </main>
     );
 }
-
-import { MessageSquare } from 'lucide-react';

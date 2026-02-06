@@ -11,7 +11,7 @@ import { collection, addDoc, updateDoc, doc, serverTimestamp, query, orderBy } f
 import { initializeApp } from 'firebase/app';
 import { getAuth, createUserWithEmailAndPassword, signOut } from 'firebase/auth';
 import { firebaseConfig } from '@/firebase/config';
-import type { Company, CompanyPlan, CompanyStatus, WhatsappChannel } from '@/lib/types';
+import type { Company, CompanyStatus, WhatsappChannel } from '@/lib/types';
 import { PageHeader } from '@/components/app/page-header';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -193,19 +193,19 @@ export function DashboardPage() {
                     <TableCell className="capitalize">{company.plan}</TableCell>
                     <TableCell className="text-sm text-muted-foreground">{company.adminEmail}</TableCell>
                     <TableCell className="text-right">
-                      <DropdownMenu>
+                      <DropdownMenu modal={false}>
                         <DropdownMenuTrigger asChild>
                           <Button variant="ghost" size="icon"><MoreHorizontal /></Button>
                         </DropdownMenuTrigger>
                         <DropdownMenuContent align="end">
-                          <DropdownMenuItem onClick={() => {
+                          <DropdownMenuItem onSelect={() => {
                             setSelectedCompany(company);
                             setAssignDialogOpen(true);
                           }}>
                             <LinkIcon className="mr-2 h-4 w-4" />
                             Asignar Canales
                           </DropdownMenuItem>
-                          <DropdownMenuItem onClick={() => handleUpdateStatus(company.id, company.status === 'Active' ? 'Suspended' : 'Active')}>
+                          <DropdownMenuItem onSelect={() => handleUpdateStatus(company.id, company.status === 'Active' ? 'Suspended' : 'Active')}>
                             {company.status === 'Active' ? 'Suspender' : 'Activar'}
                           </DropdownMenuItem>
                         </DropdownMenuContent>
