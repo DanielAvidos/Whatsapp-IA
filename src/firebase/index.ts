@@ -1,45 +1,36 @@
 
 'use client';
 
-import { firebaseConfig } from '@/firebase/config';
+import { firebaseConfig, validateFirebaseConfig } from '@/firebase/config';
 import { initializeApp, getApps, getApp, FirebaseApp } from 'firebase/app';
 import { getAuth } from 'firebase/auth';
-import { getFirestore } from 'firebase/firestore'
+import { getFirestore } from 'firebase/firestore';
 
-// IMPORTANT: DO NOT MODIFY THIS FUNCTION'S CORE LOGIC
-// But added a safety check for the fallback config to avoid auth/invalid-api-key crashes
 export function initializeFirebase() {
-  if (!getApps().length) {
-    let firebaseApp: FirebaseApp;
-    try {
-      // Attempt to initialize via Firebase App Hosting environment variables
-      firebaseApp = initializeApp();
-    } catch (e) {
-      // Only warn in production because it's normal to use the firebaseConfig to initialize
-      // during development
-      if (process.env.NODE_ENV === "production") {
-        console.warn('Automatic initialization failed. Falling back to firebase config object.', e);
-      }
-
-      // Safety check: only initialize with config if at least the apiKey is present
-      if (firebaseConfig.apiKey && firebaseConfig.apiKey !== 'undefined') {
-        firebaseApp = initializeApp(firebaseConfig);
-      } else {
-        console.error('Firebase configuration is missing. Ensure NEXT_PUBLIC_FIREBASE_* environment variables are set.');
-        // Initialize with a dummy app to avoid breaking the entire JS execution flow
-        // but it will still fail on actual service calls.
-        firebaseApp = initializeApp({
-          apiKey: "missing-api-key",
-          projectId: "missing-project-id",
-          authDomain: "missing-auth-domain",
-        });
-      }
-    }
-
-    return getSdks(firebaseApp);
+  if (typeof window === 'undefined') {
+    // Evitar inicialización en el servidor si no es necesario o si faltan credenciales
+    return null;
   }
 
-  // If already initialized, return the SDKs with the already initialized App
+  const validation = validateFirebaseConfig();
+  
+  if (!getApps().length) {
+    if (!validation.isValid) {
+      console.error(validation.error);
+      // No lanzamos un Error fatal aquí para no romper el renderizado inicial de Next.js, 
+      // pero devolvemos un estado que los hooks manejarán.
+      return null;
+    }
+
+    try {
+      const app = initializeApp(firebaseConfig);
+      return getSdks(app);
+    } catch (e) {
+      console.error('Error al inicializar Firebase App:', e);
+      return null;
+    }
+  }
+
   return getSdks(getApp());
 }
 
