@@ -5,22 +5,5 @@ runConfig:
   # Increase this value if you'd like to automatically spin up
   # more instances in response to increased traffic.
   maxInstances: 1
-  env:
-    - variable: NEXT_PUBLIC_FIREBASE_API_KEY
-      value: "AIzaSyB0E3GnwESqlYcGXKBkV2whX1zZY8-eS1g"
-    - variable: NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN
-      value: "whatsapp-ia-dev.firebaseapp.com"
-    - variable: NEXT_PUBLIC_FIREBASE_PROJECT_ID
-      value: "whatsapp-ia-dev"
-    - variable: NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET
-      value: "whatsapp-ia-dev.firebasestorage.app"
-    - variable: NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID
-      value: "24342745173"
-    - variable: NEXT_PUBLIC_FIREBASE_APP_ID
-      value: "1:24342745173:web:76b4e0d02536729efcc4dc"
-    - variable: NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID
-      value: "G-7E2E5QWTBR"
-    - variable: NEXT_PUBLIC_FIREBASE_DATABASE_URL
-      value: "https://whatsapp-ia-dev-default-rtdb.firebaseio.com"
-    - variable: NEXT_PUBLIC_BAILEYS_WORKER_URL
-      value: "https://baileys-worker-701554958520.us-central1.run.app"
+  # Variables are now managed directly in the Firebase Console (App Hosting -> Environment variables)
+  # for the development and production backends.
