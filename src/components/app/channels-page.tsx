@@ -1,4 +1,3 @@
-
 "use client";
 
 import React, { useEffect, useState } from 'react';
@@ -42,7 +41,7 @@ export function ChannelsPage() {
     const [myCompanyId, setMyCompanyId] = useState<string | null>(null);
     const [isResolvingCompany, setIsResolvingCompany] = useState(false);
     
-    const workerUrl = process.env.NEXT_PUBLIC_BAILEYS_WORKER_URL || "https://baileys-worker-701554958520.us-central1.run.app";
+    const workerUrl = process.env.NEXT_PUBLIC_BAILEYS_WORKER_URL;
     const isSuperAdmin = getIsSuperAdmin(user);
 
     useEffect(() => {
@@ -87,6 +86,10 @@ export function ChannelsPage() {
     });
 
     const onAddChannel = async (values: ChannelFormValues) => {
+        if (!workerUrl) {
+            toast({ variant: 'destructive', title: "Error", description: "Worker URL not configured." });
+            return;
+        }
         try {
             const response = await fetch(`${workerUrl}/v1/channels`, {
                 method: 'POST',
@@ -105,7 +108,7 @@ export function ChannelsPage() {
     };
 
     const onEditAlias = async (values: ChannelFormValues) => {
-      if (!selectedChannel) return;
+      if (!selectedChannel || !workerUrl) return;
       try {
           const response = await fetch(`${workerUrl}/v1/channels/${selectedChannel.id}`, {
               method: 'PATCH',
@@ -124,6 +127,10 @@ export function ChannelsPage() {
     };
 
     const handleAction = async (channelId: string, endpoint: string, successTitle: string) => {
+        if (!workerUrl) {
+            toast({ variant: 'destructive', title: "Error", description: "Worker URL not configured." });
+            return;
+        }
         try {
             const response = await fetch(`${workerUrl}/v1/channels/${channelId}${endpoint}`, {
                 method: 'POST',

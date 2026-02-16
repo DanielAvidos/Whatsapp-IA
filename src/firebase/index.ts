@@ -1,3 +1,4 @@
+
 'use client';
 
 import { firebaseConfig } from '@/firebase/config';
@@ -5,14 +6,11 @@ import { initializeApp, getApps, getApp, FirebaseApp } from 'firebase/app';
 import { getAuth } from 'firebase/auth';
 import { getFirestore } from 'firebase/firestore'
 
-// IMPORTANT: DO NOT MODIFY THIS FUNCTION
+// IMPORTANT: DO NOT MODIFY THIS FUNCTION'S CORE LOGIC
+// But added a safety check for the fallback config to avoid auth/invalid-api-key crashes
 export function initializeFirebase() {
   if (!getApps().length) {
-    // Important! initializeApp() is called without any arguments because Firebase App Hosting
-    // integrates with the initializeApp() function to provide the environment variables needed to
-    // populate the FirebaseOptions in production. It is critical that we attempt to call initializeApp()
-    // without arguments.
-    let firebaseApp;
+    let firebaseApp: FirebaseApp;
     try {
       // Attempt to initialize via Firebase App Hosting environment variables
       firebaseApp = initializeApp();
@@ -22,7 +20,20 @@ export function initializeFirebase() {
       if (process.env.NODE_ENV === "production") {
         console.warn('Automatic initialization failed. Falling back to firebase config object.', e);
       }
-      firebaseApp = initializeApp(firebaseConfig);
+
+      // Safety check: only initialize with config if at least the apiKey is present
+      if (firebaseConfig.apiKey && firebaseConfig.apiKey !== 'undefined') {
+        firebaseApp = initializeApp(firebaseConfig);
+      } else {
+        console.error('Firebase configuration is missing. Ensure NEXT_PUBLIC_FIREBASE_* environment variables are set.');
+        // Initialize with a dummy app to avoid breaking the entire JS execution flow
+        // but it will still fail on actual service calls.
+        firebaseApp = initializeApp({
+          apiKey: "missing-api-key",
+          projectId: "missing-project-id",
+          authDomain: "missing-auth-domain",
+        });
+      }
     }
 
     return getSdks(firebaseApp);

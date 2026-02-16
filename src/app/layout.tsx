@@ -3,6 +3,7 @@ import './globals.css';
 import { Toaster } from "@/components/ui/toaster";
 import { FirebaseClientProvider } from '@/firebase';
 import { LanguageProvider } from '@/context/language-provider';
+import { DevIndicator } from '@/components/dev-indicator';
 
 export const metadata: Metadata = {
   title: 'Whatsapp IA',
@@ -27,6 +28,7 @@ export default function RootLayout({
             {children}
           </LanguageProvider>
           <Toaster />
+          <DevIndicator />
         </FirebaseClientProvider>
       </body>
     </html>

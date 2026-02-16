@@ -36,11 +36,11 @@ export function ChannelDetailPage({ channelId }: { channelId: string }) {
   const [isQrModalOpen, setQrModalOpen] = useState(false);
   const [activeTab, setActiveTab] = useState('connection');
 
-  const workerUrl = process.env.NEXT_PUBLIC_BAILEYS_WORKER_URL || "https://baileys-worker-701554958520.us-central1.run.app";
+  const workerUrl = process.env.NEXT_PUBLIC_BAILEYS_WORKER_URL;
 
   const handleApiCall = async (endpoint: string, successMessage: string, errorMessage: string) => {
     if (!workerUrl) {
-      toast({ variant: 'destructive', title: 'Worker URL not configured' });
+      toast({ variant: 'destructive', title: 'Worker URL not configured', description: 'Please set NEXT_PUBLIC_BAILEYS_WORKER_URL' });
       return;
     }
     toast({ title: successMessage });
@@ -163,7 +163,7 @@ export function ChannelDetailPage({ channelId }: { channelId: string }) {
         </TabsContent>
 
         <TabsContent value="chats">
-          <ChatInterface channelId={channelId} workerUrl={workerUrl} />
+          {workerUrl && <ChatInterface channelId={channelId} workerUrl={workerUrl} />}
         </TabsContent>
       </Tabs>
 
@@ -291,7 +291,7 @@ function MessageThread({ channelId, jid, workerUrl, name }: { channelId: string,
 
   // Mark as read when opening thread
   useEffect(() => {
-    if (jid) {
+    if (jid && workerUrl) {
        fetch(`${workerUrl}/v1/channels/${channelId}/conversations/${encodeURIComponent(jid)}/markRead`, { method: 'POST', mode: 'cors' })
         .catch(() => {});
     }
@@ -299,7 +299,7 @@ function MessageThread({ channelId, jid, workerUrl, name }: { channelId: string,
 
   const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!inputText.trim() || isSending) return;
+    if (!inputText.trim() || isSending || !workerUrl) return;
 
     setIsSending(true);
     try {
