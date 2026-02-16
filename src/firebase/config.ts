@@ -24,7 +24,7 @@ export function validateFirebaseConfig() {
   );
 
   if (missingVars.length > 0) {
-    console.warn('Missing required Firebase environment variables:', missingVars.join(', '));
+    console.error('Missing required Firebase environment variables:', missingVars.join(', '));
     return { 
       isValid: false, 
       error: `Firebase configuration is missing. Required: ${missingVars.join(', ')}`, 
