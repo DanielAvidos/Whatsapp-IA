@@ -6,6 +6,7 @@ export const firebaseConfig = {
   messagingSenderId: process.env.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID,
   appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID,
   measurementId: process.env.NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID,
+  databaseURL: process.env.NEXT_PUBLIC_FIREBASE_DATABASE_URL,
 };
 
 export function validateFirebaseConfig() {
@@ -23,8 +24,12 @@ export function validateFirebaseConfig() {
   );
 
   if (missingVars.length > 0) {
-    const errorMsg = "Firebase configuration is missing. Ensure NEXT_PUBLIC_FIREBASE_* environment variables are set.";
-    return { isValid: false, error: errorMsg, missingVars };
+    console.warn('Missing required Firebase environment variables:', missingVars.join(', '));
+    return { 
+      isValid: false, 
+      error: `Firebase configuration is missing. Required: ${missingVars.join(', ')}`, 
+      missingVars 
+    };
   }
   
   return { isValid: true };

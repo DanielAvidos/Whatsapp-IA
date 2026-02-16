@@ -13,7 +13,6 @@ export function initializeFirebase() {
 
   const validation = validateFirebaseConfig();
   if (!validation.isValid) {
-    console.warn(validation.error);
     return null;
   }
 
@@ -23,7 +22,7 @@ export function initializeFirebase() {
     try {
       app = initializeApp(firebaseConfig);
       
-      // Initialize Analytics only on client and if supported
+      // Initialize Analytics only on client and if supported/configured
       if (firebaseConfig.measurementId) {
         isSupported().then(supported => {
           if (supported) getAnalytics(app);
