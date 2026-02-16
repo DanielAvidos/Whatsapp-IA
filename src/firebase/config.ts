@@ -1,4 +1,3 @@
-
 export const firebaseConfig = {
   apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY,
   authDomain: process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN,
@@ -10,15 +9,23 @@ export const firebaseConfig = {
 };
 
 export function validateFirebaseConfig() {
-  const missingVars = [];
-  if (!firebaseConfig.apiKey) missingVars.push('NEXT_PUBLIC_FIREBASE_API_KEY');
-  if (!firebaseConfig.authDomain) missingVars.push('NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN');
-  if (!firebaseConfig.projectId) missingVars.push('NEXT_PUBLIC_FIREBASE_PROJECT_ID');
-  if (!firebaseConfig.appId) missingVars.push('NEXT_PUBLIC_FIREBASE_APP_ID');
+  const requiredVars = [
+    'NEXT_PUBLIC_FIREBASE_API_KEY',
+    'NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN',
+    'NEXT_PUBLIC_FIREBASE_PROJECT_ID',
+    'NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET',
+    'NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID',
+    'NEXT_PUBLIC_FIREBASE_APP_ID',
+  ];
+
+  const missingVars = requiredVars.filter(
+    (v) => !process.env[v]
+  );
 
   if (missingVars.length > 0) {
-    const errorMsg = `Faltan las siguientes variables de entorno de Firebase: ${missingVars.join(', ')}. Verifica tu archivo .env.local o la configuración del servidor.`;
-    return { isValid: false, error: errorMsg };
+    const errorMsg = "Firebase configuration is missing. Ensure NEXT_PUBLIC_FIREBASE_* environment variables are set.";
+    return { isValid: false, error: errorMsg, missingVars };
   }
+  
   return { isValid: true };
 }

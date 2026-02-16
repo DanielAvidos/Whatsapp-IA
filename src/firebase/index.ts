@@ -1,37 +1,43 @@
-
 'use client';
 
 import { firebaseConfig, validateFirebaseConfig } from '@/firebase/config';
 import { initializeApp, getApps, getApp, FirebaseApp } from 'firebase/app';
 import { getAuth } from 'firebase/auth';
 import { getFirestore } from 'firebase/firestore';
+import { getAnalytics, isSupported } from 'firebase/analytics';
 
 export function initializeFirebase() {
   if (typeof window === 'undefined') {
-    // Evitar inicialización en el servidor si no es necesario o si faltan credenciales
     return null;
   }
 
   const validation = validateFirebaseConfig();
-  
-  if (!getApps().length) {
-    if (!validation.isValid) {
-      console.error(validation.error);
-      // No lanzamos un Error fatal aquí para no romper el renderizado inicial de Next.js, 
-      // pero devolvemos un estado que los hooks manejarán.
-      return null;
-    }
-
-    try {
-      const app = initializeApp(firebaseConfig);
-      return getSdks(app);
-    } catch (e) {
-      console.error('Error al inicializar Firebase App:', e);
-      return null;
-    }
+  if (!validation.isValid) {
+    console.warn(validation.error);
+    return null;
   }
 
-  return getSdks(getApp());
+  let app: FirebaseApp;
+  
+  if (!getApps().length) {
+    try {
+      app = initializeApp(firebaseConfig);
+      
+      // Initialize Analytics only on client and if supported
+      if (firebaseConfig.measurementId) {
+        isSupported().then(supported => {
+          if (supported) getAnalytics(app);
+        });
+      }
+    } catch (e) {
+      console.error('Error initializing Firebase App:', e);
+      return null;
+    }
+  } else {
+    app = getApp();
+  }
+
+  return getSdks(app);
 }
 
 export function getSdks(firebaseApp: FirebaseApp) {
