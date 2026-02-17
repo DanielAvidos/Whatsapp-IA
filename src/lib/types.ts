@@ -55,6 +55,8 @@ export type WhatsappChannel = {
   updatedAt: FieldValue | Timestamp;
   lastError: any;
   linked: boolean;
+  companyId?: string | null;
+  companyName?: string | null;
 };
 
 export type Conversation = {
@@ -77,4 +79,18 @@ export type Message = {
   status: 'received' | 'sent' | 'delivered' | 'read' | null;
   timestamp: number;
   createdAt: Timestamp | FieldValue;
+};
+
+export type AITrainingDoc = {
+  content: string;
+  updatedAt: Timestamp | FieldValue;
+  updatedByUid: string;
+  updatedByEmail?: string;
+};
+
+export type AISettings = {
+  enabled: boolean;
+  updatedAt: Timestamp | FieldValue;
+  updatedByUid: string;
+  updatedByEmail?: string;
 };

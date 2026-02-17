@@ -1,15 +1,15 @@
 "use client";
 
 import { useState, useEffect, useRef } from 'react';
-import { Loader2, ScanQrCode, LogOut, RotateCcw, MessageSquare, Link as LinkIcon, Send } from 'lucide-react';
-import { useFirestore, useDoc, useMemoFirebase, useCollection } from '@/firebase';
-import { doc, collection, query, orderBy, limit, Timestamp } from 'firebase/firestore';
+import { Loader2, ScanQrCode, LogOut, RotateCcw, MessageSquare, Link as LinkIcon, Send, Bot, FileText, Save, History, Brain, Info } from 'lucide-react';
+import { useFirestore, useDoc, useMemoFirebase, useCollection, useUser } from '@/firebase';
+import { doc, collection, query, orderBy, limit, Timestamp, setDoc, serverTimestamp } from 'firebase/firestore';
 import { PageHeader } from '@/components/app/page-header';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useLanguage } from '@/context/language-provider';
-import type { WhatsappChannel, Conversation, Message } from '@/lib/types';
+import type { WhatsappChannel, Conversation, Message, AITrainingDoc, AISettings } from '@/lib/types';
 import { StatusBadge } from '@/components/app/status-badge';
 import { QrCodeDialog } from '@/components/app/qr-code-dialog';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -20,6 +20,9 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { format } from 'date-fns';
 import { cn } from '@/lib/utils';
 import Link from 'next/link';
+import { Switch } from '@/components/ui/switch';
+import { Label } from '@/components/ui/label';
+import { Textarea } from '@/components/ui/textarea';
 
 export function ChannelDetailPage({ channelId }: { channelId: string }) {
   const { t } = useLanguage();
@@ -82,6 +85,10 @@ export function ChannelDetailPage({ channelId }: { channelId: string }) {
           <TabsTrigger value="chats" className="flex items-center gap-2" disabled={channel?.status !== 'CONNECTED'}>
             <MessageSquare className="h-4 w-4" />
             Chats
+          </TabsTrigger>
+          <TabsTrigger value="chatbot" className="flex items-center gap-2">
+            <Bot className="h-4 w-4" />
+            Chatbot
           </TabsTrigger>
         </TabsList>
 
@@ -165,6 +172,10 @@ export function ChannelDetailPage({ channelId }: { channelId: string }) {
         <TabsContent value="chats">
           {workerUrl && <ChatInterface channelId={channelId} workerUrl={workerUrl} />}
         </TabsContent>
+
+        <TabsContent value="chatbot">
+          <ChatbotConfig channelId={channelId} />
+        </TabsContent>
       </Tabs>
 
       <QrCodeDialog 
@@ -173,6 +184,211 @@ export function ChannelDetailPage({ channelId }: { channelId: string }) {
         onOpenChange={setQrModalOpen} 
       />
     </main>
+  );
+}
+
+function ChatbotConfig({ channelId }: { channelId: string }) {
+  const firestore = useFirestore();
+  const { user } = useUser();
+  const { toast } = useToast();
+  const [isSaving, setIsSaving] = useState(false);
+  const [activeSubTab, setActiveSubTab] = useState('training');
+
+  // Firestore Refs
+  const productDetailsRef = useMemoFirebase(() => {
+    if (!firestore) return null;
+    return doc(firestore, 'channels', channelId, 'ai_training', 'product_details');
+  }, [firestore, channelId]);
+
+  const salesStrategyRef = useMemoFirebase(() => {
+    if (!firestore) return null;
+    return doc(firestore, 'channels', channelId, 'ai_training', 'sales_strategy');
+  }, [firestore, channelId]);
+
+  const aiSettingsRef = useMemoFirebase(() => {
+    if (!firestore) return null;
+    return doc(firestore, 'channels', channelId, 'ai_training', 'settings');
+  }, [firestore, channelId]);
+
+  // Data
+  const { data: productDetails, isLoading: isLoadingProduct } = useDoc<AITrainingDoc>(productDetailsRef);
+  const { data: salesStrategy, isLoading: isLoadingStrategy } = useDoc<AITrainingDoc>(salesStrategyRef);
+  const { data: aiSettings, isLoading: isLoadingSettings } = useDoc<AISettings>(aiSettingsRef);
+
+  // Local State for Editing
+  const [localProductContent, setLocalProductContent] = useState('');
+  const [localSalesContent, setLocalSalesContent] = useState('');
+  const [localEnabled, setLocalEnabled] = useState(false);
+
+  useEffect(() => {
+    if (productDetails) setLocalProductContent(productDetails.content || '');
+  }, [productDetails]);
+
+  useEffect(() => {
+    if (salesStrategy) setLocalSalesContent(salesStrategy.content || '');
+  }, [salesStrategy]);
+
+  useEffect(() => {
+    if (aiSettings) setLocalEnabled(aiSettings.enabled || false);
+  }, [aiSettings]);
+
+  const handleSave = async () => {
+    if (!firestore || !user) return;
+    setIsSaving(true);
+    try {
+      const commonData = {
+        updatedAt: serverTimestamp(),
+        updatedByUid: user.uid,
+        updatedByEmail: user.email || '',
+      };
+
+      await Promise.all([
+        setDoc(productDetailsRef!, { ...commonData, content: localProductContent }, { merge: true }),
+        setDoc(salesStrategyRef!, { ...commonData, content: localSalesContent }, { merge: true }),
+        setDoc(aiSettingsRef!, { ...commonData, enabled: localEnabled }, { merge: true }),
+      ]);
+
+      toast({ title: 'Conocimiento guardado', description: 'La configuración de la IA ha sido actualizada.' });
+    } catch (e) {
+      toast({ variant: 'destructive', title: 'Error al guardar', description: String(e) });
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const formatDate = (val: any) => {
+    if (!val) return null;
+    if (val instanceof Timestamp) return format(val.toDate(), 'PPpp');
+    if (val?.toDate) return format(val.toDate(), 'PPpp');
+    return 'Recién actualizado';
+  };
+
+  const isLoading = isLoadingProduct || isLoadingStrategy || isLoadingSettings;
+
+  return (
+    <div className="space-y-6">
+      <Alert className="bg-primary/5 border-primary/20">
+        <Info className="h-4 w-4" />
+        <AlertTitle>Configuración de Estrategia</AlertTitle>
+        <AlertDescription>
+          Este panel permite definir el conocimiento y la personalidad del asistente. 
+          <strong> Nota:</strong> Las respuestas automáticas se activarán próximamente.
+        </AlertDescription>
+      </Alert>
+
+      <Tabs value={activeSubTab} onValueChange={setActiveSubTab} className="w-full">
+        <TabsList className="grid w-full grid-cols-2 max-w-md">
+          <TabsTrigger value="training" className="flex items-center gap-2">
+            <Brain className="h-4 w-4" />
+            Entrenamiento
+          </TabsTrigger>
+          <TabsTrigger value="documents" className="flex items-center gap-2">
+            <FileText className="h-4 w-4" />
+            Documentos
+          </TabsTrigger>
+        </TabsList>
+
+        <TabsContent value="training" className="space-y-4 pt-4">
+          <Card>
+            <CardHeader className="flex flex-row items-center justify-between space-y-0">
+              <div className="space-y-1">
+                <CardTitle className="text-lg">Conocimiento y Personalidad</CardTitle>
+                <CardDescription>Define qué sabe y cómo habla tu asistente.</CardDescription>
+              </div>
+              <div className="flex items-center space-x-2">
+                <Switch 
+                  id="bot-enabled" 
+                  checked={localEnabled} 
+                  onCheckedChange={setLocalEnabled}
+                />
+                <Label htmlFor="bot-enabled">Activar chatbot</Label>
+              </div>
+            </CardHeader>
+            <CardContent className="space-y-6">
+              {isLoading ? (
+                <div className="space-y-6">
+                  <div className="space-y-2">
+                    <Skeleton className="h-4 w-32" />
+                    <Skeleton className="h-32 w-full" />
+                  </div>
+                  <div className="space-y-2">
+                    <Skeleton className="h-4 w-32" />
+                    <Skeleton className="h-32 w-full" />
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <div className="space-y-2">
+                    <Label className="text-sm font-semibold">Detalles del Producto (Knowledge Base)</Label>
+                    <Textarea 
+                      placeholder="Pega información objetiva del producto/servicio: características, precios, ubicación, etc." 
+                      className="min-h-[150px] resize-none"
+                      value={localProductContent}
+                      onChange={(e) => setLocalProductContent(e.target.value)}
+                    />
+                    {productDetails?.updatedAt && (
+                      <div className="flex items-center gap-2 text-[10px] text-muted-foreground">
+                        <History className="h-3 w-3" />
+                        <span>Actualizado el {formatDate(productDetails.updatedAt)} por {productDetails.updatedByEmail}</span>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="space-y-2">
+                    <Label className="text-sm font-semibold">Estrategia de Ventas (Personalidad)</Label>
+                    <Textarea 
+                      placeholder="Define tono, preguntas clave, manejo de objeciones, etc." 
+                      className="min-h-[150px] resize-none"
+                      value={localSalesContent}
+                      onChange={(e) => setLocalSalesContent(e.target.value)}
+                    />
+                    {salesStrategy?.updatedAt && (
+                      <div className="flex items-center gap-2 text-[10px] text-muted-foreground">
+                        <History className="h-3 w-3" />
+                        <span>Actualizado el {formatDate(salesStrategy.updatedAt)} por {salesStrategy.updatedByEmail}</span>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="flex justify-end gap-3 pt-2">
+                    <Button 
+                      onClick={handleSave} 
+                      disabled={isSaving}
+                      className="w-full sm:w-auto"
+                    >
+                      {isSaving ? (
+                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                      ) : (
+                        <Save className="mr-2 h-4 w-4" />
+                      )}
+                      Guardar Conocimiento
+                    </Button>
+                  </div>
+                </>
+              )}
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        <TabsContent value="documents" className="pt-4">
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-lg">Documentos y Archivos</CardTitle>
+              <CardDescription>Sube PDFs o archivos de texto para ampliar el conocimiento.</CardDescription>
+            </CardHeader>
+            <CardContent className="h-48 flex flex-col items-center justify-center text-center space-y-3 bg-muted/20 rounded-lg border-2 border-dashed mx-6 mb-6">
+              <FileText className="h-10 w-10 text-muted-foreground/30" />
+              <div className="space-y-1">
+                <p className="font-medium">Próximamente</p>
+                <p className="text-xs text-muted-foreground">
+                  Estamos trabajando para que puedas subir tus manuales y documentos.
+                </p>
+              </div>
+            </CardContent>
+          </Card>
+        </TabsContent>
+      </Tabs>
+    </div>
   );
 }
 
@@ -380,3 +596,4 @@ function MessageThread({ channelId, jid, workerUrl, name }: { channelId: string,
     </>
   );
 }
+
