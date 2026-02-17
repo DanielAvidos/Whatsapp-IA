@@ -1,3 +1,4 @@
+
 const baileys = require('@whiskeysockets/baileys');
 const makeWASocket = baileys.default;
 
@@ -18,8 +19,6 @@ const qrcode = require('qrcode');
 const { Boom } = require('@hapi/boom');
 const cors = require('cors');
 const dns = require('dns');
-
-const { version: baileysVersionFromPkg } = require('@whiskeysockets/baileys/package.json');
 
 // --- BOOT ---
 process.on('uncaughtException', (err) => {
@@ -45,6 +44,19 @@ initializeApp();
 const db = getFirestore();
 
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
+
+// --- AI INITIALIZATION (Dynamic Import for Genkit ESM) ---
+let aiInstance = null;
+async function getAI() {
+  if (aiInstance) return aiInstance;
+  const { genkit } = await import('genkit');
+  const { googleAI } = await import('@genkit-ai/google-genai');
+  aiInstance = genkit({
+    plugins: [googleAI()],
+    model: 'googleai/gemini-1.5-flash',
+  });
+  return aiInstance;
+}
 
 // --- GLOBAL STATE ---
 const activeSockets = new Map();      // <channelId, WASocket>
@@ -271,6 +283,93 @@ async function saveMessageToFirestore(channelId, jid, messageId, doc) {
   }, { merge: true });
 }
 
+// --- CHATBOT LOGIC ---
+async function handleChatbotReply(channelId, jid, messageId, text, sock) {
+  try {
+    const channelRef = db.collection('channels').doc(channelId);
+    const settingsSnap = await channelRef.collection('ai_training').doc('settings').get();
+    const settings = settingsSnap.exists ? settingsSnap.data() : { enabled: false };
+
+    if (!settings.enabled) return;
+
+    // 1. Idempotency Check
+    const processedRef = channelRef.collection('bot_processed').doc(messageId);
+    const processedSnap = await processedRef.get();
+    if (processedSnap.exists) return;
+
+    // Mark as processing immediately
+    await processedRef.set({
+      jid,
+      processedAt: FieldValue.serverTimestamp(),
+      status: 'processing'
+    });
+
+    // 2. Load Knowledge
+    const productSnap = await channelRef.collection('ai_training').doc('product_details').get();
+    const strategySnap = await channelRef.collection('ai_training').doc('sales_strategy').get();
+    
+    const productDetails = productSnap.exists ? productSnap.data().content : "";
+    const salesStrategy = strategySnap.exists ? strategySnap.data().content : "Responde como asistente profesional. Haz 1 pregunta para avanzar.";
+
+    // 3. Generate Response
+    const ai = await getAI();
+    const prompt = `
+Eres un asistente experto para WhatsApp. 
+REGLAS GLOBALES:
+- Responde de forma clara, breve y útil.
+- Usa emojis de forma moderada para ser cercano pero profesional.
+- Si falta información para ayudar al usuario, haz 1 o 2 preguntas clave.
+- NO inventes datos que no estén en el contexto.
+- Responde siempre en el mismo idioma que el usuario.
+
+ESTRATEGIA DE VENTAS Y PERSONALIDAD:
+${salesStrategy}
+
+DETALLES DEL PRODUCTO / BASE DE CONOCIMIENTO:
+${productDetails}
+
+MENSAJE DEL USUARIO:
+${text}
+    `;
+
+    const { text: responseText } = await ai.generate({ prompt });
+
+    if (!responseText) throw new Error('AI returned empty response');
+
+    // 4. Send Message with small delay for realism
+    await new Promise(r => setTimeout(r, 2000));
+    const r = await sock.sendMessage(jid, { text: responseText });
+
+    // 5. Save & Update
+    const outMsgId = r?.key?.id || `bot-${Date.now()}`;
+    await saveMessageToFirestore(channelId, jid, outMsgId, {
+      messageId: outMsgId,
+      jid,
+      fromMe: true,
+      direction: 'OUT',
+      text: responseText,
+      status: 'sent',
+      timestamp: Date.now(),
+      isBot: true,
+    });
+
+    await channelRef.collection('ai_training').doc('settings').update({
+      lastAutoReplyAt: FieldValue.serverTimestamp()
+    });
+
+    await processedRef.update({ status: 'completed' });
+
+  } catch (e) {
+    logger.error({ channelId, jid, error: e.message }, 'Chatbot execution failed');
+    await db.collection('channels').doc(channelId).update({
+      lastBotError: {
+        message: e.message,
+        at: FieldValue.serverTimestamp()
+      }
+    });
+  }
+}
+
 // --- BAILEYS CORE ---
 const MAX_RETRY = 6;
 const RETRY_DELAY_MS = [2000, 5000, 10000, 20000, 60000, 120000];
@@ -429,6 +528,13 @@ async function startOrRestartBaileys(channelId, reason = 'manual') {
           });
 
           await upsertChannelStatus(channelId, { lastSeenAt: FieldValue.serverTimestamp() });
+
+          // CHATBOT TRIGGER
+          if (!fromMe && text) {
+            handleChatbotReply(channelId, jid, messageId, text, sock).catch(e => {
+              logger.error({ channelId, messageId }, 'Chatbot error ignored');
+            });
+          }
         });
 
         await Promise.allSettled(tasks);

@@ -1,3 +1,4 @@
+
 import { FieldValue, Timestamp } from 'firebase/firestore';
 
 export type CompanyPlan = 'Free' | 'Pro' | 'Enterprise';
@@ -57,6 +58,10 @@ export type WhatsappChannel = {
   linked: boolean;
   companyId?: string | null;
   companyName?: string | null;
+  lastBotError?: {
+    message: string;
+    at: Timestamp;
+  } | null;
 };
 
 export type Conversation = {
@@ -79,6 +84,7 @@ export type Message = {
   status: 'received' | 'sent' | 'delivered' | 'read' | null;
   timestamp: number;
   createdAt: Timestamp | FieldValue;
+  isBot?: boolean;
 };
 
 export type AITrainingDoc = {
@@ -93,4 +99,5 @@ export type AISettings = {
   updatedAt: Timestamp | FieldValue;
   updatedByUid: string;
   updatedByEmail?: string;
+  lastAutoReplyAt?: Timestamp | FieldValue | null;
 };

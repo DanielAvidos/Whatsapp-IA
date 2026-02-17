@@ -1,7 +1,8 @@
+
 "use client";
 
 import { useState, useEffect, useRef } from 'react';
-import { Loader2, ScanQrCode, LogOut, RotateCcw, MessageSquare, Link as LinkIcon, Send, Bot, FileText, Save, History, Brain, Info } from 'lucide-react';
+import { Loader2, ScanQrCode, LogOut, RotateCcw, MessageSquare, Link as LinkIcon, Send, Bot, FileText, Save, History, Brain, Info, AlertCircle, CheckCircle2 } from 'lucide-react';
 import { useFirestore, useDoc, useMemoFirebase, useCollection, useUser } from '@/firebase';
 import { doc, collection, query, orderBy, limit, Timestamp, setDoc, serverTimestamp } from 'firebase/firestore';
 import { PageHeader } from '@/components/app/page-header';
@@ -174,7 +175,7 @@ export function ChannelDetailPage({ channelId }: { channelId: string }) {
         </TabsContent>
 
         <TabsContent value="chatbot">
-          <ChatbotConfig channelId={channelId} />
+          <ChatbotConfig channelId={channelId} channel={channel} />
         </TabsContent>
       </Tabs>
 
@@ -187,7 +188,7 @@ export function ChannelDetailPage({ channelId }: { channelId: string }) {
   );
 }
 
-function ChatbotConfig({ channelId }: { channelId: string }) {
+function ChatbotConfig({ channelId, channel }: { channelId: string, channel: WhatsappChannel | null }) {
   const firestore = useFirestore();
   const { user } = useUser();
   const { toast } = useToast();
@@ -267,14 +268,36 @@ function ChatbotConfig({ channelId }: { channelId: string }) {
 
   return (
     <div className="space-y-6">
-      <Alert className="bg-primary/5 border-primary/20">
-        <Info className="h-4 w-4" />
-        <AlertTitle>Configuración de Estrategia</AlertTitle>
-        <AlertDescription>
-          Este panel permite definir el conocimiento y la personalidad del asistente. 
-          <strong> Nota:</strong> Las respuestas automáticas se activarán próximamente.
-        </AlertDescription>
-      </Alert>
+      <div className="grid gap-4 md:grid-cols-2">
+        <Alert className="bg-primary/5 border-primary/20">
+          <Info className="h-4 w-4" />
+          <AlertTitle>Configuración de Estrategia</AlertTitle>
+          <AlertDescription>
+            Define el conocimiento y la personalidad del asistente. 
+            <strong> Nota:</strong> Las respuestas automáticas se activan con el switch.
+          </AlertDescription>
+        </Alert>
+
+        {aiSettings?.lastAutoReplyAt && (
+          <Alert className="bg-green-500/5 border-green-500/20">
+            <CheckCircle2 className="h-4 w-4 text-green-500" />
+            <AlertTitle>Estado del Bot</AlertTitle>
+            <AlertDescription>
+              Última auto-respuesta: <span className="font-medium">{formatDate(aiSettings.lastAutoReplyAt)}</span>
+            </AlertDescription>
+          </Alert>
+        )}
+
+        {channel?.lastBotError && (
+          <Alert variant="destructive" className="md:col-span-2">
+            <AlertCircle className="h-4 w-4" />
+            <AlertTitle>Error en la última ejecución del Bot</AlertTitle>
+            <AlertDescription>
+              {channel.lastBotError.message} <span className="text-[10px] opacity-70">({formatDate(channel.lastBotError.at)})</span>
+            </AlertDescription>
+          </Alert>
+        )}
+      </div>
 
       <Tabs value={activeSubTab} onValueChange={setActiveSubTab} className="w-full">
         <TabsList className="grid w-full grid-cols-2 max-w-md">
@@ -301,7 +324,7 @@ function ChatbotConfig({ channelId }: { channelId: string }) {
                   checked={localEnabled} 
                   onCheckedChange={setLocalEnabled}
                 />
-                <Label htmlFor="bot-enabled">Activar chatbot</Label>
+                <Label htmlFor="bot-enabled" className="cursor-pointer">Activar chatbot</Label>
               </div>
             </CardHeader>
             <CardContent className="space-y-6">
@@ -596,4 +619,3 @@ function MessageThread({ channelId, jid, workerUrl, name }: { channelId: string,
     </>
   );
 }
-
