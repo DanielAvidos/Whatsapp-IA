@@ -1,4 +1,3 @@
-
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from 'react';
@@ -10,7 +9,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useLanguage } from '@/context/language-provider';
-import type { WhatsappChannel, Conversation, Message, AISettings } from '@/lib/types';
+import type { WhatsappChannel, Conversation, Message } from '@/lib/types';
 import { StatusBadge } from '@/components/app/status-badge';
 import { QrCodeDialog } from '@/components/app/qr-code-dialog';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -24,6 +23,7 @@ import Link from 'next/link';
 import { Switch } from '@/components/ui/switch';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
+import { getBotConfig, putBotConfig } from '@/lib/worker/workerClient';
 
 export function ChannelDetailPage({ channelId }: { channelId: string }) {
   const { t } = useLanguage();
@@ -44,7 +44,7 @@ export function ChannelDetailPage({ channelId }: { channelId: string }) {
 
   const handleApiCall = async (endpoint: string, successMessage: string, errorMessage: string) => {
     if (!workerUrl) {
-      toast({ variant: 'destructive', title: 'Worker URL not configured', description: 'Please set NEXT_PUBLIC_BAILEYS_WORKER_URL' });
+      toast({ variant: 'destructive', title: 'Worker URL no configurada', description: 'Por favor configura NEXT_PUBLIC_BAILEYS_WORKER_URL' });
       return;
     }
     toast({ title: successMessage });
@@ -55,26 +55,26 @@ export function ChannelDetailPage({ channelId }: { channelId: string }) {
     }
   }
 
-  const handleGenerateQr = () => handleApiCall('/qr', 'Generating new QR code...', 'Failed to request QR code');
-  const handleDisconnect = () => handleApiCall('/disconnect', 'Disconnecting...', 'Failed to disconnect');
-  const handleResetSession = () => handleApiCall('/resetSession', 'Resetting session...', 'Failed to reset session');
+  const handleGenerateQr = () => handleApiCall('/qr', 'Generando código QR...', 'Error al solicitar QR');
+  const handleDisconnect = () => handleApiCall('/disconnect', 'Desconectando...', 'Error al desconectar');
+  const handleResetSession = () => handleApiCall('/resetSession', 'Reiniciando sesión...', 'Error al reiniciar sesión');
 
   return (
     <main className="container mx-auto p-4 md:p-6 lg:p-8">
-      <PageHeader title={channel?.displayName || 'Loading...'} description={t('manage.connection')}>
-        <Button variant="outline" asChild><Link href="/channels">Back to Channels</Link></Button>
+      <PageHeader title={channel?.displayName || 'Cargando...'} description={t('manage.connection')}>
+        <Button variant="outline" asChild><Link href="/channels">Volver a Canales</Link></Button>
       </PageHeader>
       
       {!workerUrl && (
         <Alert variant="destructive" className="mb-4">
-          <AlertTitle>Incomplete Configuration</AlertTitle>
-          <AlertDescription>The environment variable NEXT_PUBLIC_BAILEYS_WORKER_URL is not configured.</AlertDescription>
+          <AlertTitle>Configuración Incompleta</AlertTitle>
+          <AlertDescription>La variable de entorno NEXT_PUBLIC_BAILEYS_WORKER_URL no está configurada.</AlertDescription>
         </Alert>
       )}
 
       <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-4">
         <TabsList>
-          <TabsTrigger value="connection" className="flex items-center gap-2"><LinkIcon className="h-4 w-4" />Connection</TabsTrigger>
+          <TabsTrigger value="connection" className="flex items-center gap-2"><LinkIcon className="h-4 w-4" />Conexión</TabsTrigger>
           <TabsTrigger value="chats" className="flex items-center gap-2" disabled={channel?.status !== 'CONNECTED'}><MessageSquare className="h-4 w-4" />Chats</TabsTrigger>
           <TabsTrigger value="chatbot" className="flex items-center gap-2"><Bot className="h-4 w-4" />Chatbot</TabsTrigger>
         </TabsList>
@@ -90,7 +90,7 @@ export function ChannelDetailPage({ channelId }: { channelId: string }) {
                 <div className="flex items-center justify-between rounded-lg border p-4">
                   <div className="flex items-center gap-3">
                     {channel?.status === 'CONNECTING' && <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />}
-                    <span className="font-medium">{channel?.displayName ?? 'Main Channel'}</span>
+                    <span className="font-medium">{channel?.displayName ?? 'Canal Principal'}</span>
                     <StatusBadge status={channel?.status === 'QR' ? 'CONNECTING' : (channel?.status || 'DISCONNECTED')} />
                   </div>
                    {channel?.status === 'CONNECTED' ? (
@@ -101,12 +101,12 @@ export function ChannelDetailPage({ channelId }: { channelId: string }) {
                 </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                  <Button variant="outline" onClick={handleGenerateQr} disabled={isLoading || !workerUrl}><ScanQrCode className="mr-2 h-4 w-4" />Generate/Refresh QR</Button>
-                  <Button variant="outline" onClick={handleResetSession} disabled={isLoading || !workerUrl}><RotateCcw className="mr-2 h-4 w-4" />Reset Session</Button>
-                  <Button variant="destructive" onClick={handleDisconnect} disabled={isLoading || !workerUrl || channel?.status !== 'CONNECTED'}><LogOut className="mr-2 h-4 w-4" />Disconnect</Button>
+                  <Button variant="outline" onClick={handleGenerateQr} disabled={isLoading || !workerUrl}><ScanQrCode className="mr-2 h-4 w-4" />Generar QR</Button>
+                  <Button variant="outline" onClick={handleResetSession} disabled={isLoading || !workerUrl}><RotateCcw className="mr-2 h-4 w-4" />Reiniciar Sesión</Button>
+                  <Button variant="destructive" onClick={handleDisconnect} disabled={isLoading || !workerUrl || channel?.status !== 'CONNECTED'}><LogOut className="mr-2 h-4 w-4" />Desconectar</Button>
                 </div>
                  {channel?.lastError && (
-                   <Alert variant="destructive"><AlertTitle>Last Error</AlertTitle><AlertDescription>{channel.lastError?.message || JSON.stringify(channel.lastError)}</AlertDescription></Alert>
+                   <Alert variant="destructive"><AlertTitle>Último Error</AlertTitle><AlertDescription>{channel.lastError?.message || JSON.stringify(channel.lastError)}</AlertDescription></Alert>
                  )}
               </CardContent>
             </Card>
@@ -116,7 +116,7 @@ export function ChannelDetailPage({ channelId }: { channelId: string }) {
                 {isLoading ? <Skeleton className="w-64 h-64" /> : channel?.status === 'QR' && channel.qrDataUrl ? (
                    <div className="w-64 h-64 rounded-lg bg-white p-4 flex items-center justify-center"><img src={channel.qrDataUrl} alt="WhatsApp QR" width={224} height={224} /></div>
                 ) : (
-                  <div className="w-64 h-64 flex items-center justify-center bg-muted rounded-lg"><p className="text-center text-sm text-muted-foreground p-4">{channel?.status === 'CONNECTING' ? 'Generating QR...' : 'No QR available.'}</p></div>
+                  <div className="w-64 h-64 flex items-center justify-center bg-muted rounded-lg"><p className="text-center text-sm text-muted-foreground p-4">{channel?.status === 'CONNECTING' ? 'Generando QR...' : 'QR no disponible.'}</p></div>
                 )}
                  <p className="text-center text-sm text-muted-foreground">{t('scan.qr.instruction')}</p>
               </CardContent>
@@ -129,7 +129,7 @@ export function ChannelDetailPage({ channelId }: { channelId: string }) {
         </TabsContent>
 
         <TabsContent value="chatbot">
-          <ChatbotConfig channelId={channelId} channel={channel} workerUrl={workerUrl!} />
+          <ChatbotConfig channelId={channelId} />
         </TabsContent>
       </Tabs>
 
@@ -138,7 +138,7 @@ export function ChannelDetailPage({ channelId }: { channelId: string }) {
   );
 }
 
-function ChatbotConfig({ channelId, channel, workerUrl }: { channelId: string, channel: WhatsappChannel | null, workerUrl: string }) {
+function ChatbotConfig({ channelId }: { channelId: string }) {
   const { user } = useUser();
   const { toast } = useToast();
   const [isSaving, setIsSaving] = useState(false);
@@ -151,33 +151,35 @@ function ChatbotConfig({ channelId, channel, workerUrl }: { channelId: string, c
   const [lastAutoReplyAt, setLastAutoReplyAt] = useState<any>(null);
   const [updatedAt, setUpdatedAt] = useState<any>(null);
   const [updatedByEmail, setUpdatedByEmail] = useState('');
+  const [lastBotError, setLastBotError] = useState<string | null>(null);
 
   const fetchConfig = useCallback(async () => {
-    if (!workerUrl) return;
     try {
-      const res = await fetch(`${workerUrl}/v1/channels/${channelId}/bot/config`);
-      const data = await res.json();
-      if (data.ok && data.config) {
-        setLocalEnabled(data.config.enabled);
-        setLocalProductContent(data.config.productDetails || '');
-        setLocalSalesContent(data.config.salesStrategy || '');
-        setLastAutoReplyAt(data.config.lastAutoReplyAt);
-        setUpdatedAt(data.config.updatedAt);
-        setUpdatedByEmail(data.config.updatedByEmail || '');
-      }
-    } catch (e) {
+      const config = await getBotConfig(channelId);
+      setLocalEnabled(config.enabled);
+      setLocalProductContent(config.productDetails || '');
+      setLocalSalesContent(config.salesStrategy || '');
+      setLastAutoReplyAt(config.lastAutoReplyAt);
+      setUpdatedAt(config.updatedAt);
+      setUpdatedByEmail(config.updatedByEmail || '');
+    } catch (e: any) {
       console.error(e);
+      toast({
+        variant: 'destructive',
+        title: 'Error de comunicación con el Worker',
+        description: e.message || 'No se pudo obtener la configuración.'
+      });
     } finally {
       setIsLoading(false);
     }
-  }, [channelId, workerUrl]);
+  }, [channelId, toast]);
 
   useEffect(() => {
     fetchConfig();
   }, [fetchConfig]);
 
   const handleSave = async (overrides: Partial<{enabled: boolean, productDetails: string, salesStrategy: string}> = {}) => {
-    if (!workerUrl || !user) return;
+    if (!user) return;
     setIsSaving(true);
     
     const payload = {
@@ -189,18 +191,16 @@ function ChatbotConfig({ channelId, channel, workerUrl }: { channelId: string, c
     };
 
     try {
-      const res = await fetch(`${workerUrl}/v1/channels/${channelId}/bot/config`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-
-      if (!res.ok) throw new Error('Worker rejected update');
+      const config = await putBotConfig(channelId, payload);
+      setLocalEnabled(config.enabled);
+      setLocalProductContent(config.productDetails || '');
+      setLocalSalesContent(config.salesStrategy || '');
+      setUpdatedAt(config.updatedAt);
+      setUpdatedByEmail(config.updatedByEmail || '');
       
       toast({ title: 'Configuración guardada', description: 'La IA se ha actualizado vía Worker.' });
-      await fetchConfig();
-    } catch (e) {
-      toast({ variant: 'destructive', title: 'Error al guardar', description: String(e) });
+    } catch (e: any) {
+      toast({ variant: 'destructive', title: 'Error al guardar', description: e.message });
       // Revert local state on error for toggles
       if (overrides.enabled !== undefined) setLocalEnabled(!overrides.enabled);
     } finally {
@@ -214,7 +214,7 @@ function ChatbotConfig({ channelId, channel, workerUrl }: { channelId: string, c
       if (typeof val === 'string') return format(new Date(val), 'PPpp');
       if (val?._seconds) return format(new Date(val._seconds * 1000), 'PPpp');
       return format(new Date(val), 'PPpp');
-    } catch (e) { return 'Justo ahora'; }
+    } catch (e) { return 'Hace un momento'; }
   };
 
   return (
@@ -322,15 +322,15 @@ function ChatInterface({ channelId, workerUrl }: { channelId: string, workerUrl:
   return (
     <div className="grid grid-cols-1 md:grid-cols-3 gap-6 h-[600px]">
       <Card className="md:col-span-1 flex flex-col overflow-hidden">
-        <CardHeader className="pb-3"><CardTitle className="text-lg">Conversations</CardTitle></CardHeader>
+        <CardHeader className="pb-3"><CardTitle className="text-lg">Conversaciones</CardTitle></CardHeader>
         <CardContent className="flex-1 overflow-hidden p-0">
           <ScrollArea className="h-full">
-            {isLoadingConversations ? <div className="p-4 space-y-4"><Skeleton className="h-12 w-full" /><Skeleton className="h-12 w-full" /></div> : conversations?.length === 0 ? <div className="p-8 text-center text-sm">No conversations.</div> : (
+            {isLoadingConversations ? <div className="p-4 space-y-4"><Skeleton className="h-12 w-full" /><Skeleton className="h-12 w-full" /></div> : conversations?.length === 0 ? <div className="p-8 text-center text-sm">No hay conversaciones.</div> : (
               <div className="flex flex-col">
                 {conversations?.map((conv) => (
                   <button key={conv.jid} onClick={() => setSelectedJid(conv.jid)} className={cn("flex flex-col items-start gap-1 p-4 text-left border-b hover:bg-muted/50", selectedJid === conv.jid && "bg-muted")}>
                     <div className="flex justify-between w-full font-semibold text-sm truncate">{conv.name || conv.jid}{conv.unreadCount > 0 && <span className="bg-primary text-primary-foreground rounded-full size-5 flex items-center justify-center text-[10px]">{conv.unreadCount}</span>}</div>
-                    <div className="flex justify-between w-full text-xs text-muted-foreground truncate">{conv.lastMessageText || 'No message'}<span>{conv.lastMessageAt ? format((conv.lastMessageAt as Timestamp).toDate(), 'HH:mm') : ''}</span></div>
+                    <div className="flex justify-between w-full text-xs text-muted-foreground truncate">{conv.lastMessageText || 'Sin mensajes'}<span>{conv.lastMessageAt ? format((conv.lastMessageAt as Timestamp).toDate(), 'HH:mm') : ''}</span></div>
                   </button>
                 ))}
               </div>
@@ -338,7 +338,7 @@ function ChatInterface({ channelId, workerUrl }: { channelId: string, workerUrl:
           </ScrollArea>
         </CardContent>
       </Card>
-      <Card className="md:col-span-2 flex flex-col overflow-hidden">{selectedJid ? <MessageThread channelId={channelId} jid={selectedJid} workerUrl={workerUrl} name={conversations?.find(c => c.jid === selectedJid)?.name || selectedJid} /> : <div className="flex flex-col items-center justify-center h-full text-muted-foreground p-8"><MessageSquare className="size-12 mb-4 opacity-20" /><p>Select a chat.</p></div>}</Card>
+      <Card className="md:col-span-2 flex flex-col overflow-hidden">{selectedJid ? <MessageThread channelId={channelId} jid={selectedJid} workerUrl={workerUrl} name={conversations?.find(c => c.jid === selectedJid)?.name || selectedJid} /> : <div className="flex flex-col items-center justify-center h-full text-muted-foreground p-8"><MessageSquare className="size-12 mb-4 opacity-20" /><p>Selecciona un chat.</p></div>}</Card>
     </div>
   );
 }
@@ -369,7 +369,7 @@ function MessageThread({ channelId, jid, workerUrl, name }: { channelId: string,
     setIsSending(true);
     try {
       const res = await fetch(`${workerUrl}/v1/channels/${channelId}/messages/send`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ to: jid, text: inputText.trim() }) });
-      if (!res.ok) throw new Error('Send failed');
+      if (!res.ok) throw new Error('Error al enviar');
       setInputText('');
     } catch (e) { toast({ variant: 'destructive', title: 'Error', description: String(e) }); } finally { setIsSending(false); }
   };
@@ -392,7 +392,7 @@ function MessageThread({ channelId, jid, workerUrl, name }: { channelId: string,
         </ScrollArea>
       </CardContent>
       <div className="p-4 border-t">
-        <form onSubmit={handleSendMessage} className="flex gap-2"><Input placeholder="Type a message..." value={inputText} onChange={(e) => setInputText(e.target.value)} disabled={isSending} /><Button type="submit" size="icon" disabled={isSending || !inputText.trim()}>{isSending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}</Button></form>
+        <form onSubmit={handleSendMessage} className="flex gap-2"><Input placeholder="Escribe un mensaje..." value={inputText} onChange={(e) => setInputText(e.target.value)} disabled={isSending} /><Button type="submit" size="icon" disabled={isSending || !inputText.trim()}>{isSending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}</Button></form>
       </div>
     </>
   );
