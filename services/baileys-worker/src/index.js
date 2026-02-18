@@ -608,7 +608,17 @@ app.put('/v1/channels/:channelId/bot/config', async (req, res) => {
 
     await batch.commit();
     
-    res.json({ ok: true, message: 'Config updated via Admin SDK' });
+    // Return updated config to client
+    res.json({ 
+      ok: true, 
+      config: {
+        enabled: enabled !== undefined ? enabled : false,
+        productDetails: productDetails || "",
+        salesStrategy: salesStrategy || "",
+        updatedAt: new Date().toISOString(),
+        updatedByEmail: updatedByEmail || '',
+      }
+    });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
   }

@@ -15,6 +15,7 @@ export type WorkerBotConfig = {
 };
 
 function getWorkerBaseUrl() {
+  // Estandarizado a NEXT_PUBLIC_BAILEYS_WORKER_URL para coincidir con el resto de la app
   const base = process.env.NEXT_PUBLIC_BAILEYS_WORKER_URL;
   if (!base) {
     throw new Error('Falta NEXT_PUBLIC_BAILEYS_WORKER_URL (debe apuntar al Cloud Run del worker).');
@@ -26,7 +27,7 @@ async function safeParseJson(res: Response) {
   const ct = res.headers.get('content-type') || '';
   const text = await res.text();
 
-  // Si no es JSON, es el error de HTML (404, etc.)
+  // Si no es JSON, es un error de Express (404, etc.) o del Hosting
   if (!ct.includes('application/json')) {
     const preview = text.slice(0, 220).replace(/\s+/g, ' ').trim();
     throw new Error(`Respuesta NO-JSON del worker (${res.status}). Content-Type="${ct}". Preview="${preview}"`);
@@ -69,5 +70,6 @@ export async function putBotConfig(channelId: string, payload: Partial<WorkerBot
   if (!res.ok) {
     throw new Error(data?.error || `Error HTTP ${res.status}`);
   }
+  // El worker ahora devuelve el objeto 'config' completo o actualizado
   return data.config as WorkerBotConfig;
 }
