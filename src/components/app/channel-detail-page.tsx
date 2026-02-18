@@ -1,4 +1,3 @@
-
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from 'react';
@@ -319,11 +318,11 @@ function ChatbotConfig({ channelId }: { channelId: string }) {
             </CardHeader>
             <CardContent className="pt-0">
                <div className="flex items-center gap-2 text-xs">
-                 <span className="text-muted-foreground">Comunicación:</span>
+                 <span className="text-muted-foreground">Estado Worker:</span>
                  {workerHealth === 'ok' ? (
                    <Badge variant="outline" className="bg-green-500/10 text-green-600 border-green-500/20">OPERATIVO ✅</Badge>
                  ) : workerHealth === 'fail' ? (
-                   <Badge variant="outline" className="bg-red-500/10 text-red-600 border-red-500/20">FALLA DE CONEXIÓN ❌</Badge>
+                   <Badge variant="outline" className="bg-red-500/10 text-red-600 border-red-500/20">DESCONECTADO ❌</Badge>
                  ) : (
                    <span className="animate-pulse">Cargando...</span>
                  )}
