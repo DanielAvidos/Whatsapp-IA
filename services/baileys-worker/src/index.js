@@ -45,7 +45,7 @@ const db = getFirestore();
 
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
 
-// --- AI INITIALIZATION (Dynamic Import for Genkit ESM) ---
+// --- AI INITIALIZATION ---
 let aiInstance = null;
 async function getAI() {
   if (aiInstance) return aiInstance;
@@ -59,12 +59,12 @@ async function getAI() {
 }
 
 // --- GLOBAL STATE ---
-const activeSockets = new Map();      // <channelId, WASocket>
-const startingChannels = new Set();   // <channelId> is being started
-const retryCounts = new Map();        // <channelId, number>
-const startPromises = new Map();      // <channelId, Promise<void>>
-const channelConnState = new Map();   // <channelId, { connected: boolean, lastSeenAt: number }>
-const lockRenewals = new Map();      // <channelId, Interval>
+const activeSockets = new Map();
+const startingChannels = new Set();
+const retryCounts = new Map();
+const startPromises = new Map();
+const channelConnState = new Map();
+const lockRenewals = new Map();
 
 // --- LOCKING SYSTEM ---
 const REVISION = process.env.K_REVISION || 'local';
@@ -287,31 +287,32 @@ async function saveMessageToFirestore(channelId, jid, messageId, doc) {
 async function handleChatbotReply(channelId, jid, messageId, text, sock) {
   try {
     const channelRef = db.collection('channels').doc(channelId);
+    
+    // 1. Get Settings
     const settingsSnap = await channelRef.collection('ai_training').doc('settings').get();
     const settings = settingsSnap.exists ? settingsSnap.data() : { enabled: false };
-
     if (!settings.enabled) return;
 
-    // 1. Idempotency Check
+    // 2. Idempotency Check
     const processedRef = channelRef.collection('bot_processed').doc(messageId);
     const processedSnap = await processedRef.get();
     if (processedSnap.exists) return;
 
-    // Mark as processing immediately
+    // Mark as processing
     await processedRef.set({
       jid,
       processedAt: FieldValue.serverTimestamp(),
       status: 'processing'
     });
 
-    // 2. Load Knowledge
+    // 3. Load Knowledge Base
     const productSnap = await channelRef.collection('ai_training').doc('product_details').get();
     const strategySnap = await channelRef.collection('ai_training').doc('sales_strategy').get();
     
     const productDetails = productSnap.exists ? productSnap.data().content : "";
     const salesStrategy = strategySnap.exists ? strategySnap.data().content : "Responde como asistente profesional. Haz 1 pregunta para avanzar.";
 
-    // 3. Generate Response
+    // 4. Generate Response
     const ai = await getAI();
     const prompt = `
 Eres un asistente experto para WhatsApp. 
@@ -333,14 +334,12 @@ ${text}
     `;
 
     const { text: responseText } = await ai.generate({ prompt });
-
     if (!responseText) throw new Error('AI returned empty response');
 
-    // 4. Send Message with small delay for realism
+    // 5. Send & Persist
     await new Promise(r => setTimeout(r, 2000));
     const r = await sock.sendMessage(jid, { text: responseText });
 
-    // 5. Save & Update
     const outMsgId = r?.key?.id || `bot-${Date.now()}`;
     await saveMessageToFirestore(channelId, jid, outMsgId, {
       messageId: outMsgId,
@@ -353,6 +352,7 @@ ${text}
       isBot: true,
     });
 
+    // Update stats
     await channelRef.collection('ai_training').doc('settings').update({
       lastAutoReplyAt: FieldValue.serverTimestamp()
     });
@@ -375,9 +375,7 @@ const MAX_RETRY = 6;
 const RETRY_DELAY_MS = [2000, 5000, 10000, 20000, 60000, 120000];
 
 async function startOrRestartBaileys(channelId, reason = 'manual') {
-  if (startingChannels.has(channelId)) {
-    return;
-  }
+  if (startingChannels.has(channelId)) return;
   startingChannels.add(channelId);
 
   const lockAcquired = await acquireChannelLock(channelId);
@@ -407,9 +405,7 @@ async function startOrRestartBaileys(channelId, reason = 'manual') {
     const { state, saveCreds } = await useFirestoreAuthState(channelId);
 
     let latest = null;
-    try {
-      latest = await fetchLatestBaileysVersion();
-    } catch (e) {}
+    try { latest = await fetchLatestBaileysVersion(); } catch (e) {}
 
     const sock = makeWASocket({
       auth: state,
@@ -431,8 +427,7 @@ async function startOrRestartBaileys(channelId, reason = 'manual') {
 
     sock.ev.on('connection.update', async (update) => {
       const { connection, lastDisconnect, qr } = update || {};
-      logger.info({ channelId, connection, hasQr: !!qr }, 'connection.update');
-
+      
       if (qr) {
         try {
           const qrDataUrl = await qrcode.toDataURL(qr);
@@ -441,11 +436,8 @@ async function startOrRestartBaileys(channelId, reason = 'manual') {
             qr: { raw: qr, public: qrDataUrl },
             qrDataUrl,
             lastQrAt: FieldValue.serverTimestamp(),
-            lastError: null,
           });
-        } catch (e) {
-          logger.error({ channelId }, 'Failed to build QR');
-        }
+        } catch (e) {}
       }
 
       if (connection === 'open') {
@@ -457,11 +449,8 @@ async function startOrRestartBaileys(channelId, reason = 'manual') {
           linked: true,
           qr: emptyQrObject(),
           qrDataUrl: null,
-          lastError: null,
           phoneE164: phoneId ? `+${phoneId}` : null,
-          me: safeJson(sock?.user || null),
           connectedAt: FieldValue.serverTimestamp(),
-          lastSeenAt: FieldValue.serverTimestamp(),
         });
       }
 
@@ -471,15 +460,11 @@ async function startOrRestartBaileys(channelId, reason = 'manual') {
         const statusCode = err instanceof Boom ? err.output.statusCode : 500;
         const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
 
-        logger.warn({ channelId, statusCode, shouldReconnect }, 'Connection closed');
-
         await upsertChannelStatus(channelId, {
           status: 'DISCONNECTED',
           linked: false,
           qr: emptyQrObject(),
-          qrDataUrl: null,
           lastError: err ? { message: String(err.message || err), statusCode } : null,
-          lastSeenAt: FieldValue.serverTimestamp(),
         });
 
         activeSockets.delete(channelId);
@@ -487,14 +472,9 @@ async function startOrRestartBaileys(channelId, reason = 'manual') {
         if (shouldReconnect) {
           let currentRetry = retryCounts.get(channelId) || 0;
           if (currentRetry < MAX_RETRY) {
-            const delay = RETRY_DELAY_MS[currentRetry] + Math.floor(Math.random() * 1000);
+            const delay = RETRY_DELAY_MS[currentRetry];
             retryCounts.set(channelId, currentRetry + 1);
             setTimeout(() => startOrRestartBaileys(channelId, 'auto-reconnect'), delay);
-          } else {
-            await upsertChannelStatus(channelId, {
-              status: 'ERROR',
-              lastError: { message: 'Max retries reached.' },
-            });
           }
         } else {
           await resetFirestoreAuthState(channelId);
@@ -506,10 +486,10 @@ async function startOrRestartBaileys(channelId, reason = 'manual') {
     sock.ev.on('messages.upsert', async (m) => {
       try {
         const msgs = m?.messages || [];
-        const tasks = msgs.map(async (msg) => {
+        for (const msg of msgs) {
           const jid = msg?.key?.remoteJid;
           const messageId = msg?.key?.id;
-          if (!jid || !messageId) return;
+          if (!jid || !messageId) continue;
 
           const fromMe = !!msg?.key?.fromMe;
           const text = extractText(msg?.message);
@@ -524,34 +504,19 @@ async function startOrRestartBaileys(channelId, reason = 'manual') {
             text,
             status: fromMe ? 'sent' : 'received',
             timestamp: timestampMs,
-            raw: null, 
           });
 
-          await upsertChannelStatus(channelId, { lastSeenAt: FieldValue.serverTimestamp() });
-
-          // CHATBOT TRIGGER
+          // Chatbot Trigger
           if (!fromMe && text) {
-            handleChatbotReply(channelId, jid, messageId, text, sock).catch(e => {
-              logger.error({ channelId, messageId }, 'Chatbot error ignored');
-            });
+            handleChatbotReply(channelId, jid, messageId, text, sock).catch(() => {});
           }
-        });
-
-        await Promise.allSettled(tasks);
-      } catch (e) {
-        logger.error({ channelId }, 'messages.upsert failed');
-      }
+        }
+      } catch (e) {}
     });
 
     return sock;
   } catch (err) {
-    logger.error({ channelId, error: err.message }, 'START_ERROR');
-    await upsertChannelStatus(channelId, {
-      status: 'ERROR',
-      qr: emptyQrObject(),
-      qrDataUrl: null,
-      lastError: { message: `START_ERROR: ${err.message}`, statusCode: 500 },
-    });
+    await upsertChannelStatus(channelId, { status: 'ERROR' });
     await releaseChannelLock(channelId);
   } finally {
     startingChannels.delete(channelId);
@@ -587,56 +552,87 @@ const PORT = process.env.PORT || 8080;
 
 app.get('/health', (_req, res) => res.status(200).send('ok'));
 
-app.get('/debug/baileys', (_req, res) => {
-  const socketsInfo = Array.from(activeSockets.keys()).map((channelId) => ({
-    channelId,
-    connected: !!channelConnState.get(channelId)?.connected,
-    user: activeSockets.get(channelId)?.user || null,
-  }));
-  res.json({
-    ok: true,
-    activeSocketsCount: activeSockets.size,
-    socketsInfo,
-    startingChannels: Array.from(startingChannels),
-    ts: new Date().toISOString(),
-  });
+// --- BOT CONFIG ENDPOINTS (Admin SDK writes) ---
+app.get('/v1/channels/:channelId/bot/config', async (req, res) => {
+  try {
+    const { channelId } = req.params;
+    const channelRef = db.collection('channels').doc(channelId);
+    
+    const [settings, product, strategy] = await Promise.all([
+      channelRef.collection('ai_training').doc('settings').get(),
+      channelRef.collection('ai_training').doc('product_details').get(),
+      channelRef.collection('ai_training').doc('sales_strategy').get(),
+    ]);
+
+    res.json({
+      ok: true,
+      config: {
+        enabled: settings.exists ? settings.data().enabled : false,
+        productDetails: product.exists ? product.data().content : "",
+        salesStrategy: strategy.exists ? strategy.data().content : "",
+        lastAutoReplyAt: settings.exists ? settings.data().lastAutoReplyAt : null,
+        updatedAt: settings.exists ? settings.data().updatedAt : null,
+        updatedByEmail: settings.exists ? settings.data().updatedByEmail : null,
+      }
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
 });
 
-// --- API V1 ENDPOINTS ---
+app.put('/v1/channels/:channelId/bot/config', async (req, res) => {
+  try {
+    const { channelId } = req.params;
+    const { enabled, productDetails, salesStrategy, updatedByUid, updatedByEmail } = req.body;
+    
+    const channelRef = db.collection('channels').doc(channelId);
+    const common = {
+      updatedAt: FieldValue.serverTimestamp(),
+      updatedByUid: updatedByUid || 'system',
+      updatedByEmail: updatedByEmail || '',
+    };
+
+    const batch = db.batch();
+    
+    if (enabled !== undefined) {
+      batch.set(channelRef.collection('ai_training').doc('settings'), { enabled, ...common }, { merge: true });
+    }
+    
+    if (productDetails !== undefined) {
+      batch.set(channelRef.collection('ai_training').doc('product_details'), { content: productDetails, ...common }, { merge: true });
+    }
+
+    if (salesStrategy !== undefined) {
+      batch.set(channelRef.collection('ai_training').doc('sales_strategy'), { content: salesStrategy, ...common }, { merge: true });
+    }
+
+    await batch.commit();
+    
+    res.json({ ok: true, message: 'Config updated via Admin SDK' });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// --- CHANNELS API ---
 app.get('/v1/channels', async (_req, res) => {
   try {
     const snapshot = await db.collection('channels').get();
-    const channels = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
-    res.json(channels);
+    res.json(snapshot.docs.map(d => ({ id: d.id, ...d.data() })));
   } catch (e) {
-    res.status(500).json({ ok: false, error: 'Failed to list channels' });
+    res.status(500).json({ error: e.message });
   }
 });
 
 app.post('/v1/channels', async (req, res) => {
   try {
     const { displayName, id } = req.body;
-    if (!displayName) return res.status(400).json({ error: 'displayName is required' });
-
-    const channelData = {
-      displayName,
-      status: 'DISCONNECTED',
-      linked: false,
-      qr: emptyQrObject(),
-      createdAt: FieldValue.serverTimestamp(),
-    };
-
-    let channelRef;
-    if (id) {
-      channelRef = db.collection('channels').doc(id);
-      await channelRef.set(channelData, { merge: true });
-    } else {
-      channelRef = await db.collection('channels').add(channelData);
-    }
-
+    const channelData = { displayName, status: 'DISCONNECTED', linked: false, createdAt: FieldValue.serverTimestamp() };
+    const channelRef = id ? db.collection('channels').doc(id) : db.collection('channels').doc();
+    await channelRef.set(channelData, { merge: true });
     res.status(201).json({ id: channelRef.id, ...channelData });
   } catch (e) {
-    res.status(500).json({ ok: false, error: 'Failed to create channel' });
+    res.status(500).json({ error: e.message });
   }
 });
 
@@ -644,210 +640,90 @@ app.patch('/v1/channels/:channelId', async (req, res) => {
   try {
     const { channelId } = req.params;
     const { displayName } = req.body;
-    if (!displayName) return res.status(400).json({ error: 'displayName is required' });
-
-    await db.collection('channels').doc(channelId).set({
-      displayName,
-      updatedAt: FieldValue.serverTimestamp(),
-    }, { merge: true });
-
-    res.json({ ok: true, message: 'Alias updated' });
+    await db.collection('channels').doc(channelId).update({ displayName, updatedAt: FieldValue.serverTimestamp() });
+    res.json({ ok: true });
   } catch (e) {
-    res.status(500).json({ ok: false, error: 'Failed to update alias' });
+    res.status(500).json({ error: e.message });
   }
 });
 
 app.get('/v1/channels/:channelId/status', async (req, res) => {
   try {
-    const { channelId } = req.params;
-    const snap = await db.collection('channels').doc(channelId).get();
-    if (!snap.exists) return res.json(null);
-
-    const data = snap.data() || {};
-    const qr = data.qr && typeof data.qr === 'object' ? data.qr : emptyQrObject();
-
-    res.json({ id: snap.id, ...data, qr });
+    const snap = await db.collection('channels').doc(req.params.channelId).get();
+    res.json(snap.exists ? { id: snap.id, ...snap.data() } : null);
   } catch (e) {
-    res.status(500).json({ ok: false, error: String(e?.message || e) });
+    res.status(500).json({ error: e.message });
   }
 });
 
-app.post('/v1/channels/:channelId/qr', async (req, res) => {
-  const { channelId } = req.params;
-  const sock = activeSockets.get(channelId);
-  const isStarting = startingChannels.has(channelId);
-
-  if (sock || isStarting) {
-    const snap = await db.collection('channels').doc(channelId).get();
-    return res.status(200).json({
-      ok: true,
-      message: 'Process already active',
-      status: snap.exists ? snap.data() : null,
-    });
-  }
-
-  startOrRestartBaileys(channelId, 'qr-request');
-  res.json({ ok: true, message: 'QR generation process started.' });
+app.post('/v1/channels/:channelId/qr', (req, res) => {
+  startOrRestartBaileys(req.params.channelId, 'qr-request');
+  res.json({ ok: true });
 });
 
 app.post('/v1/channels/:channelId/repair', async (req, res) => {
   const { channelId } = req.params;
-  logger.info({ channelId }, 'API request: repair');
-
   await resetFirestoreAuthState(channelId);
   await releaseChannelLock(channelId);
-
-  await upsertChannelStatus(channelId, {
-    status: 'DISCONNECTED',
-    linked: false,
-    qr: emptyQrObject(),
-    qrDataUrl: null,
-    phoneE164: null,
-    lastError: null,
-  });
-
-  res.json({ ok: true, message: 'Channel repair initiated.' });
+  await upsertChannelStatus(channelId, { status: 'DISCONNECTED', linked: false, phoneE164: null });
+  res.json({ ok: true });
 });
 
 app.post('/v1/channels/:channelId/disconnect', async (req, res) => {
-  const { channelId } = req.params;
-  const sock = activeSockets.get(channelId);
-  if (sock) {
-    try { await sock.logout(); } catch (e) {}
-  }
-  res.json({ ok: true, message: 'Disconnection initiated.' });
+  const sock = activeSockets.get(req.params.channelId);
+  if (sock) try { await sock.logout(); } catch (e) {}
+  res.json({ ok: true });
 });
 
 app.post('/v1/channels/:channelId/resetSession', async (req, res) => {
   const { channelId } = req.params;
   const sock = activeSockets.get(channelId);
-  if (sock) {
-    try { await sock.logout(); } catch (e) {}
-  }
-
+  if (sock) try { await sock.logout(); } catch (e) {}
   activeSockets.delete(channelId);
-  startingChannels.delete(channelId);
-  retryCounts.delete(channelId);
-  channelConnState.delete(channelId);
-
   await resetFirestoreAuthState(channelId);
   await releaseChannelLock(channelId);
-
-  await upsertChannelStatus(channelId, {
-    status: 'DISCONNECTED',
-    linked: false,
-    qr: emptyQrObject(),
-    qrDataUrl: null,
-    phoneE164: null,
-    lastError: null,
-    me: null,
-    connectedAt: null,
-  });
-
-  res.json({ ok: true, message: 'Session reset successfully.' });
+  await upsertChannelStatus(channelId, { status: 'DISCONNECTED', linked: false, phoneE164: null, me: null });
+  res.json({ ok: true });
 });
 
 // --- MESSAGING API ---
 app.get('/v1/channels/:channelId/conversations', async (req, res) => {
   try {
-    const { channelId } = req.params;
-    const limitNum = Math.min(parseInt(req.query.limit || '30', 10), 100);
-
-    const snap = await db.collection('channels').doc(channelId)
-      .collection('conversations')
-      .orderBy('lastMessageAt', 'desc')
-      .limit(limitNum)
-      .get();
-
+    const snap = await db.collection('channels').doc(req.params.channelId).collection('conversations').orderBy('lastMessageAt', 'desc').limit(50).get();
     res.json({ ok: true, conversations: snap.docs.map(d => ({ id: d.id, ...d.data() })) });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
-  }
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.get('/v1/channels/:channelId/conversations/:jid/messages', async (req, res) => {
   try {
-    const { channelId, jid: jidParam } = req.params;
-    const jid = decodeURIComponent(jidParam);
-    const limitNum = Math.min(parseInt(req.query.limit || '50', 10), 200);
-
-    const snap = await db.collection('channels').doc(channelId)
-      .collection('conversations').doc(jid)
-      .collection('messages')
-      .orderBy('timestamp', 'desc')
-      .limit(limitNum)
-      .get();
-
-    const msgs = snap.docs.map(d => ({ id: d.id, ...d.data() })).reverse();
-    res.json({ ok: true, jid, messages: msgs });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
-  }
+    const snap = await db.collection('channels').doc(req.params.channelId).collection('conversations').doc(decodeURIComponent(req.params.jid)).collection('messages').orderBy('timestamp', 'desc').limit(50).get();
+    res.json({ ok: true, messages: snap.docs.map(d => ({ id: d.id, ...d.data() })).reverse() });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.post('/v1/channels/:channelId/messages/send', async (req, res) => {
   try {
-    const { channelId } = req.params;
-    const { to, text } = req.body || {};
-    if (!to || !text) return res.status(400).json({ ok: false, error: '`to` and `text` required' });
-
-    const sock = await ensureSocketReady(channelId, 25000);
-    if (!sock) return res.status(409).json({ ok: false, error: 'Socket not ready' });
-
+    const { to, text } = req.body;
+    const sock = await ensureSocketReady(req.params.channelId);
+    if (!sock) return res.status(409).json({ error: 'Socket not ready' });
     const jid = to.includes('@') ? to : `${to}@s.whatsapp.net`;
     const r = await sock.sendMessage(jid, { text });
-
-    const messageId = r?.key?.id || `${Date.now()}`;
-    await saveMessageToFirestore(channelId, jid, messageId, {
-      messageId,
-      jid,
-      fromMe: true,
-      direction: 'OUT',
-      text,
-      status: 'sent',
-      timestamp: Date.now(),
-      raw: null,
-    });
-
-    res.json({ ok: true, messageId });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
-  }
+    await saveMessageToFirestore(req.params.channelId, jid, r.key.id, { messageId: r.key.id, jid, fromMe: true, direction: 'OUT', text, status: 'sent', timestamp: Date.now() });
+    res.json({ ok: true, messageId: r.key.id });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.post('/v1/channels/:channelId/conversations/:jid/markRead', async (req, res) => {
   try {
-    const { channelId, jid: jidParam } = req.params;
-    const jid = decodeURIComponent(jidParam);
-    await db.collection('channels').doc(channelId).collection('conversations').doc(jid)
-      .set({ unreadCount: 0, updatedAt: FieldValue.serverTimestamp() }, { merge: true });
+    await db.collection('channels').doc(req.params.channelId).collection('conversations').doc(decodeURIComponent(req.params.jid)).set({ unreadCount: 0, updatedAt: FieldValue.serverTimestamp() }, { merge: true });
     res.json({ ok: true });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
-  }
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// --- AUTO-START linked channels ---
-async function bootStartLinkedChannels() {
-  try {
-    const snap = await db.collection('channels').where('linked', '==', true).get();
-    const docs = snap.docs;
-    if (docs.length) logger.info({ count: docs.length }, 'Boot: starting linked channels');
-    
-    for (const docSnap of docs) {
-      const status = docSnap.data().status;
-      if (['CONNECTED', 'DISCONNECTED'].includes(status)) {
-        await startOrRestartBaileys(docSnap.id, 'boot-linked');
-        await new Promise(r => setTimeout(r, 2000));
-      }
-    }
-  } catch (e) {
-    logger.error({ err: e.message }, 'Boot failed');
-  }
-}
-
-// --- SERVER LISTEN ---
 app.listen(PORT, async () => {
   logger.info({ port: PORT }, 'HTTP server listening');
-  await bootStartLinkedChannels();
+  try {
+    const snap = await db.collection('channels').where('linked', '==', true).get();
+    for (const docSnap of snap.docs) startOrRestartBaileys(docSnap.id, 'boot');
+  } catch (e) {}
 });
