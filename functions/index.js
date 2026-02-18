@@ -1,5 +1,4 @@
-const { onDocumentCreated } = require("firebase-functions/v2/firestore");
-const { logger } = require("firebase-functions");
+const functions = require("firebase-functions");
 const admin = require("firebase-admin");
 const { VertexAI } = require("@google-cloud/vertexai");
 
@@ -46,8 +45,7 @@ async function getWorkerUrl() {
   const data = snap.exists ? snap.data() : null;
   const workerUrl = data?.workerUrl;
   if (!workerUrl) {
-    logger.error("Falta runtime/config.workerUrl en Firestore");
-    throw new Error("Worker URL no configurada");
+    throw new Error("Falta runtime/config.workerUrl en Firestore");
   }
   return String(workerUrl).replace(/\/+$/, "");
 }
@@ -147,15 +145,14 @@ async function sendViaWorker({ workerUrl, channelId, toJid, text }) {
 
 /**
  * Función principal: Dispara cuando se guarda un mensaje en la subcolección de una conversación.
+ * Usamos la 1ª Generación (v1) para evitar problemas de permisos con Eventarc.
  */
-exports.autoReplyOnIncomingMessage = onDocumentCreated(
-  {
-    document: "channels/{channelId}/conversations/{jid}/messages/{messageId}",
-    region: "us-central1",
-  },
-  async (event) => {
-    const { channelId, jid, messageId } = event.params;
-    const data = event.data?.data() || {};
+exports.autoReplyOnIncomingMessage = functions
+  .region("us-central1")
+  .firestore.document("channels/{channelId}/conversations/{jid}/messages/{messageId}")
+  .onCreate(async (snapshot, context) => {
+    const { channelId, jid, messageId } = context.params;
+    const data = snapshot.data() || {};
 
     // 1. Validar si el mensaje es apto para auto-respuesta
     const text = safeText(data.text);
@@ -165,12 +162,12 @@ exports.autoReplyOnIncomingMessage = onDocumentCreated(
     // Solo responder a mensajes de texto entrantes que no sean del bot mismo
     if (!text || fromMe || isBot) return;
 
-    logger.info("[BOT] Procesando mensaje entrante", { channelId, jid, messageId });
+    console.log("[BOT] Procesando mensaje entrante", { channelId, jid, messageId });
 
     // 2. Idempotencia
     const isNew = await markProcessed(channelId, messageId, { jid, text });
     if (!isNew) {
-      logger.info("[BOT] Mensaje ya procesado anteriormente", { messageId });
+      console.log("[BOT] Mensaje ya procesado anteriormente", { messageId });
       return;
     }
 
@@ -178,7 +175,7 @@ exports.autoReplyOnIncomingMessage = onDocumentCreated(
       // 3. Cargar configuración del bot
       const bot = await getBotConfig(channelId);
       if (!bot.enabled) {
-        logger.info("[BOT] IA desactivada para este canal", { channelId });
+        console.log("[BOT] IA desactivada para este canal", { channelId });
         return;
       }
 
@@ -215,12 +212,11 @@ exports.autoReplyOnIncomingMessage = onDocumentCreated(
 
       // 8. Marcar éxito
       await setBotSuccess(channelId);
-      logger.info("[BOT] Respuesta enviada con éxito", { channelId, jid });
+      console.log("[BOT] Respuesta enviada con éxito", { channelId, jid });
 
     } catch (err) {
       const msg = err.message || String(err);
-      logger.error("[BOT] Error fatal en ejecución", { channelId, messageId, error: msg });
+      console.error("[BOT] Error fatal en ejecución", { channelId, messageId, error: msg });
       await setBotError(channelId, msg);
     }
-  }
-);
+  });
