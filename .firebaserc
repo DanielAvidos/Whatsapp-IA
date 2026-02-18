@@ -1,0 +1,8 @@
+{
+  "projects": {
+    "default": "whatsapp-ia-dev",
+    "dev": "whatsapp-ia-dev"
+  },
+  "targets": {},
+  "etags": {}
+}

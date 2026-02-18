@@ -214,8 +214,8 @@ function ChatbotConfig({ channelId }: { channelId: string }) {
       <div className="grid gap-4 md:grid-cols-2">
         <Alert className="bg-primary/5 border-primary/20">
           <Info className="h-4 w-4" />
-          <AlertTitle>Configuración Interna (Firestore)</AlertTitle>
-          <AlertDescription>El bot se activa automáticamente al recibir mensajes si el switch está ON.</AlertDescription>
+          <AlertTitle>Configuración de IA (Firestore)</AlertTitle>
+          <AlertDescription>El bot se activa automáticamente al recibir mensajes mediante Cloud Functions si el switch está ON.</AlertDescription>
         </Alert>
 
         {botConfig?.lastAutoReplyAt && (
@@ -304,7 +304,7 @@ function ChatbotConfig({ channelId }: { channelId: string }) {
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2 text-sm font-bold text-muted-foreground">
                   <Terminal className="h-4 w-4" />
-                  Salud del Sistema
+                  Estado del Worker
                 </div>
                 <Button 
                   variant="ghost" 
@@ -313,23 +313,23 @@ function ChatbotConfig({ channelId }: { channelId: string }) {
                   onClick={checkHealth}
                 >
                   <RefreshCw className={cn("mr-1 h-3 w-3", workerHealth === 'loading' && "animate-spin")} />
-                  Verificar Worker
+                  Verificar Salud
                 </Button>
               </div>
             </CardHeader>
             <CardContent className="pt-0">
                <div className="flex items-center gap-2 text-xs">
-                 <span className="text-muted-foreground">Estado Worker:</span>
+                 <span className="text-muted-foreground">Comunicación:</span>
                  {workerHealth === 'ok' ? (
                    <Badge variant="outline" className="bg-green-500/10 text-green-600 border-green-500/20">OPERATIVO ✅</Badge>
                  ) : workerHealth === 'fail' ? (
-                   <Badge variant="outline" className="bg-red-500/10 text-red-600 border-red-500/20">DESCONECTADO ❌</Badge>
+                   <Badge variant="outline" className="bg-red-500/10 text-red-600 border-red-500/20">FALLA DE CONEXIÓN ❌</Badge>
                  ) : (
                    <span className="animate-pulse">Cargando...</span>
                  )}
                </div>
                <p className="mt-2 text-[10px] text-muted-foreground font-mono truncate">
-                 Worker URL: {process.env.NEXT_PUBLIC_BAILEYS_WORKER_URL || 'No configurada'}
+                 Endpoint: {process.env.NEXT_PUBLIC_BAILEYS_WORKER_URL || 'No configurado'}
                </p>
             </CardContent>
           </Card>
