@@ -1,19 +1,19 @@
+
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { Loader2, ScanQrCode, LogOut, RotateCcw, MessageSquare, Link as LinkIcon, Send, Bot, FileText, Save, History, Brain, Info, AlertCircle, CheckCircle2, ShieldAlert, ChevronDown, Terminal, RefreshCw } from 'lucide-react';
-import { useFirestore, useDoc, useMemoFirebase, useCollection, useUser } from '@/firebase';
-import { doc, collection, query, orderBy, limit, Timestamp } from 'firebase/firestore';
+import { useFirestore, useDoc, useMemoFirebase, useCollection, useUser, setDocumentNonBlocking } from '@/firebase';
+import { doc, collection, query, orderBy, limit, Timestamp, serverTimestamp } from 'firebase/firestore';
 import { PageHeader } from '@/components/app/page-header';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useLanguage } from '@/context/language-provider';
-import type { WhatsappChannel, Conversation, Message } from '@/lib/types';
+import type { WhatsappChannel, Conversation, Message, BotConfig } from '@/lib/types';
 import { StatusBadge } from '@/components/app/status-badge';
 import { QrCodeDialog } from '@/components/app/qr-code-dialog';
 import { Skeleton } from '@/components/ui/skeleton';
-import { useToast } from '@/hooks/use-toast';
 import { Alert, AlertTitle, AlertDescription } from '@/components/ui/alert';
 import { Input } from '@/components/ui/input';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -23,7 +23,7 @@ import Link from 'next/link';
 import { Switch } from '@/components/ui/switch';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
-import { getBotConfig, putBotConfig, type WorkerResponse } from '@/lib/worker/workerClient';
+import { useToast } from '@/hooks/use-toast';
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion';
 
 export function ChannelDetailPage({ channelId }: { channelId: string }) {
@@ -141,125 +141,87 @@ export function ChannelDetailPage({ channelId }: { channelId: string }) {
 
 function ChatbotConfig({ channelId }: { channelId: string }) {
   const { user } = useUser();
+  const firestore = useFirestore();
   const { toast } = useToast();
-  const [isSaving, setIsSaving] = useState(false);
-  const [isLoading, setIsLoading] = useState(true);
-  const [isEndpointMissing, setIsEndpointMissing] = useState(false);
   const [activeSubTab, setActiveSubTab] = useState('training');
+  const [workerHealth, setWorkerHealth] = useState<'loading' | 'ok' | 'fail'>('loading');
 
-  // Diagnostic State
-  const [lastResponse, setLastResponse] = useState<WorkerResponse | null>(null);
+  const botRef = useMemoFirebase(() => {
+    if (!firestore) return null;
+    return doc(firestore, 'channels', channelId, 'runtime', 'bot');
+  }, [firestore, channelId]);
 
+  const { data: botConfig, isLoading } = useDoc<BotConfig>(botRef);
+
+  // Local state for editing
   const [localProductContent, setLocalProductContent] = useState('');
   const [localSalesContent, setLocalSalesContent] = useState('');
-  const [localEnabled, setLocalEnabled] = useState(false);
-  const [lastAutoReplyAt, setLastAutoReplyAt] = useState<any>(null);
-  const [updatedAt, setUpdatedAt] = useState<any>(null);
-  const [updatedByEmail, setUpdatedByEmail] = useState('');
-
-  const fetchConfig = useCallback(async () => {
-    setIsLoading(true);
-    setIsEndpointMissing(false);
-    const res = await getBotConfig(channelId);
-    setLastResponse(res);
-    
-    if (res.ok && res.config) {
-      setLocalEnabled(res.config.enabled);
-      setLocalProductContent(res.config.productDetails || '');
-      setLocalSalesContent(res.config.salesStrategy || '');
-      setLastAutoReplyAt(res.config.lastAutoReplyAt);
-      setUpdatedAt(res.config.updatedAt);
-      setUpdatedByEmail(res.config.updatedByEmail || '');
-    } else {
-      if (res.status === 404 || res.error?.includes('Respuesta NO-JSON')) {
-        setIsEndpointMissing(true);
-      } else {
-        toast({
-          variant: 'destructive',
-          title: 'Error del Chatbot',
-          description: res.error || 'No se pudo obtener la configuración.'
-        });
-      }
-    }
-    setIsLoading(false);
-  }, [channelId, toast]);
 
   useEffect(() => {
-    fetchConfig();
-  }, [fetchConfig]);
+    if (botConfig) {
+      setLocalProductContent(botConfig.productDetails || '');
+      setLocalSalesContent(botConfig.salesStrategy || '');
+    }
+  }, [botConfig]);
 
-  const handleSave = async (overrides: Partial<{enabled: boolean, productDetails: string, salesStrategy: string}> = {}) => {
-    if (!user) return;
-    
-    if (isEndpointMissing) {
-      toast({
-        variant: 'destructive',
-        title: 'No se puede guardar',
-        description: 'El endpoint /bot/config aún no está disponible en el worker.'
-      });
+  const checkHealth = useCallback(async () => {
+    setWorkerHealth('loading');
+    const workerUrl = process.env.NEXT_PUBLIC_BAILEYS_WORKER_URL || process.env.NEXT_PUBLIC_WORKER_URL;
+    if (!workerUrl) {
+      setWorkerHealth('fail');
       return;
     }
+    try {
+      const res = await fetch(`${workerUrl}/health`, { mode: 'cors' });
+      setWorkerHealth(res.ok ? 'ok' : 'fail');
+    } catch {
+      setWorkerHealth('fail');
+    }
+  }, []);
 
-    setIsSaving(true);
+  useEffect(() => {
+    checkHealth();
+  }, [checkHealth]);
+
+  const handleSave = async (overrides: Partial<BotConfig> = {}) => {
+    if (!firestore || !user || !botRef) return;
     
-    const payload = {
-      enabled: overrides.enabled !== undefined ? overrides.enabled : localEnabled,
+    const data = {
+      enabled: overrides.enabled !== undefined ? overrides.enabled : (botConfig?.enabled || false),
       productDetails: overrides.productDetails !== undefined ? overrides.productDetails : localProductContent,
       salesStrategy: overrides.salesStrategy !== undefined ? overrides.salesStrategy : localSalesContent,
+      model: botConfig?.model || 'gemini-1.5-flash',
+      updatedAt: serverTimestamp(),
       updatedByUid: user.uid,
       updatedByEmail: user.email || '',
     };
 
-    const res = await putBotConfig(channelId, payload);
-    setLastResponse(res);
-
-    if (res.ok && res.config) {
-      setLocalEnabled(res.config.enabled);
-      setLocalProductContent(res.config.productDetails || '');
-      setLocalSalesContent(res.config.salesStrategy || '');
-      setUpdatedAt(res.config.updatedAt);
-      setUpdatedByEmail(res.config.updatedByEmail || '');
-      toast({ title: 'Configuración guardada' });
-    } else {
-      toast({ variant: 'destructive', title: 'Error al guardar', description: res.error });
-      if (overrides.enabled !== undefined) setLocalEnabled(!overrides.enabled);
-    }
-    setIsSaving(false);
+    setDocumentNonBlocking(botRef, data, { merge: true });
+    toast({ title: 'Configuración guardada en Firestore' });
   };
 
   const formatDate = (val: any) => {
     if (!val) return null;
     try {
-      if (typeof val === 'string') return format(new Date(val), 'PPpp');
-      if (val?._seconds) return format(new Date(val._seconds * 1000), 'PPpp');
-      return format(new Date(val), 'PPpp');
-    } catch (e) { return 'Hace un momento'; }
+      const date = val instanceof Timestamp ? val.toDate() : new Date(val);
+      return format(date, 'PPpp');
+    } catch (e) { return 'Recientemente'; }
   };
 
   return (
     <div className="space-y-6">
       <div className="grid gap-4 md:grid-cols-2">
-        {isEndpointMissing ? (
-          <Alert variant="destructive" className="bg-destructive/5 border-destructive/20 md:col-span-2">
-            <ShieldAlert className="h-4 w-4" />
-            <AlertTitle>Endpoint no disponible (404)</AlertTitle>
-            <AlertDescription>
-              El worker aún no tiene habilitado /bot/config. Ejecuta el deploy del worker con los nuevos endpoints para activar el bot.
-            </AlertDescription>
-          </Alert>
-        ) : (
-          <Alert className="bg-primary/5 border-primary/20">
-            <Info className="h-4 w-4" />
-            <AlertTitle>Configuración del Bot</AlertTitle>
-            <AlertDescription>Usa el switch para activar las respuestas automáticas.</AlertDescription>
-          </Alert>
-        )}
+        <Alert className="bg-primary/5 border-primary/20">
+          <Info className="h-4 w-4" />
+          <AlertTitle>Configuración Interna (Firestore)</AlertTitle>
+          <AlertDescription>El bot se activa automáticamente al recibir mensajes si el switch está ON.</AlertDescription>
+        </Alert>
 
-        {lastAutoReplyAt && (
+        {botConfig?.lastAutoReplyAt && (
           <Alert className="bg-green-500/5 border-green-500/20">
             <CheckCircle2 className="h-4 w-4 text-green-500" />
-            <AlertTitle>Actividad Reciente</AlertTitle>
-            <AlertDescription>Última respuesta: {formatDate(lastAutoReplyAt)}</AlertDescription>
+            <AlertTitle>Actividad del Bot</AlertTitle>
+            <AlertDescription>Última respuesta: {formatDate(botConfig.lastAutoReplyAt)}</AlertDescription>
           </Alert>
         )}
       </div>
@@ -280,14 +242,11 @@ function ChatbotConfig({ channelId }: { channelId: string }) {
               <div className="flex items-center space-x-2">
                 <Switch 
                   id="bot-enabled" 
-                  checked={localEnabled} 
-                  onCheckedChange={(checked) => {
-                    setLocalEnabled(checked);
-                    handleSave({ enabled: checked });
-                  }}
-                  disabled={isSaving || isLoading || isEndpointMissing}
+                  checked={botConfig?.enabled || false} 
+                  onCheckedChange={(checked) => handleSave({ enabled: checked } as any)}
+                  disabled={isLoading}
                 />
-                <Label htmlFor="bot-enabled">Activar IA</Label>
+                <Label htmlFor="bot-enabled">IA Activada</Label>
               </div>
             </CardHeader>
             <CardContent className="space-y-6">
@@ -316,74 +275,61 @@ function ChatbotConfig({ channelId }: { channelId: string }) {
                   <div className="flex justify-between items-center">
                     <div className="text-[10px] text-muted-foreground flex items-center gap-2">
                       <History className="h-3 w-3" />
-                      {updatedAt ? `Actualizado por ${updatedByEmail} el ${formatDate(updatedAt)}` : 'Sin actualizaciones'}
+                      {botConfig?.updatedAt ? `Actualizado por ${botConfig.updatedByEmail} el ${formatDate(botConfig.updatedAt)}` : 'Sin datos'}
                     </div>
-                    <Button onClick={() => handleSave()} disabled={isSaving || isEndpointMissing}>
-                      {isSaving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
-                      Guardar Conocimiento
+                    <Button onClick={() => handleSave()} disabled={isLoading}>
+                      <Save className="mr-2 h-4 w-4" />
+                      Guardar en Firestore
                     </Button>
                   </div>
+                  
+                  {botConfig?.lastError && (
+                    <Alert variant="destructive" className="mt-4">
+                      <AlertCircle className="h-4 w-4" />
+                      <AlertTitle>Error en Auto-respuesta</AlertTitle>
+                      <AlertDescription>
+                        {botConfig.lastError}
+                        <div className="mt-1 text-[10px] opacity-70">Detectado el: {formatDate(botConfig.lastErrorAt)}</div>
+                      </AlertDescription>
+                    </Alert>
+                  )}
                 </>
               )}
             </CardContent>
           </Card>
 
-          {/* Diagnostic Section */}
           <Card className="border-muted bg-muted/20">
             <CardHeader className="py-3">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2 text-sm font-bold text-muted-foreground">
                   <Terminal className="h-4 w-4" />
-                  Diagnóstico del Worker
+                  Salud del Sistema
                 </div>
                 <Button 
                   variant="ghost" 
                   size="sm" 
                   className="h-7 text-[10px]" 
-                  onClick={fetchConfig}
-                  disabled={isLoading}
+                  onClick={checkHealth}
                 >
-                  <RefreshCw className={cn("mr-1 h-3 w-3", isLoading && "animate-spin")} />
-                  Probar endpoint
+                  <RefreshCw className={cn("mr-1 h-3 w-3", workerHealth === 'loading' && "animate-spin")} />
+                  Verificar Worker
                 </Button>
               </div>
             </CardHeader>
             <CardContent className="pt-0">
-              <Accordion type="single" collapsible className="w-full">
-                <AccordionItem value="diag-details" className="border-0">
-                  <AccordionTrigger className="py-2 text-[11px] hover:no-underline">
-                    Ver detalles de conexión {isEndpointMissing ? "❌" : "✅"}
-                  </AccordionTrigger>
-                  <AccordionContent>
-                    <div className="space-y-3 font-mono text-[10px] bg-black/5 p-3 rounded border">
-                      <div className="grid grid-cols-3 border-b border-black/5 pb-1">
-                        <span className="text-muted-foreground uppercase font-bold">Worker URL:</span>
-                        <span className="col-span-2 truncate">{process.env.NEXT_PUBLIC_BAILEYS_WORKER_URL || process.env.NEXT_PUBLIC_WORKER_URL || 'NOT SET'}</span>
-                      </div>
-                      <div className="grid grid-cols-3 border-b border-black/5 pb-1">
-                        <span className="text-muted-foreground uppercase font-bold">Endpoint:</span>
-                        <span className="col-span-2">GET /v1/channels/{channelId}/bot/config</span>
-                      </div>
-                      <div className="grid grid-cols-3 border-b border-black/5 pb-1">
-                        <span className="text-muted-foreground uppercase font-bold">Status:</span>
-                        <span className={cn("font-bold", lastResponse?.status === 200 ? "text-green-600" : "text-red-600")}>
-                          {lastResponse?.status || '---'}
-                        </span>
-                      </div>
-                      <div className="grid grid-cols-3 border-b border-black/5 pb-1">
-                        <span className="text-muted-foreground uppercase font-bold">Content-Type:</span>
-                        <span>{lastResponse?.contentType || '---'}</span>
-                      </div>
-                      <div className="mt-2 space-y-1">
-                        <span className="text-muted-foreground uppercase font-bold block">Raw Response (Preview):</span>
-                        <pre className="p-2 bg-black/10 rounded overflow-x-auto whitespace-pre-wrap max-h-32">
-                          {lastResponse?.rawPreview || 'Sin respuesta del servidor.'}
-                        </pre>
-                      </div>
-                    </div>
-                  </AccordionContent>
-                </AccordionItem>
-              </Accordion>
+               <div className="flex items-center gap-2 text-xs">
+                 <span className="text-muted-foreground">Estado Worker:</span>
+                 {workerHealth === 'ok' ? (
+                   <Badge variant="outline" className="bg-green-500/10 text-green-600 border-green-500/20">OPERATIVO ✅</Badge>
+                 ) : workerHealth === 'fail' ? (
+                   <Badge variant="outline" className="bg-red-500/10 text-red-600 border-red-500/20">DESCONECTADO ❌</Badge>
+                 ) : (
+                   <span className="animate-pulse">Cargando...</span>
+                 )}
+               </div>
+               <p className="mt-2 text-[10px] text-muted-foreground font-mono truncate">
+                 Worker URL: {process.env.NEXT_PUBLIC_BAILEYS_WORKER_URL || 'No configurada'}
+               </p>
             </CardContent>
           </Card>
         </TabsContent>

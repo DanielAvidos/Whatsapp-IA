@@ -286,15 +286,16 @@ async function saveMessageToFirestore(channelId, jid, messageId, doc) {
 // --- CHATBOT LOGIC ---
 async function handleChatbotReply(channelId, jid, messageId, text, sock) {
   try {
-    const channelRef = db.collection('channels').doc(channelId);
+    const botRef = db.collection('channels').doc(channelId).collection('runtime').doc('bot');
     
-    // 1. Get Settings
-    const settingsSnap = await channelRef.collection('ai_training').doc('settings').get();
-    const settings = settingsSnap.exists ? settingsSnap.data() : { enabled: false };
-    if (!settings.enabled) return;
+    // 1. Get Settings (from consolidate Firestore doc)
+    const botSnap = await botRef.get();
+    if (!botSnap.exists) return;
+    const botConfig = botSnap.data();
+    if (!botConfig.enabled) return;
 
     // 2. Idempotency Check
-    const processedRef = channelRef.collection('bot_processed').doc(messageId);
+    const processedRef = db.collection('channels').doc(channelId).collection('runtime').doc('bot_processed').collection('ids').doc(messageId);
     const processedSnap = await processedRef.get();
     if (processedSnap.exists) return;
 
@@ -305,12 +306,8 @@ async function handleChatbotReply(channelId, jid, messageId, text, sock) {
       status: 'processing'
     });
 
-    // 3. Load Knowledge Base
-    const productSnap = await channelRef.collection('ai_training').doc('product_details').get();
-    const strategySnap = await channelRef.collection('ai_training').doc('sales_strategy').get();
-    
-    const productDetails = productSnap.exists ? productSnap.data().content : "";
-    const salesStrategy = strategySnap.exists ? strategySnap.data().content : "Responde como asistente profesional. Haz 1 pregunta para avanzar.";
+    const productDetails = botConfig.productDetails || "";
+    const salesStrategy = botConfig.salesStrategy || "Responde como asistente profesional. Haz 1 pregunta para avanzar.";
 
     // 4. Generate Response
     const ai = await getAI();
@@ -352,21 +349,21 @@ ${text}
       isBot: true,
     });
 
-    // Update stats
-    await channelRef.collection('ai_training').doc('settings').update({
-      lastAutoReplyAt: FieldValue.serverTimestamp()
+    // Update stats in Firestore
+    await botRef.update({
+      lastAutoReplyAt: FieldValue.serverTimestamp(),
+      lastError: null
     });
 
     await processedRef.update({ status: 'completed' });
 
   } catch (e) {
     logger.error({ channelId, jid, error: e.message }, 'Chatbot execution failed');
-    await db.collection('channels').doc(channelId).update({
-      lastBotError: {
-        message: e.message,
-        at: FieldValue.serverTimestamp()
-      }
-    });
+    const botRef = db.collection('channels').doc(channelId).collection('runtime').doc('bot');
+    await botRef.set({
+      lastError: e.message,
+      lastErrorAt: FieldValue.serverTimestamp()
+    }, { merge: true });
   }
 }
 
@@ -506,7 +503,7 @@ async function startOrRestartBaileys(channelId, reason = 'manual') {
             timestamp: timestampMs,
           });
 
-          // Chatbot Trigger
+          // Chatbot Trigger (Direct Firestore State Check)
           if (!fromMe && text) {
             handleChatbotReply(channelId, jid, messageId, text, sock).catch(() => {});
           }
@@ -551,78 +548,6 @@ app.use(express.json());
 const PORT = process.env.PORT || 8080;
 
 app.get('/health', (_req, res) => res.status(200).send('ok'));
-
-// --- BOT CONFIG ENDPOINTS (Admin SDK writes) ---
-app.get('/v1/channels/:channelId/bot/config', async (req, res) => {
-  try {
-    const { channelId } = req.params;
-    const channelRef = db.collection('channels').doc(channelId);
-    
-    const [settings, product, strategy] = await Promise.all([
-      channelRef.collection('ai_training').doc('settings').get(),
-      channelRef.collection('ai_training').doc('product_details').get(),
-      channelRef.collection('ai_training').doc('sales_strategy').get(),
-    ]);
-
-    res.json({
-      ok: true,
-      config: {
-        enabled: settings.exists ? settings.data().enabled : false,
-        productDetails: product.exists ? product.data().content : "",
-        salesStrategy: strategy.exists ? strategy.data().content : "",
-        lastAutoReplyAt: settings.exists ? settings.data().lastAutoReplyAt : null,
-        updatedAt: settings.exists ? settings.data().updatedAt : null,
-        updatedByEmail: settings.exists ? settings.data().updatedByEmail : null,
-      }
-    });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
-  }
-});
-
-app.put('/v1/channels/:channelId/bot/config', async (req, res) => {
-  try {
-    const { channelId } = req.params;
-    const { enabled, productDetails, salesStrategy, updatedByUid, updatedByEmail } = req.body;
-    
-    const channelRef = db.collection('channels').doc(channelId);
-    const common = {
-      updatedAt: FieldValue.serverTimestamp(),
-      updatedByUid: updatedByUid || 'system',
-      updatedByEmail: updatedByEmail || '',
-    };
-
-    const batch = db.batch();
-    
-    if (enabled !== undefined) {
-      batch.set(channelRef.collection('ai_training').doc('settings'), { enabled, ...common }, { merge: true });
-    }
-    
-    if (productDetails !== undefined) {
-      batch.set(channelRef.collection('ai_training').doc('product_details'), { content: productDetails, ...common }, { merge: true });
-    }
-
-    if (salesStrategy !== undefined) {
-      batch.set(channelRef.collection('ai_training').doc('sales_strategy'), { content: salesStrategy, ...common }, { merge: true });
-    }
-
-    await batch.commit();
-    
-    // Return updated config to client
-    res.json({ 
-      ok: true, 
-      config: {
-        enabled: enabled !== undefined ? enabled : false,
-        productDetails: productDetails || "",
-        salesStrategy: salesStrategy || "",
-        updatedAt: new Date().toISOString(),
-        updatedByEmail: updatedByEmail || '',
-      }
-    });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
-  }
-});
 
 // --- CHANNELS API ---
 app.get('/v1/channels', async (_req, res) => {

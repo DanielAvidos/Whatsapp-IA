@@ -87,17 +87,16 @@ export type Message = {
   isBot?: boolean;
 };
 
-export type AITrainingDoc = {
-  content: string;
-  updatedAt: Timestamp | FieldValue;
-  updatedByUid: string;
-  updatedByEmail?: string;
-};
-
-export type AISettings = {
+export type BotConfig = {
+  id: string;
   enabled: boolean;
+  productDetails: string;
+  salesStrategy: string;
+  model: string;
   updatedAt: Timestamp | FieldValue;
   updatedByUid: string;
-  updatedByEmail?: string;
+  updatedByEmail: string;
   lastAutoReplyAt?: Timestamp | FieldValue | null;
+  lastError?: string | null;
+  lastErrorAt?: Timestamp | FieldValue | null;
 };
