@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { Loader2, ScanQrCode, LogOut, RotateCcw, MessageSquare, Link as LinkIcon, Send, Bot, FileText, Save, History, Brain, Info, AlertCircle, CheckCircle2, ShieldAlert } from 'lucide-react';
+import { Loader2, ScanQrCode, LogOut, RotateCcw, MessageSquare, Link as LinkIcon, Send, Bot, FileText, Save, History, Brain, Info, AlertCircle, CheckCircle2, ShieldAlert, ChevronDown, Terminal, RefreshCw } from 'lucide-react';
 import { useFirestore, useDoc, useMemoFirebase, useCollection, useUser } from '@/firebase';
 import { doc, collection, query, orderBy, limit, Timestamp } from 'firebase/firestore';
 import { PageHeader } from '@/components/app/page-header';
@@ -23,7 +23,8 @@ import Link from 'next/link';
 import { Switch } from '@/components/ui/switch';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
-import { getBotConfig, putBotConfig } from '@/lib/worker/workerClient';
+import { getBotConfig, putBotConfig, type WorkerResponse } from '@/lib/worker/workerClient';
+import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion';
 
 export function ChannelDetailPage({ channelId }: { channelId: string }) {
   const { t } = useLanguage();
@@ -40,7 +41,7 @@ export function ChannelDetailPage({ channelId }: { channelId: string }) {
   const [isQrModalOpen, setQrModalOpen] = useState(false);
   const [activeTab, setActiveTab] = useState('connection');
 
-  const workerUrl = process.env.NEXT_PUBLIC_BAILEYS_WORKER_URL;
+  const workerUrl = process.env.NEXT_PUBLIC_BAILEYS_WORKER_URL || process.env.NEXT_PUBLIC_WORKER_URL;
 
   const handleApiCall = async (endpoint: string, successMessage: string, errorMessage: string) => {
     if (!workerUrl) {
@@ -146,6 +147,9 @@ function ChatbotConfig({ channelId }: { channelId: string }) {
   const [isEndpointMissing, setIsEndpointMissing] = useState(false);
   const [activeSubTab, setActiveSubTab] = useState('training');
 
+  // Diagnostic State
+  const [lastResponse, setLastResponse] = useState<WorkerResponse | null>(null);
+
   const [localProductContent, setLocalProductContent] = useState('');
   const [localSalesContent, setLocalSalesContent] = useState('');
   const [localEnabled, setLocalEnabled] = useState(false);
@@ -157,6 +161,7 @@ function ChatbotConfig({ channelId }: { channelId: string }) {
     setIsLoading(true);
     setIsEndpointMissing(false);
     const res = await getBotConfig(channelId);
+    setLastResponse(res);
     
     if (res.ok && res.config) {
       setLocalEnabled(res.config.enabled);
@@ -166,8 +171,7 @@ function ChatbotConfig({ channelId }: { channelId: string }) {
       setUpdatedAt(res.config.updatedAt);
       setUpdatedByEmail(res.config.updatedByEmail || '');
     } else {
-      // Si es un 404 o error de formato, es que el worker no tiene el endpoint
-      if (res.status === 404 || res.error?.includes('NO-JSON')) {
+      if (res.status === 404 || res.error?.includes('Respuesta NO-JSON')) {
         setIsEndpointMissing(true);
       } else {
         toast({
@@ -185,7 +189,17 @@ function ChatbotConfig({ channelId }: { channelId: string }) {
   }, [fetchConfig]);
 
   const handleSave = async (overrides: Partial<{enabled: boolean, productDetails: string, salesStrategy: string}> = {}) => {
-    if (!user || isEndpointMissing) return;
+    if (!user) return;
+    
+    if (isEndpointMissing) {
+      toast({
+        variant: 'destructive',
+        title: 'No se puede guardar',
+        description: 'El endpoint /bot/config aún no está disponible en el worker.'
+      });
+      return;
+    }
+
     setIsSaving(true);
     
     const payload = {
@@ -197,6 +211,8 @@ function ChatbotConfig({ channelId }: { channelId: string }) {
     };
 
     const res = await putBotConfig(channelId, payload);
+    setLastResponse(res);
+
     if (res.ok && res.config) {
       setLocalEnabled(res.config.enabled);
       setLocalProductContent(res.config.productDetails || '');
@@ -239,7 +255,7 @@ function ChatbotConfig({ channelId }: { channelId: string }) {
           </Alert>
         )}
 
-        {!isEndpointMissing && lastAutoReplyAt && (
+        {lastAutoReplyAt && (
           <Alert className="bg-green-500/5 border-green-500/20">
             <CheckCircle2 className="h-4 w-4 text-green-500" />
             <AlertTitle>Actividad Reciente</AlertTitle>
@@ -286,7 +302,6 @@ function ChatbotConfig({ channelId }: { channelId: string }) {
                       className="min-h-[150px]"
                       value={localProductContent}
                       onChange={(e) => setLocalProductContent(e.target.value)}
-                      disabled={isEndpointMissing}
                     />
                   </div>
                   <div className="space-y-2">
@@ -296,7 +311,6 @@ function ChatbotConfig({ channelId }: { channelId: string }) {
                       className="min-h-[150px]"
                       value={localSalesContent}
                       onChange={(e) => setLocalSalesContent(e.target.value)}
-                      disabled={isEndpointMissing}
                     />
                   </div>
                   <div className="flex justify-between items-center">
@@ -311,6 +325,65 @@ function ChatbotConfig({ channelId }: { channelId: string }) {
                   </div>
                 </>
               )}
+            </CardContent>
+          </Card>
+
+          {/* Diagnostic Section */}
+          <Card className="border-muted bg-muted/20">
+            <CardHeader className="py-3">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2 text-sm font-bold text-muted-foreground">
+                  <Terminal className="h-4 w-4" />
+                  Diagnóstico del Worker
+                </div>
+                <Button 
+                  variant="ghost" 
+                  size="sm" 
+                  className="h-7 text-[10px]" 
+                  onClick={fetchConfig}
+                  disabled={isLoading}
+                >
+                  <RefreshCw className={cn("mr-1 h-3 w-3", isLoading && "animate-spin")} />
+                  Probar endpoint
+                </Button>
+              </div>
+            </CardHeader>
+            <CardContent className="pt-0">
+              <Accordion type="single" collapsible className="w-full">
+                <AccordionItem value="diag-details" className="border-0">
+                  <AccordionTrigger className="py-2 text-[11px] hover:no-underline">
+                    Ver detalles de conexión {isEndpointMissing ? "❌" : "✅"}
+                  </AccordionTrigger>
+                  <AccordionContent>
+                    <div className="space-y-3 font-mono text-[10px] bg-black/5 p-3 rounded border">
+                      <div className="grid grid-cols-3 border-b border-black/5 pb-1">
+                        <span className="text-muted-foreground uppercase font-bold">Worker URL:</span>
+                        <span className="col-span-2 truncate">{process.env.NEXT_PUBLIC_BAILEYS_WORKER_URL || process.env.NEXT_PUBLIC_WORKER_URL || 'NOT SET'}</span>
+                      </div>
+                      <div className="grid grid-cols-3 border-b border-black/5 pb-1">
+                        <span className="text-muted-foreground uppercase font-bold">Endpoint:</span>
+                        <span className="col-span-2">GET /v1/channels/{channelId}/bot/config</span>
+                      </div>
+                      <div className="grid grid-cols-3 border-b border-black/5 pb-1">
+                        <span className="text-muted-foreground uppercase font-bold">Status:</span>
+                        <span className={cn("font-bold", lastResponse?.status === 200 ? "text-green-600" : "text-red-600")}>
+                          {lastResponse?.status || '---'}
+                        </span>
+                      </div>
+                      <div className="grid grid-cols-3 border-b border-black/5 pb-1">
+                        <span className="text-muted-foreground uppercase font-bold">Content-Type:</span>
+                        <span>{lastResponse?.contentType || '---'}</span>
+                      </div>
+                      <div className="mt-2 space-y-1">
+                        <span className="text-muted-foreground uppercase font-bold block">Raw Response (Preview):</span>
+                        <pre className="p-2 bg-black/10 rounded overflow-x-auto whitespace-pre-wrap max-h-32">
+                          {lastResponse?.rawPreview || 'Sin respuesta del servidor.'}
+                        </pre>
+                      </div>
+                    </div>
+                  </AccordionContent>
+                </AccordionItem>
+              </Accordion>
             </CardContent>
           </Card>
         </TabsContent>

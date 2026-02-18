@@ -14,42 +14,53 @@ export type WorkerBotConfig = {
   lastAutoReplyAt?: string;
 };
 
+export type WorkerResponse = {
+  ok: boolean;
+  config?: WorkerBotConfig;
+  error?: string;
+  status?: number;
+  contentType?: string;
+  rawPreview?: string;
+  url?: string;
+};
+
 function getWorkerBaseUrl() {
-  // Soporte para ambos nombres de variable para evitar errores de config
   const base = process.env.NEXT_PUBLIC_BAILEYS_WORKER_URL || process.env.NEXT_PUBLIC_WORKER_URL;
   if (!base) {
     throw new Error('Falta la URL del worker (NEXT_PUBLIC_BAILEYS_WORKER_URL).');
   }
-  return base.replace(/\/+$/, ''); // quita slash final
+  return base.replace(/\/+$/, '');
 }
 
-async function safeParseJson(res: Response) {
+async function safeParseJson(res: Response): Promise<any> {
   const ct = res.headers.get('content-type') || '';
   const text = await res.text();
 
-  // Si no es JSON, capturamos el error para debug sin romper la app
   if (!ct.includes('application/json')) {
-    const preview = text.slice(0, 220).replace(/\s+/g, ' ').trim();
+    const preview = text.slice(0, 800).replace(/\s+/g, ' ').trim();
     return {
-      error: `Respuesta NO-JSON del servidor (${res.status})`,
+      error: `Respuesta NO-JSON (${res.status})`,
       status: res.status,
-      preview,
+      contentType: ct,
+      rawPreview: preview,
       isHtml: ct.includes('text/html')
     };
   }
 
   try {
-    return JSON.parse(text);
+    const json = JSON.parse(text);
+    return { ...json, status: res.status, contentType: ct, rawPreview: text.slice(0, 800) };
   } catch (e) {
     return {
       error: "Error parseando JSON",
       status: res.status,
-      preview: text.slice(0, 100)
+      contentType: ct,
+      rawPreview: text.slice(0, 800)
     };
   }
 }
 
-export async function getBotConfig(channelId: string): Promise<{ ok: boolean; config?: WorkerBotConfig; error?: string; status?: number }> {
+export async function getBotConfig(channelId: string): Promise<WorkerResponse> {
   const base = getWorkerBaseUrl();
   const url = `${base}/v1/channels/${encodeURIComponent(channelId)}/bot/config`;
 
@@ -57,21 +68,21 @@ export async function getBotConfig(channelId: string): Promise<{ ok: boolean; co
     const res = await fetch(url, { method: 'GET', mode: 'cors' });
     const data = await safeParseJson(res);
 
-    if (data.error) {
-      return { ok: false, error: data.error, status: data.status };
-    }
-
-    if (!res.ok) {
-      return { ok: false, error: data?.error || `Error ${res.status}`, status: res.status };
-    }
-
-    return { ok: true, config: data.config };
+    return {
+      ok: res.ok && !data.error,
+      config: data.config,
+      error: data.error,
+      status: res.status,
+      contentType: data.contentType,
+      rawPreview: data.rawPreview,
+      url
+    };
   } catch (e: any) {
-    return { ok: false, error: e.message || 'Error de red' };
+    return { ok: false, error: e.message || 'Error de red', url };
   }
 }
 
-export async function putBotConfig(channelId: string, payload: Partial<WorkerBotConfig>): Promise<{ ok: boolean; config?: WorkerBotConfig; error?: string }> {
+export async function putBotConfig(channelId: string, payload: Partial<WorkerBotConfig>): Promise<WorkerResponse> {
   const base = getWorkerBaseUrl();
   const url = `${base}/v1/channels/${encodeURIComponent(channelId)}/bot/config`;
 
@@ -85,16 +96,16 @@ export async function putBotConfig(channelId: string, payload: Partial<WorkerBot
 
     const data = await safeParseJson(res);
 
-    if (data.error) {
-      return { ok: false, error: data.error };
-    }
-
-    if (!res.ok) {
-      return { ok: false, error: data?.error || `Error ${res.status}` };
-    }
-
-    return { ok: true, config: data.config };
+    return {
+      ok: res.ok && !data.error,
+      config: data.config,
+      error: data.error,
+      status: res.status,
+      contentType: data.contentType,
+      rawPreview: data.rawPreview,
+      url
+    };
   } catch (e: any) {
-    return { ok: false, error: e.message || 'Error de red' };
+    return { ok: false, error: e.message || 'Error de red', url };
   }
 }
