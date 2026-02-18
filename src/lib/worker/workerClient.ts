@@ -15,61 +15,86 @@ export type WorkerBotConfig = {
 };
 
 function getWorkerBaseUrl() {
-  // Estandarizado a NEXT_PUBLIC_BAILEYS_WORKER_URL para coincidir con el resto de la app
-  const base = process.env.NEXT_PUBLIC_BAILEYS_WORKER_URL;
+  // Soporte para ambos nombres de variable para evitar errores de config
+  const base = process.env.NEXT_PUBLIC_BAILEYS_WORKER_URL || process.env.NEXT_PUBLIC_WORKER_URL;
   if (!base) {
-    throw new Error('Falta NEXT_PUBLIC_BAILEYS_WORKER_URL (debe apuntar al Cloud Run del worker).');
+    throw new Error('Falta la URL del worker (NEXT_PUBLIC_BAILEYS_WORKER_URL).');
   }
-  return base.replace(/\/+$/, ''); // quita slash final si existe
+  return base.replace(/\/+$/, ''); // quita slash final
 }
 
 async function safeParseJson(res: Response) {
   const ct = res.headers.get('content-type') || '';
   const text = await res.text();
 
-  // Si no es JSON, es un error de Express (404, etc.) o del Hosting
+  // Si no es JSON, capturamos el error para debug sin romper la app
   if (!ct.includes('application/json')) {
     const preview = text.slice(0, 220).replace(/\s+/g, ' ').trim();
-    throw new Error(`Respuesta NO-JSON del worker (${res.status}). Content-Type="${ct}". Preview="${preview}"`);
+    return {
+      error: `Respuesta NO-JSON del servidor (${res.status})`,
+      status: res.status,
+      preview,
+      isHtml: ct.includes('text/html')
+    };
   }
 
   try {
     return JSON.parse(text);
   } catch (e) {
-    const preview = text.slice(0, 220).replace(/\s+/g, ' ').trim();
-    throw new Error(`JSON inválido del worker (${res.status}). Preview="${preview}"`);
+    return {
+      error: "Error parseando JSON",
+      status: res.status,
+      preview: text.slice(0, 100)
+    };
   }
 }
 
-export async function getBotConfig(channelId: string): Promise<WorkerBotConfig> {
+export async function getBotConfig(channelId: string): Promise<{ ok: boolean; config?: WorkerBotConfig; error?: string; status?: number }> {
   const base = getWorkerBaseUrl();
   const url = `${base}/v1/channels/${encodeURIComponent(channelId)}/bot/config`;
 
-  const res = await fetch(url, { method: 'GET', mode: 'cors' });
-  const data = await safeParseJson(res);
+  try {
+    const res = await fetch(url, { method: 'GET', mode: 'cors' });
+    const data = await safeParseJson(res);
 
-  if (!res.ok) {
-    throw new Error(data?.error || `Error HTTP ${res.status}`);
+    if (data.error) {
+      return { ok: false, error: data.error, status: data.status };
+    }
+
+    if (!res.ok) {
+      return { ok: false, error: data?.error || `Error ${res.status}`, status: res.status };
+    }
+
+    return { ok: true, config: data.config };
+  } catch (e: any) {
+    return { ok: false, error: e.message || 'Error de red' };
   }
-  return data.config as WorkerBotConfig;
 }
 
-export async function putBotConfig(channelId: string, payload: Partial<WorkerBotConfig>): Promise<WorkerBotConfig> {
+export async function putBotConfig(channelId: string, payload: Partial<WorkerBotConfig>): Promise<{ ok: boolean; config?: WorkerBotConfig; error?: string }> {
   const base = getWorkerBaseUrl();
   const url = `${base}/v1/channels/${encodeURIComponent(channelId)}/bot/config`;
 
-  const res = await fetch(url, {
-    method: 'PUT',
-    mode: 'cors',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
+  try {
+    const res = await fetch(url, {
+      method: 'PUT',
+      mode: 'cors',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
 
-  const data = await safeParseJson(res);
+    const data = await safeParseJson(res);
 
-  if (!res.ok) {
-    throw new Error(data?.error || `Error HTTP ${res.status}`);
+    if (data.error) {
+      return { ok: false, error: data.error };
+    }
+
+    if (!res.ok) {
+      return { ok: false, error: data?.error || `Error ${res.status}` };
+    }
+
+    return { ok: true, config: data.config };
+  } catch (e: any) {
+    return { ok: false, error: e.message || 'Error de red' };
   }
-  // El worker ahora devuelve el objeto 'config' completo o actualizado
-  return data.config as WorkerBotConfig;
 }

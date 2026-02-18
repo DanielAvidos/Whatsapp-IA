@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { Loader2, ScanQrCode, LogOut, RotateCcw, MessageSquare, Link as LinkIcon, Send, Bot, FileText, Save, History, Brain, Info, AlertCircle, CheckCircle2 } from 'lucide-react';
+import { Loader2, ScanQrCode, LogOut, RotateCcw, MessageSquare, Link as LinkIcon, Send, Bot, FileText, Save, History, Brain, Info, AlertCircle, CheckCircle2, ShieldAlert } from 'lucide-react';
 import { useFirestore, useDoc, useMemoFirebase, useCollection, useUser } from '@/firebase';
 import { doc, collection, query, orderBy, limit, Timestamp } from 'firebase/firestore';
 import { PageHeader } from '@/components/app/page-header';
@@ -143,6 +143,7 @@ function ChatbotConfig({ channelId }: { channelId: string }) {
   const { toast } = useToast();
   const [isSaving, setIsSaving] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
+  const [isEndpointMissing, setIsEndpointMissing] = useState(false);
   const [activeSubTab, setActiveSubTab] = useState('training');
 
   const [localProductContent, setLocalProductContent] = useState('');
@@ -151,27 +152,32 @@ function ChatbotConfig({ channelId }: { channelId: string }) {
   const [lastAutoReplyAt, setLastAutoReplyAt] = useState<any>(null);
   const [updatedAt, setUpdatedAt] = useState<any>(null);
   const [updatedByEmail, setUpdatedByEmail] = useState('');
-  const [lastBotError, setLastBotError] = useState<string | null>(null);
 
   const fetchConfig = useCallback(async () => {
-    try {
-      const config = await getBotConfig(channelId);
-      setLocalEnabled(config.enabled);
-      setLocalProductContent(config.productDetails || '');
-      setLocalSalesContent(config.salesStrategy || '');
-      setLastAutoReplyAt(config.lastAutoReplyAt);
-      setUpdatedAt(config.updatedAt);
-      setUpdatedByEmail(config.updatedByEmail || '');
-    } catch (e: any) {
-      console.error(e);
-      toast({
-        variant: 'destructive',
-        title: 'Error de comunicación con el Worker',
-        description: e.message || 'No se pudo obtener la configuración.'
-      });
-    } finally {
-      setIsLoading(false);
+    setIsLoading(true);
+    setIsEndpointMissing(false);
+    const res = await getBotConfig(channelId);
+    
+    if (res.ok && res.config) {
+      setLocalEnabled(res.config.enabled);
+      setLocalProductContent(res.config.productDetails || '');
+      setLocalSalesContent(res.config.salesStrategy || '');
+      setLastAutoReplyAt(res.config.lastAutoReplyAt);
+      setUpdatedAt(res.config.updatedAt);
+      setUpdatedByEmail(res.config.updatedByEmail || '');
+    } else {
+      // Si es un 404 o error de formato, es que el worker no tiene el endpoint
+      if (res.status === 404 || res.error?.includes('NO-JSON')) {
+        setIsEndpointMissing(true);
+      } else {
+        toast({
+          variant: 'destructive',
+          title: 'Error del Chatbot',
+          description: res.error || 'No se pudo obtener la configuración.'
+        });
+      }
     }
+    setIsLoading(false);
   }, [channelId, toast]);
 
   useEffect(() => {
@@ -179,7 +185,7 @@ function ChatbotConfig({ channelId }: { channelId: string }) {
   }, [fetchConfig]);
 
   const handleSave = async (overrides: Partial<{enabled: boolean, productDetails: string, salesStrategy: string}> = {}) => {
-    if (!user) return;
+    if (!user || isEndpointMissing) return;
     setIsSaving(true);
     
     const payload = {
@@ -190,22 +196,19 @@ function ChatbotConfig({ channelId }: { channelId: string }) {
       updatedByEmail: user.email || '',
     };
 
-    try {
-      const config = await putBotConfig(channelId, payload);
-      setLocalEnabled(config.enabled);
-      setLocalProductContent(config.productDetails || '');
-      setLocalSalesContent(config.salesStrategy || '');
-      setUpdatedAt(config.updatedAt);
-      setUpdatedByEmail(config.updatedByEmail || '');
-      
-      toast({ title: 'Configuración guardada', description: 'La IA se ha actualizado vía Worker.' });
-    } catch (e: any) {
-      toast({ variant: 'destructive', title: 'Error al guardar', description: e.message });
-      // Revert local state on error for toggles
+    const res = await putBotConfig(channelId, payload);
+    if (res.ok && res.config) {
+      setLocalEnabled(res.config.enabled);
+      setLocalProductContent(res.config.productDetails || '');
+      setLocalSalesContent(res.config.salesStrategy || '');
+      setUpdatedAt(res.config.updatedAt);
+      setUpdatedByEmail(res.config.updatedByEmail || '');
+      toast({ title: 'Configuración guardada' });
+    } else {
+      toast({ variant: 'destructive', title: 'Error al guardar', description: res.error });
       if (overrides.enabled !== undefined) setLocalEnabled(!overrides.enabled);
-    } finally {
-      setIsSaving(false);
     }
+    setIsSaving(false);
   };
 
   const formatDate = (val: any) => {
@@ -220,13 +223,23 @@ function ChatbotConfig({ channelId }: { channelId: string }) {
   return (
     <div className="space-y-6">
       <div className="grid gap-4 md:grid-cols-2">
-        <Alert className="bg-primary/5 border-primary/20">
-          <Info className="h-4 w-4" />
-          <AlertTitle>Configuración del Bot</AlertTitle>
-          <AlertDescription>Usa el switch para activar las respuestas automáticas.</AlertDescription>
-        </Alert>
+        {isEndpointMissing ? (
+          <Alert variant="destructive" className="bg-destructive/5 border-destructive/20 md:col-span-2">
+            <ShieldAlert className="h-4 w-4" />
+            <AlertTitle>Endpoint no disponible (404)</AlertTitle>
+            <AlertDescription>
+              El worker aún no tiene habilitado /bot/config. Ejecuta el deploy del worker con los nuevos endpoints para activar el bot.
+            </AlertDescription>
+          </Alert>
+        ) : (
+          <Alert className="bg-primary/5 border-primary/20">
+            <Info className="h-4 w-4" />
+            <AlertTitle>Configuración del Bot</AlertTitle>
+            <AlertDescription>Usa el switch para activar las respuestas automáticas.</AlertDescription>
+          </Alert>
+        )}
 
-        {lastAutoReplyAt && (
+        {!isEndpointMissing && lastAutoReplyAt && (
           <Alert className="bg-green-500/5 border-green-500/20">
             <CheckCircle2 className="h-4 w-4 text-green-500" />
             <AlertTitle>Actividad Reciente</AlertTitle>
@@ -256,7 +269,7 @@ function ChatbotConfig({ channelId }: { channelId: string }) {
                     setLocalEnabled(checked);
                     handleSave({ enabled: checked });
                   }}
-                  disabled={isSaving || isLoading}
+                  disabled={isSaving || isLoading || isEndpointMissing}
                 />
                 <Label htmlFor="bot-enabled">Activar IA</Label>
               </div>
@@ -273,6 +286,7 @@ function ChatbotConfig({ channelId }: { channelId: string }) {
                       className="min-h-[150px]"
                       value={localProductContent}
                       onChange={(e) => setLocalProductContent(e.target.value)}
+                      disabled={isEndpointMissing}
                     />
                   </div>
                   <div className="space-y-2">
@@ -282,6 +296,7 @@ function ChatbotConfig({ channelId }: { channelId: string }) {
                       className="min-h-[150px]"
                       value={localSalesContent}
                       onChange={(e) => setLocalSalesContent(e.target.value)}
+                      disabled={isEndpointMissing}
                     />
                   </div>
                   <div className="flex justify-between items-center">
@@ -289,7 +304,7 @@ function ChatbotConfig({ channelId }: { channelId: string }) {
                       <History className="h-3 w-3" />
                       {updatedAt ? `Actualizado por ${updatedByEmail} el ${formatDate(updatedAt)}` : 'Sin actualizaciones'}
                     </div>
-                    <Button onClick={() => handleSave()} disabled={isSaving}>
+                    <Button onClick={() => handleSave()} disabled={isSaving || isEndpointMissing}>
                       {isSaving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
                       Guardar Conocimiento
                     </Button>
