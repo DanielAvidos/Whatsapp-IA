@@ -23,8 +23,8 @@ import { Switch } from '@/components/ui/switch';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { useToast } from '@/hooks/use-toast';
-import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion';
 import { Badge } from '@/components/ui/badge';
+import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion';
 
 export function ChannelDetailPage({ channelId }: { channelId: string }) {
   const { t } = useLanguage();
@@ -144,14 +144,19 @@ function ChatbotConfig({ channelId }: { channelId: string }) {
   const firestore = useFirestore();
   const { toast } = useToast();
   const [activeSubTab, setActiveSubTab] = useState('training');
-  const [workerHealth, setWorkerHealth] = useState<'loading' | 'ok' | 'fail'>('loading');
 
   const botRef = useMemoFirebase(() => {
     if (!firestore) return null;
     return doc(firestore, 'channels', channelId, 'runtime', 'bot');
   }, [firestore, channelId]);
 
+  const runtimeConfigRef = useMemoFirebase(() => {
+    if (!firestore) return null;
+    return doc(firestore, 'runtime', 'config');
+  }, [firestore]);
+
   const { data: botConfig, isLoading } = useDoc<BotConfig>(botRef);
+  const { data: runtimeConfig } = useDoc<any>(runtimeConfigRef);
 
   // Local state for editing
   const [localProductContent, setLocalProductContent] = useState('');
@@ -164,25 +169,6 @@ function ChatbotConfig({ channelId }: { channelId: string }) {
     }
   }, [botConfig]);
 
-  const checkHealth = useCallback(async () => {
-    setWorkerHealth('loading');
-    const workerUrl = process.env.NEXT_PUBLIC_BAILEYS_WORKER_URL || process.env.NEXT_PUBLIC_WORKER_URL;
-    if (!workerUrl) {
-      setWorkerHealth('fail');
-      return;
-    }
-    try {
-      const res = await fetch(`${workerUrl}/health`, { mode: 'cors' });
-      setWorkerHealth(res.ok ? 'ok' : 'fail');
-    } catch {
-      setWorkerHealth('fail');
-    }
-  }, []);
-
-  useEffect(() => {
-    checkHealth();
-  }, [checkHealth]);
-
   const handleSave = async (overrides: Partial<BotConfig> = {}) => {
     if (!firestore || !user || !botRef) return;
     
@@ -190,7 +176,7 @@ function ChatbotConfig({ channelId }: { channelId: string }) {
       enabled: overrides.enabled !== undefined ? overrides.enabled : (botConfig?.enabled || false),
       productDetails: overrides.productDetails !== undefined ? overrides.productDetails : localProductContent,
       salesStrategy: overrides.salesStrategy !== undefined ? overrides.salesStrategy : localSalesContent,
-      model: botConfig?.model || 'gemini-1.5-flash',
+      model: botConfig?.model || 'gemini-2.5-flash',
       updatedAt: serverTimestamp(),
       updatedByUid: user.uid,
       updatedByEmail: user.email || '',
@@ -300,36 +286,26 @@ function ChatbotConfig({ channelId }: { channelId: string }) {
 
           <Card className="border-muted bg-muted/20">
             <CardHeader className="py-3">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2 text-sm font-bold text-muted-foreground">
-                  <Terminal className="h-4 w-4" />
-                  Estado del Worker
-                </div>
-                <Button 
-                  variant="ghost" 
-                  size="sm" 
-                  className="h-7 text-[10px]" 
-                  onClick={checkHealth}
-                >
-                  <RefreshCw className={cn("mr-1 h-3 w-3", workerHealth === 'loading' && "animate-spin")} />
-                  Verificar Salud
-                </Button>
+              <div className="flex items-center gap-2 text-sm font-bold text-muted-foreground">
+                <Terminal className="h-4 w-4" />
+                Diagnóstico del Entorno
               </div>
             </CardHeader>
-            <CardContent className="pt-0">
-               <div className="flex items-center gap-2 text-xs">
-                 <span className="text-muted-foreground">Estado Worker:</span>
-                 {workerHealth === 'ok' ? (
-                   <Badge variant="outline" className="bg-green-500/10 text-green-600 border-green-500/20">OPERATIVO ✅</Badge>
-                 ) : workerHealth === 'fail' ? (
-                   <Badge variant="outline" className="bg-red-500/10 text-red-600 border-red-500/20">DESCONECTADO ❌</Badge>
-                 ) : (
-                   <span className="animate-pulse">Cargando...</span>
-                 )}
+            <CardContent>
+               <div className="space-y-3 text-xs">
+                 <div className="flex items-center justify-between">
+                    <span className="text-muted-foreground">Worker URL (Runtime Config):</span>
+                    <Badge variant="outline" className="font-mono text-[10px]">{runtimeConfig?.workerUrl || 'No configurada'}</Badge>
+                 </div>
+                 <div className="flex items-center justify-between">
+                    <span className="text-muted-foreground">Modelo IA:</span>
+                    <Badge variant="secondary" className="font-mono text-[10px]">{botConfig?.model || 'gemini-2.5-flash'}</Badge>
+                 </div>
+                 <div className="flex items-center justify-between">
+                    <span className="text-muted-foreground">Idempotencia:</span>
+                    <span className="font-mono text-[10px]">Activada (Firestore)</span>
+                 </div>
                </div>
-               <p className="mt-2 text-[10px] text-muted-foreground font-mono truncate">
-                 Endpoint: {process.env.NEXT_PUBLIC_BAILEYS_WORKER_URL || 'No configurado'}
-               </p>
             </CardContent>
           </Card>
         </TabsContent>
@@ -431,3 +407,4 @@ function MessageThread({ channelId, jid, workerUrl, name }: { channelId: string,
     </>
   );
 }
+
