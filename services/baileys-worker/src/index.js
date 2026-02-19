@@ -53,7 +53,7 @@ async function getAI() {
   const { googleAI } = await import('@genkit-ai/google-genai');
   aiInstance = genkit({
     plugins: [googleAI()],
-    model: 'googleai/gemini-1.5-flash',
+    model: 'googleai/gemini-2.5-flash',
   });
   return aiInstance;
 }

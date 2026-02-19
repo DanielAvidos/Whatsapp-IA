@@ -11,6 +11,11 @@ const { VertexAI } = require("@google-cloud/vertexai");
 admin.initializeApp();
 const db = admin.firestore();
 
+// --- MODEL LOCK ---
+// ESTA CONSTANTE BLOQUEA EL MODELO PARA EVITAR REGRESIONES A VERSIONES OBSOLETAS O INESTABLES.
+// NO MODIFICAR SIN PRUEBAS DE COMPATIBILIDAD CON VERTEX AI SDK.
+const GEMINI_MODEL_LOCKED = "gemini-2.5-flash";
+
 function safeText(v) {
   return typeof v === "string" ? v : "";
 }
@@ -81,7 +86,7 @@ async function getBotConfig(channelId) {
 
   return {
     enabled: d?.enabled !== undefined ? !!d.enabled : true,
-    model: d?.model || "gemini-2.5-flash",
+    model: GEMINI_MODEL_LOCKED, // MODELO BLOQUEADO PARA ESTABILIDAD
     productDetails: safeText(d?.productDetails),
     salesStrategy: safeText(d?.salesStrategy),
   };
@@ -127,10 +132,10 @@ async function setBotSuccess(channelId) {
 /**
  * Genera respuesta usando el historial de mensajes.
  */
-async function generateWithGemini({ model, systemPrompt, messages, projectId, location }) {
+async function generateWithGemini({ systemPrompt, messages, projectId, location }) {
   const vertexAI = new VertexAI({ project: projectId, location });
   const genModel = vertexAI.getGenerativeModel({
-    model,
+    model: GEMINI_MODEL_LOCKED, // SIEMPRE USA EL MODELO BLOQUEADO
     generationConfig: { maxOutputTokens: 512, temperature: 0.6 },
   });
 
@@ -233,9 +238,8 @@ exports.autoReplyOnIncomingMessage = functions
       const messages = await loadConversationContext(channelId, jid, 12);
 
       // 3. Generar respuesta con Gemini
-      logger.info("[BOT] Generando respuesta con Gemini", { model: bot.model });
+      logger.info("[BOT] Generando respuesta con Gemini", { model: GEMINI_MODEL_LOCKED });
       const reply = await generateWithGemini({
-        model: bot.model,
         systemPrompt,
         messages,
         projectId,
