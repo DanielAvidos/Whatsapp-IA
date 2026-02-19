@@ -15,6 +15,32 @@ function safeText(v) {
   return typeof v === "string" ? v : "";
 }
 
+/**
+ * Carga los últimos N mensajes de una conversación para dar contexto a la IA.
+ */
+async function loadConversationContext(channelId, jid, limitCount = 12) {
+  try {
+    const snap = await db
+      .collection(`channels/${channelId}/conversations/${jid}/messages`)
+      .orderBy("timestamp", "desc")
+      .limit(limitCount)
+      .get();
+
+    const items = snap.docs
+      .map(d => ({ id: d.id, ...d.data() }))
+      .reverse();
+
+    return items.map(m => {
+      const role = m.fromMe ? "ASSISTANT" : "USER";
+      const text = typeof m.text === "string" ? m.text : "";
+      return { role, text };
+    }).filter(x => x.text);
+  } catch (error) {
+    logger.error("[BOT] Error loading context", { channelId, jid, error: error.message });
+    return [];
+  }
+}
+
 function buildSystemPrompt({ salesStrategy, productDetails }) {
   const hardRules = `
 Eres un asistente automático experto en WhatsApp.
@@ -54,7 +80,7 @@ async function getBotConfig(channelId) {
   const d = snap.exists ? snap.data() : {};
 
   return {
-    enabled: d?.enabled !== undefined ? !!d.enabled : true, // default ON si no existe
+    enabled: d?.enabled !== undefined ? !!d.enabled : true,
     model: d?.model || "gemini-2.5-flash",
     productDetails: safeText(d?.productDetails),
     salesStrategy: safeText(d?.salesStrategy),
@@ -62,8 +88,7 @@ async function getBotConfig(channelId) {
 }
 
 /**
- * Idempotencia: subcolección DENTRO del doc bot
- * Ruta: channels/{channelId}/runtime/bot/bot_processed/{messageId}
+ * Idempotencia: subcolección bot_processed DENTRO del doc bot.
  */
 async function markProcessed(channelId, messageId, payload) {
   const ref = db.doc(`channels/${channelId}/runtime/bot/bot_processed/${messageId}`);
@@ -99,15 +124,25 @@ async function setBotSuccess(channelId) {
   );
 }
 
-async function generateWithGemini({ model, systemPrompt, userText, projectId, location }) {
+/**
+ * Genera respuesta usando el historial de mensajes.
+ */
+async function generateWithGemini({ model, systemPrompt, messages, projectId, location }) {
   const vertexAI = new VertexAI({ project: projectId, location });
   const genModel = vertexAI.getGenerativeModel({
     model,
     generationConfig: { maxOutputTokens: 512, temperature: 0.6 },
   });
 
+  // Formateamos el historial para que Gemini lo entienda como un diálogo
+  const historyString = messages
+    .map(m => `${m.role}: ${m.text}`)
+    .join("\n");
+
+  const fullPrompt = `${systemPrompt}\n\n=== HISTORIAL DE CONVERSACIÓN ===\n${historyString}\n\nASSISTANT:`;
+
   const result = await genModel.generateContent({
-    contents: [{ role: "user", parts: [{ text: `${systemPrompt}\n\nUsuario: ${userText}` }] }],
+    contents: [{ role: "user", parts: [{ text: fullPrompt }] }],
   });
 
   const resp = result?.response;
@@ -117,13 +152,21 @@ async function generateWithGemini({ model, systemPrompt, userText, projectId, lo
   return String(text || "").trim();
 }
 
-async function sendViaWorker({ workerUrl, channelId, toJid, text }) {
+/**
+ * Envía el mensaje replicando el payload manual del frontend.
+ */
+async function sendViaWorker({ workerUrl, channelId, toJid, text, meta }) {
   const url = `${workerUrl}/v1/channels/${encodeURIComponent(channelId)}/messages/send`;
 
   const res = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ to: toJid, text }),
+    body: JSON.stringify({ 
+      to: toJid, 
+      text,
+      source: "bot",
+      meta
+    }),
   });
 
   if (!res.ok) {
@@ -146,6 +189,7 @@ exports.autoReplyOnIncomingMessage = functions
 
     if (!text) return null;
 
+    // Ignorar si es enviado por nosotros o por el bot
     if (fromMe || isBot) {
       await db.doc(`channels/${channelId}/runtime/bot`).set(
         {
@@ -158,14 +202,22 @@ exports.autoReplyOnIncomingMessage = functions
       return null;
     }
 
-    logger.info("[BOT] Procesando mensaje entrante", { channelId, jid, messageId });
+    logger.info("[BOT] Trigger detectado", { channelId, jid, messageId });
 
+    // Idempotencia
     const isNew = await markProcessed(channelId, messageId, { jid, text });
-    if (!isNew) return null;
+    if (!isNew) {
+      logger.info("[BOT] Mensaje ya procesado", { messageId });
+      return null;
+    }
 
     try {
+      // 1. Obtener configuración
       const bot = await getBotConfig(channelId);
-      if (!bot.enabled) return null;
+      if (!bot.enabled) {
+        logger.info("[BOT] El bot está desactivado para este canal", { channelId });
+        return null;
+      }
 
       const workerUrl = await getWorkerUrl();
       const projectId = process.env.GOOGLE_CLOUD_PROJECT || admin.app().options.projectId;
@@ -176,24 +228,39 @@ exports.autoReplyOnIncomingMessage = functions
         productDetails: bot.productDetails,
       });
 
+      // 2. Cargar contexto (historial)
+      logger.info("[BOT] Cargando contexto de conversación", { jid });
+      const messages = await loadConversationContext(channelId, jid, 12);
+
+      // 3. Generar respuesta con Gemini
+      logger.info("[BOT] Generando respuesta con Gemini", { model: bot.model });
       const reply = await generateWithGemini({
         model: bot.model,
         systemPrompt,
-        userText: text,
+        messages,
         projectId,
         location,
       });
 
-      if (!reply) throw new Error("Gemini no generó respuesta.");
+      if (!reply) throw new Error("Gemini no generó ninguna respuesta válida.");
 
-      await sendViaWorker({ workerUrl, channelId, toJid: jid, text: reply });
+      // 4. Enviar vía worker
+      logger.info("[BOT] Enviando respuesta al worker", { toJid: jid });
+      await sendViaWorker({ 
+        workerUrl, 
+        channelId, 
+        toJid: jid, 
+        text: reply,
+        meta: { triggerMessageId: messageId }
+      });
 
+      // 5. Registrar éxito
       await setBotSuccess(channelId);
-      logger.info("[BOT] Respuesta enviada", { channelId, jid });
+      logger.info("[BOT] Flujo completado con éxito", { channelId, jid });
 
     } catch (err) {
       const msg = err?.message || String(err);
-      logger.error("[BOT] Error", { channelId, messageId, error: msg });
+      logger.error("[BOT] Error crítico en el flujo", { channelId, messageId, error: msg });
       await setBotError(channelId, msg, { lastFailMessagePath: snapshot.ref.path });
     }
 
