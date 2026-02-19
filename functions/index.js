@@ -1,4 +1,9 @@
-const functions = require("firebase-functions");
+/**
+ * Auto-reply WhatsApp Bot (DEV/PROD)
+ * Trigger: Firestore onCreate (v1) para evitar problemas de Eventarc/2nd gen.
+ */
+
+const functions = require("firebase-functions/v1");
 const admin = require("firebase-admin");
 const { VertexAI } = require("@google-cloud/vertexai");
 
@@ -51,7 +56,7 @@ async function getWorkerUrl() {
 }
 
 /**
- * Obtiene la configuración de IA del canal.
+ * Obtiene la configuración de IA del canal desde Firestore (Punto único de verdad).
  */
 async function getBotConfig(channelId) {
   const snap = await db.doc(`channels/${channelId}/runtime/bot`).get();
@@ -162,12 +167,12 @@ exports.autoReplyOnIncomingMessage = functions
     // Solo responder a mensajes de texto entrantes que no sean del bot mismo
     if (!text || fromMe || isBot) return;
 
-    console.log("[BOT] Procesando mensaje entrante", { channelId, jid, messageId });
+    functions.logger.info("[BOT] Procesando mensaje entrante", { channelId, jid, messageId });
 
     // 2. Idempotencia
     const isNew = await markProcessed(channelId, messageId, { jid, text });
     if (!isNew) {
-      console.log("[BOT] Mensaje ya procesado anteriormente", { messageId });
+      functions.logger.info("[BOT] Mensaje ya procesado anteriormente", { messageId });
       return;
     }
 
@@ -175,7 +180,7 @@ exports.autoReplyOnIncomingMessage = functions
       // 3. Cargar configuración del bot
       const bot = await getBotConfig(channelId);
       if (!bot.enabled) {
-        console.log("[BOT] IA desactivada para este canal", { channelId });
+        functions.logger.info("[BOT] IA desactivada para este canal", { channelId });
         return;
       }
 
@@ -183,7 +188,9 @@ exports.autoReplyOnIncomingMessage = functions
       const workerUrl = await getWorkerUrl();
 
       // 5. Configuración de Vertex AI
-      const projectId = process.env.GOOGLE_CLOUD_PROJECT || admin.instanceId().app.options.projectId;
+      const projectId = process.env.GCLOUD_PROJECT || process.env.GOOGLE_CLOUD_PROJECT;
+      if (!projectId) throw new Error("No se pudo determinar projectId (GCLOUD_PROJECT)");
+      
       const location = "us-central1";
       
       const systemPrompt = buildSystemPrompt({
@@ -212,11 +219,11 @@ exports.autoReplyOnIncomingMessage = functions
 
       // 8. Marcar éxito
       await setBotSuccess(channelId);
-      console.log("[BOT] Respuesta enviada con éxito", { channelId, jid });
+      functions.logger.info("[BOT] Respuesta enviada con éxito", { channelId, jid });
 
     } catch (err) {
       const msg = err.message || String(err);
-      console.error("[BOT] Error fatal en ejecución", { channelId, messageId, error: msg });
+      functions.logger.error("[BOT] Error fatal en ejecución", { channelId, messageId, error: msg });
       await setBotError(channelId, msg);
     }
   });
