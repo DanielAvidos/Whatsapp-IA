@@ -1,9 +1,10 @@
 /**
  * Auto-reply WhatsApp Bot (DEV/PROD)
- * Trigger: Firestore onCreate (v1) para evitar problemas de Eventarc/2nd gen.
+ * Trigger: Firestore onCreate (Gen1 / v1 API)
  */
 
-const functions = require("firebase-functions");
+const functions = require("firebase-functions/v1");
+const logger = require("firebase-functions/logger");
 const admin = require("firebase-admin");
 const { VertexAI } = require("@google-cloud/vertexai");
 
@@ -40,7 +41,10 @@ async function getWorkerUrl() {
   const snap = await db.doc("runtime/config").get();
   const data = snap.exists ? snap.data() : null;
   const workerUrl = data?.workerUrl;
-  if (!workerUrl) throw new Error("Falta runtime/config.workerUrl en Firestore (dev debe tener el worker DEV).");
+
+  if (!workerUrl) {
+    throw new Error("Falta runtime/config.workerUrl en Firestore (debe apuntar al worker del ambiente).");
+  }
   return String(workerUrl).replace(/\/+$/, "");
 }
 
@@ -50,17 +54,22 @@ async function getBotConfig(channelId) {
   const d = snap.exists ? snap.data() : {};
 
   return {
-    enabled: d?.enabled !== undefined ? !!d.enabled : true,
+    enabled: d?.enabled !== undefined ? !!d.enabled : true, // default ON si no existe
     model: d?.model || "gemini-2.5-flash",
     productDetails: safeText(d?.productDetails),
     salesStrategy: safeText(d?.salesStrategy),
   };
 }
 
+/**
+ * Idempotencia: subcolección DENTRO del doc bot
+ * Ruta: channels/{channelId}/runtime/bot/bot_processed/{messageId}
+ */
 async function markProcessed(channelId, messageId, payload) {
   const ref = db.doc(`channels/${channelId}/runtime/bot/bot_processed/${messageId}`);
   const snap = await ref.get();
   if (snap.exists) return false;
+
   await ref.set({
     processedAt: admin.firestore.FieldValue.serverTimestamp(),
     ...payload,
@@ -98,18 +107,19 @@ async function generateWithGemini({ model, systemPrompt, userText, projectId, lo
   });
 
   const result = await genModel.generateContent({
-    contents: [
-      { role: "user", parts: [{ text: `${systemPrompt}\n\nUsuario: ${userText}` }] },
-    ],
+    contents: [{ role: "user", parts: [{ text: `${systemPrompt}\n\nUsuario: ${userText}` }] }],
   });
 
   const resp = result?.response;
-  const text = resp?.candidates?.[0]?.content?.parts?.map((p) => p.text).join("") || "";
+  const text =
+    resp?.candidates?.[0]?.content?.parts?.map((p) => p.text).join("") || "";
+
   return String(text || "").trim();
 }
 
 async function sendViaWorker({ workerUrl, channelId, toJid, text }) {
   const url = `${workerUrl}/v1/channels/${encodeURIComponent(channelId)}/messages/send`;
+
   const res = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -135,6 +145,7 @@ exports.autoReplyOnIncomingMessage = functions
     const isBot = !!data.isBot;
 
     if (!text) return null;
+
     if (fromMe || isBot) {
       await db.doc(`channels/${channelId}/runtime/bot`).set(
         {
@@ -147,7 +158,7 @@ exports.autoReplyOnIncomingMessage = functions
       return null;
     }
 
-    functions.logger.info("[BOT] Procesando mensaje entrante", { channelId, jid, messageId });
+    logger.info("[BOT] Procesando mensaje entrante", { channelId, jid, messageId });
 
     const isNew = await markProcessed(channelId, messageId, { jid, text });
     if (!isNew) return null;
@@ -178,12 +189,13 @@ exports.autoReplyOnIncomingMessage = functions
       await sendViaWorker({ workerUrl, channelId, toJid: jid, text: reply });
 
       await setBotSuccess(channelId);
-      functions.logger.info("[BOT] Respuesta enviada", { channelId, jid });
+      logger.info("[BOT] Respuesta enviada", { channelId, jid });
 
     } catch (err) {
       const msg = err?.message || String(err);
-      functions.logger.error("[BOT] Error", { channelId, messageId, error: msg });
+      logger.error("[BOT] Error", { channelId, messageId, error: msg });
       await setBotError(channelId, msg, { lastFailMessagePath: snapshot.ref.path });
     }
+
     return null;
   });
