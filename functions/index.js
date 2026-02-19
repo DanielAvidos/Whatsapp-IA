@@ -18,6 +18,65 @@ function safeText(v) {
 }
 
 /**
+ * Extrae el texto de un mensaje de diversas estructuras posibles (Baileys/Custom).
+ */
+function extractText(data) {
+  // 1. Campos directos
+  const direct =
+    safeText(data.text) ||
+    safeText(data.body) ||
+    safeText(data.messageText) ||
+    safeText(data.content);
+
+  if (direct) return direct;
+
+  // 2. Estructuras típicas de Baileys
+  const msg = data.message || data.msg || data.payload || data.rawMessage || null;
+  if (!msg || typeof msg !== "object") return "";
+
+  // Casos comunes de Baileys
+  if (typeof msg.conversation === "string") return msg.conversation;
+
+  if (msg.extendedTextMessage && typeof msg.extendedTextMessage.text === "string") {
+    return msg.extendedTextMessage.text;
+  }
+
+  // Wrappers anidados
+  if (msg.message) {
+    if (typeof msg.message.conversation === "string") return msg.message.conversation;
+    if (msg.message.extendedTextMessage?.text) return msg.message.extendedTextMessage.text;
+  }
+
+  return "";
+}
+
+/**
+ * Determina si el mensaje fue enviado por nosotros o por el bot.
+ */
+function extractFromMe(data) {
+  if (typeof data.fromMe === "boolean") return data.fromMe;
+  if (typeof data.isBot === "boolean" && data.isBot) return true;
+
+  // Revisar en la "key" de Baileys
+  const key = data.key || data.message?.key || data.message?.message?.key;
+  if (key && typeof key.fromMe === "boolean") return key.fromMe;
+
+  return false;
+}
+
+/**
+ * Obtiene el JID del destinatario de forma robusta.
+ */
+function extractJid(data, fallbackJid) {
+  return (
+    safeText(data.jid) ||
+    safeText(data.remoteJid) ||
+    safeText(data.chatId) ||
+    fallbackJid
+  );
+}
+
+/**
  * Construye el prompt del sistema basado en la configuración del canal.
  */
 function buildSystemPrompt({ salesStrategy, productDetails }) {
@@ -56,7 +115,7 @@ async function getWorkerUrl() {
 }
 
 /**
- * Obtiene la configuración de IA del canal desde Firestore (Punto único de verdad).
+ * Obtiene la configuración de IA del canal desde Firestore.
  */
 async function getBotConfig(channelId) {
   const snap = await db.doc(`channels/${channelId}/runtime/bot`).get();
@@ -111,6 +170,17 @@ async function setBotSuccess(channelId) {
 }
 
 /**
+ * Registra por qué se ignoró un mensaje.
+ */
+async function setBotSkip(channelId, reason, path) {
+  await db.doc(`channels/${channelId}/runtime/bot`).set({
+    lastSkipReason: reason,
+    lastSkipAt: admin.firestore.FieldValue.serverTimestamp(),
+    lastSkipMessagePath: path,
+  }, { merge: true });
+}
+
+/**
  * Genera contenido usando Vertex AI Gemini.
  */
 async function generateWithGemini({ model, systemPrompt, userText, projectId, location }) {
@@ -150,7 +220,6 @@ async function sendViaWorker({ workerUrl, channelId, toJid, text }) {
 
 /**
  * Función principal: Dispara cuando se guarda un mensaje en la subcolección de una conversación.
- * Usamos la 1ª Generación (v1) para evitar problemas de permisos con Eventarc.
  */
 exports.autoReplyOnIncomingMessage = functions
   .region("us-central1")
@@ -159,46 +228,63 @@ exports.autoReplyOnIncomingMessage = functions
     const { channelId, jid, messageId } = context.params;
     const data = snapshot.data() || {};
 
-    // 1. Validar si el mensaje es apto para auto-respuesta
-    const text = safeText(data.text);
-    const fromMe = !!data.fromMe;
+    // 1. Extraer datos de forma robusta
+    const text = extractText(data);
+    const fromMe = extractFromMe(data);
     const isBot = !!data.isBot;
 
-    // Solo responder a mensajes de texto entrantes que no sean del bot mismo
-    if (!text || fromMe || isBot) return;
+    // Logging inicial para depuración
+    functions.logger.info("[BOT] Trigger disparado", {
+      channelId,
+      jid,
+      messageId,
+      hasText: !!text,
+      fromMe,
+      isBot,
+      path: snapshot.ref.path
+    });
 
-    functions.logger.info("[BOT] Procesando mensaje entrante", { channelId, jid, messageId });
+    // 2. Validaciones tempranas con registro de "skip"
+    if (!text) {
+      functions.logger.info("[BOT] Mensaje sin texto, ignorando");
+      await setBotSkip(channelId, "NO_TEXT", snapshot.ref.path);
+      return null;
+    }
 
-    // 2. Idempotencia
-    const isNew = await markProcessed(channelId, messageId, { jid, text });
+    if (fromMe || isBot) {
+      functions.logger.info("[BOT] Mensaje saliente o de bot, ignorando");
+      await setBotSkip(channelId, fromMe ? "FROM_ME" : "IS_BOT", snapshot.ref.path);
+      return null;
+    }
+
+    // 3. Idempotencia
+    const isNew = await markProcessed(channelId, messageId, { jid, text: text.slice(0, 50) });
     if (!isNew) {
       functions.logger.info("[BOT] Mensaje ya procesado anteriormente", { messageId });
-      return;
+      return null;
     }
 
     try {
-      // 3. Cargar configuración del bot
+      // 4. Cargar configuración del bot
       const bot = await getBotConfig(channelId);
       if (!bot.enabled) {
         functions.logger.info("[BOT] IA desactivada para este canal", { channelId });
-        return;
+        return null;
       }
 
-      // 4. Obtener URL del worker
+      // 5. Preparar entorno
       const workerUrl = await getWorkerUrl();
-
-      // 5. Configuración de Vertex AI
       const projectId = process.env.GCLOUD_PROJECT || process.env.GOOGLE_CLOUD_PROJECT;
-      if (!projectId) throw new Error("No se pudo determinar projectId (GCLOUD_PROJECT)");
+      if (!projectId) throw new Error("No se pudo determinar projectId");
       
       const location = "us-central1";
-      
       const systemPrompt = buildSystemPrompt({
         salesStrategy: bot.salesStrategy,
         productDetails: bot.productDetails,
       });
 
       // 6. Generar respuesta con IA
+      functions.logger.info("[BOT] Generando respuesta con Gemini...", { model: bot.model });
       const reply = await generateWithGemini({
         model: bot.model,
         systemPrompt,
@@ -210,20 +296,24 @@ exports.autoReplyOnIncomingMessage = functions
       if (!reply) throw new Error("Gemini no generó ninguna respuesta válida.");
 
       // 7. Enviar vía Worker
+      const toJid = extractJid(data, jid);
+      functions.logger.info("[BOT] Enviando respuesta vía worker...", { toJid });
       await sendViaWorker({ 
         workerUrl, 
         channelId, 
-        toJid: jid, 
+        toJid, 
         text: reply 
       });
 
       // 8. Marcar éxito
       await setBotSuccess(channelId);
-      functions.logger.info("[BOT] Respuesta enviada con éxito", { channelId, jid });
+      functions.logger.info("[BOT] Respuesta enviada con éxito", { channelId, toJid });
 
     } catch (err) {
       const msg = err.message || String(err);
       functions.logger.error("[BOT] Error fatal en ejecución", { channelId, messageId, error: msg });
       await setBotError(channelId, msg);
     }
+    
+    return null;
   });
