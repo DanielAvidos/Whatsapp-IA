@@ -350,6 +350,7 @@ exports.followupTickHourly = functions
       const channelId = channelDoc.id;
       // Ruta correcta de configuración: channels/{id}/runtime/followup
       const followupConfigSnap = await db.doc(`channels/${channelId}/runtime/followup`).get();
+      
       const config = followupConfigSnap.exists ? followupConfigSnap.data() : {
         enabled: false, 
         businessHours: { startHour: 8, endHour: 22, timezone: "America/Mexico_City" }, 
@@ -357,10 +358,14 @@ exports.followupTickHourly = functions
         cadenceHours: [1, 3, 5, 8, 13, 21, 34, 55, 89]
       };
 
+      logger.info(`[FOLLOWUP] Canal ${channelId} config:`, { enabled: config.enabled, maxTouches: config.maxTouches });
+
       if (!config.enabled) continue;
 
       // Validar hora actual en el timezone del canal
       const nowInTz = DateTime.now().setZone(config.businessHours?.timezone || "America/Mexico_City");
+      logger.info(`[FOLLOWUP] Canal ${channelId} validando horario:`, { hour: nowInTz.hour, timezone: nowInTz.zoneName });
+
       if (nowInTz.hour < (config.businessHours?.startHour || 8) || nowInTz.hour >= (config.businessHours?.endHour || 22)) {
         logger.info(`[FOLLOWUP] Canal ${channelId} fuera de horario (${nowInTz.hour}h)`);
         continue;
@@ -370,6 +375,8 @@ exports.followupTickHourly = functions
         .where("followupEnabled", "==", true)
         .where("followupStopped", "==", false)
         .get();
+
+      logger.info(`[FOLLOWUP] Canal ${channelId} encontró ${convsSnap.size} conversaciones candidatas.`);
 
       const workerUrl = await getWorkerUrl();
       const projectId = process.env.GOOGLE_CLOUD_PROJECT || admin.app().options.projectId;

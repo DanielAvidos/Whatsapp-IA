@@ -324,6 +324,7 @@ function FollowupConfigTab({ channelId }: { channelId: string }) {
   useEffect(() => {
     if (config) {
       console.log("[FOLLOWUP] Config cargada desde Firestore:", config);
+      console.log("[FOLLOWUP] Enabled actual:", config.enabled);
       setFormData(config);
       setHasInitialLoad(true);
     } else if (!isLoading && firestore && user && !hasInitialLoad) {
@@ -374,7 +375,8 @@ function FollowupConfigTab({ channelId }: { channelId: string }) {
       updatedByEmail: user.email || '',
     };
 
-    console.log("FOLLOWUP SAVE PATH", followupRef.path, payload);
+    console.log("FOLLOWUP REF PATH", followupRef.path);
+    console.log("FOLLOWUP SAVE payload", payload);
     
     try {
       await setDoc(followupRef, payload, { merge: true });
@@ -401,10 +403,14 @@ function FollowupConfigTab({ channelId }: { channelId: string }) {
               <CardTitle className="text-lg">Reglas de Seguimiento</CardTitle>
               <CardDescription>Configura cuándo y cómo el bot contacta proactivamente.</CardDescription>
             </div>
-            <Switch 
-              checked={formData.enabled || false} 
-              onCheckedChange={(val) => setFormData(prev => ({ ...prev, enabled: val }))} 
-            />
+            <div className="flex items-center gap-2">
+              <Label htmlFor="global-followup-switch" className="text-xs font-bold uppercase tracking-wider text-muted-foreground">Global Canal</Label>
+              <Switch 
+                id="global-followup-switch"
+                checked={formData.enabled === true} 
+                onCheckedChange={(val) => setFormData(prev => ({ ...prev, enabled: val }))} 
+              />
+            </div>
           </CardHeader>
           <CardContent className="space-y-6">
             <div className="grid grid-cols-2 gap-4">
