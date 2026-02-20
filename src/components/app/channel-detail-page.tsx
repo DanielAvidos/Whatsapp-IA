@@ -46,6 +46,7 @@ export function ChannelDetailPage({ channelId }: { channelId: string }) {
 
   const [isQrModalOpen, setQrModalOpen] = useState(false);
   const [activeTab, setActiveTab] = useState('connection');
+  const [isExtending, setIsExtending] = useState(false);
 
   const workerUrl = process.env.NEXT_PUBLIC_BAILEYS_WORKER_URL || process.env.NEXT_PUBLIC_WORKER_URL;
   const isSuperAdmin = getIsSuperAdmin(user);
@@ -75,14 +76,25 @@ export function ChannelDetailPage({ channelId }: { channelId: string }) {
   const handleResetSession = () => handleApiCall('/resetSession', 'Reiniciando sesión...', 'Error al reiniciar sesión');
 
   const handleExtendTrial = async (days: number) => {
-    if (!functions) return;
+    if (!functions || isExtending) return;
+    setIsExtending(true);
     toast({ title: "Procesando extensión..." });
     try {
       const extendFn = httpsCallable(functions, 'extendChannelTrial');
       await extendFn({ channelId, extendDays: days });
-      toast({ title: "Periodo de prueba extendido" });
-    } catch (error) {
-      toast({ variant: 'destructive', title: "Error", description: String(error) });
+      
+      // Force real-time refresh through direct fetch if needed, 
+      // although useDoc should pick it up.
+      if (firestore) {
+        await getDoc(doc(firestore, 'channels', channelId));
+      }
+      
+      toast({ title: "Trial extendido correctamente" });
+    } catch (error: any) {
+      console.error("Extend error", error);
+      toast({ variant: 'destructive', title: "Error", description: error.message || String(error) });
+    } finally {
+      setIsExtending(false);
     }
   };
 
@@ -93,7 +105,10 @@ export function ChannelDetailPage({ channelId }: { channelId: string }) {
           {isSuperAdmin && (
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
-                <Button variant="outline"><CalendarClock className="mr-2 h-4 w-4" /> Trial</Button>
+                <Button variant="outline" disabled={isExtending}>
+                  {isExtending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <CalendarClock className="mr-2 h-4 w-4" />}
+                  Trial
+                </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">
                 <DropdownMenuItem onClick={() => handleExtendTrial(7)}>Extender +7 días</DropdownMenuItem>
@@ -219,7 +234,7 @@ function ChatbotConfig({ channelId, blocked }: { channelId: string, blocked: boo
       enabled: overrides.enabled !== undefined ? overrides.enabled : (botConfig?.enabled || false),
       productDetails: overrides.productDetails !== undefined ? overrides.productDetails : localProductContent,
       salesStrategy: overrides.salesStrategy !== undefined ? overrides.salesStrategy : localSalesContent,
-      model: botConfig?.model || 'gemini-2.5-flash',
+      model: GEMINI_MODEL_LOCKED,
       updatedAt: serverTimestamp(),
       updatedByUid: user.uid,
       updatedByEmail: user.email || '',
@@ -384,7 +399,8 @@ function FollowupConfigTab({ channelId, blocked }: { channelId: string, blocked:
         goal: "Convertir a cita/llamada o solicitar datos de contacto.",
       };
       
-      setDoc(followupRef!, { 
+      const ref = doc(firestore, 'channels', channelId, 'runtime', 'followup');
+      setDoc(ref, { 
         ...defaults, 
         updatedAt: serverTimestamp(), 
         updatedByUid: user.uid, 
@@ -394,7 +410,7 @@ function FollowupConfigTab({ channelId, blocked }: { channelId: string, blocked:
       setFormData(defaults);
       setHasInitialLoad(true);
     }
-  }, [config, isLoading, firestore, user, followupRef, channelId, hasInitialLoad]);
+  }, [config, isLoading, firestore, user, channelId, hasInitialLoad]);
 
   const handleSave = async () => {
     if (!followupRef || !user || blocked) return;
@@ -417,8 +433,12 @@ function FollowupConfigTab({ channelId, blocked }: { channelId: string, blocked:
       updatedByEmail: user.email || '',
     };
 
+    console.log("FOLLOWUP SAVE payload", payload);
+
     try {
       await setDoc(followupRef, payload, { merge: true });
+      const verify = await getDoc(followupRef);
+      console.log("FOLLOWUP AFTER SAVE", verify.data());
       toast({ title: 'Configuración de seguimiento guardada' });
     } catch (e) {
       toast({ variant: 'destructive', title: 'Error al guardar configuración' });

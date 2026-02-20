@@ -4,13 +4,13 @@
 import React, { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useFirestore, useMemoFirebase, useCollection, useUser, useFirebase } from '@/firebase';
-import { collection, query, where, doc, updateDoc, serverTimestamp, setDoc } from 'firebase/firestore';
+import { collection, query, where, doc, updateDoc, serverTimestamp, setDoc, getDoc } from 'firebase/firestore';
 import { httpsCallable } from 'firebase/functions';
 import { PageHeader } from '@/components/app/page-header';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Button } from '@/components/ui/button';
-import { PlusCircle, MoreHorizontal, RotateCcw, Wrench, Edit2, Building2, MessageSquare, Link as LinkIcon, CalendarClock, History } from 'lucide-react';
+import { PlusCircle, MoreHorizontal, RotateCcw, Wrench, Edit2, Building2, MessageSquare, Link as LinkIcon, CalendarClock, History, Loader2 } from 'lucide-react';
 import { StatusBadge } from '@/components/app/status-badge';
 import type { WhatsappChannel, Company } from '@/lib/types';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -43,6 +43,7 @@ export function ChannelsPage() {
     const [selectedChannel, setSelectedChannel] = useState<WhatsappChannel | null>(null);
     const [myCompanyId, setMyCompanyId] = useState<string | null>(null);
     const [isResolvingCompany, setIsResolvingCompany] = useState(false);
+    const [isExtending, setIsExtending] = useState<string | null>(null);
     
     const workerUrl = process.env.NEXT_PUBLIC_BAILEYS_WORKER_URL;
     const isSuperAdmin = getIsSuperAdmin(user);
@@ -95,14 +96,28 @@ export function ChannelsPage() {
     const { data: companiesList } = useCollection<Company>(companiesQuery);
 
     const handleExtendTrial = async (channelId: string, days: number) => {
-      if (!functions) return;
+      if (!functions || isExtending) return;
+      setIsExtending(channelId);
       toast({ title: "Procesando extensión..." });
       try {
         const extendFn = httpsCallable(functions, 'extendChannelTrial');
         await extendFn({ channelId, extendDays: days });
-        toast({ title: "Periodo de prueba extendido", description: `Se han añadido ${days} días.` });
-      } catch (error) {
-        toast({ variant: 'destructive', title: "Error", description: String(error) });
+        
+        // Refresh local doc
+        if (firestore) {
+          await getDoc(doc(firestore, 'channels', channelId));
+        }
+        
+        toast({ title: "Trial extendido", description: `Se han añadido ${days} días correctamente.` });
+      } catch (error: any) {
+        console.error("Extend error", error);
+        toast({ 
+          variant: 'destructive', 
+          title: "Error al extender", 
+          description: error.message || "No se pudo procesar la extensión." 
+        });
+      } finally {
+        setIsExtending(null);
       }
     };
 
@@ -248,6 +263,7 @@ export function ChannelsPage() {
                             )}
                             {channels?.map((channel) => {
                                 const trial = getTrialInfo(channel);
+                                const isThisChannelExtending = isExtending === channel.id;
                                 return (
                                 <TableRow key={channel.id}>
                                     <TableCell className="font-medium">
@@ -281,8 +297,8 @@ export function ChannelsPage() {
                                             
                                             <DropdownMenu modal={false}>
                                                 <DropdownMenuTrigger asChild>
-                                                    <Button variant="ghost" size="icon" className="h-8 w-8">
-                                                        <MoreHorizontal className="h-4 w-4" />
+                                                    <Button variant="ghost" size="icon" className="h-8 w-8" disabled={isThisChannelExtending}>
+                                                        {isThisChannelExtending ? <Loader2 className="h-4 w-4 animate-spin" /> : <MoreHorizontal className="h-4 w-4" />}
                                                     </Button>
                                                 </DropdownMenuTrigger>
                                                 <DropdownMenuContent align="end" className="w-56">

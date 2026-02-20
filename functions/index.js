@@ -285,44 +285,56 @@ function detectOptOut(text) {
 
 /**
  * Admin: Extender Trial (Callable)
+ * Role: superadmin@avidos.com
  */
 exports.extendChannelTrial = functions.region("us-central1").https.onCall(async (data, context) => {
-  if (!context.auth) throw new functions.https.HttpsError("unauthenticated", "Auth required");
+  if (!context.auth) {
+    throw new functions.https.HttpsError("unauthenticated", "Auth required");
+  }
   
   const userEmail = context.auth.token.email || "";
   if (userEmail.toLowerCase() !== SUPERADMIN_EMAIL) {
+    logger.warn("[TRIAL] Unauthorized attempt", { email: userEmail });
     throw new functions.https.HttpsError("permission-denied", "Only SuperAdmin can extend trials.");
   }
 
-  const { channelId, extendDays, endsAt, reason } = data;
+  const { channelId, extendDays } = data;
+  if (!channelId || !extendDays) {
+    throw new functions.https.HttpsError("invalid-argument", "channelId and extendDays are required.");
+  }
+
+  logger.info("[TRIAL] Extension requested", { channelId, extendDays, by: userEmail });
+
   const channelRef = db.doc(`channels/${channelId}`);
   const snap = await channelRef.get();
   
-  if (!snap.exists) throw new functions.https.HttpsError("not-found", "Channel not found");
+  if (!snap.exists) {
+    throw new functions.https.HttpsError("not-found", "Channel not found");
+  }
   
   const currentData = snap.data();
-  let currentEndsAt = currentData.trial?.endsAt?.toDate() || new Date();
-  
-  // New endsAt
-  let newEndsAt;
-  if (endsAt) {
-    newEndsAt = new Date(endsAt);
-  } else {
-    const baseDate = Math.max(currentEndsAt.getTime(), Date.now());
-    newEndsAt = new Date(baseDate + (extendDays || 30) * 24 * 60 * 60 * 1000);
-  }
+  // Base date is max of (current endsAt OR now)
+  let currentEndsAt = currentData.trial?.endsAt ? currentData.trial.endsAt.toDate() : new Date();
+  const baseTime = Math.max(currentEndsAt.getTime(), Date.now());
+  const newEndsAtDate = new Date(baseTime + (extendDays * 24 * 60 * 60 * 1000));
 
   const trialUpdate = {
     status: "ACTIVE",
-    endsAt: admin.firestore.Timestamp.fromDate(newEndsAt),
+    startsAt: currentData.trial?.startsAt || currentData.createdAt || admin.firestore.Timestamp.now(),
+    endsAt: admin.firestore.Timestamp.fromDate(newEndsAtDate),
     extendedByUid: context.auth.uid,
     extendedByEmail: userEmail,
     extendedAt: admin.firestore.FieldValue.serverTimestamp(),
-    reason: reason || "Extension manual"
   };
 
-  await channelRef.set({ trial: trialUpdate }, { merge: true });
-  return { success: true, trial: trialUpdate };
+  await channelRef.set({ 
+    trial: trialUpdate,
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+
+  logger.info("[TRIAL] Extension successful", { channelId, newEndsAt: newEndsAtDate.toISOString() });
+
+  return { ok: true, trial: trialUpdate, channelId };
 });
 
 /**
