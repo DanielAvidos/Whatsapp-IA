@@ -37,8 +37,10 @@ import { getIsSuperAdmin } from '@/lib/auth-helpers';
  */
 function getTrialState(channel: WhatsappChannel | null | undefined) {
   if (!channel?.trial?.endsAt) return { isActive: true, endsMs: null }; // Fallback or lazy init
-  const endsMs = channel.trial.endsAt.toMillis ? channel.trial.endsAt.toMillis() : new Date(channel.trial.endsAt as any).getTime();
-  const isActive = endsMs > Date.now();
+  const endsAt = channel.trial.endsAt;
+  const endsMs = endsAt?.toDate ? endsAt.toDate().getTime() : (endsAt?.seconds ? endsAt.seconds * 1000 : 0);
+  const now = Date.now();
+  const isActive = !!endsMs && endsMs > now;
   return { isActive, endsMs };
 }
 
@@ -82,23 +84,37 @@ export function ChannelDetailPage({ channelId }: { channelId: string }) {
   const handleResetSession = () => handleApiCall('/resetSession', 'Reiniciando sesión...', 'Error al reiniciar sesión');
 
   const handleExtendTrial = async (days: number) => {
-    if (!functions || isExtending) return;
+    if (!firestore || !user || isExtending) return;
     setIsExtending(true);
-    toast({ title: "Procesando extensión..." });
     try {
-      const extendFn = httpsCallable(functions, 'extendChannelTrial');
-      await extendFn({ channelId, extendDays: days });
+      console.log(`[TRIAL] Extending channel ${channelId} for ${days} days`);
+      const channelRef = doc(firestore, 'channels', channelId);
+      const channelSnap = await getDoc(channelRef);
       
-      // Refresh real-time via useDoc automatically picks it up, 
-      // but explicit getDoc ensures we await the write propagation.
-      if (firestore) {
-        await getDoc(doc(firestore, 'channels', channelId));
-      }
+      if (!channelSnap.exists()) throw new Error("Canal no encontrado");
       
+      const data = channelSnap.data();
+      const endsAt = data?.trial?.endsAt;
+      const currentMs = endsAt?.toDate ? endsAt.toDate().getTime() : 0;
+      
+      const baseMs = Math.max(Date.now(), currentMs);
+      const newMs = baseMs + days * 24 * 60 * 60 * 1000;
+      const newEndsAt = Timestamp.fromDate(new Date(newMs));
+
+      await updateDoc(channelRef, {
+        "trial.endsAt": newEndsAt,
+        "trial.status": "ACTIVE",
+        "trial.extendedAt": serverTimestamp(),
+        "trial.extendedByEmail": user.email,
+        "trial.extendedByUid": user.uid,
+        "trial.reason": "manual unblock",
+        "updatedAt": serverTimestamp(),
+      });
+
       toast({ title: "Trial extendido correctamente" });
     } catch (error: any) {
       console.error("Extend error", error);
-      toast({ variant: 'destructive', title: "Error", description: error.message || String(error) });
+      toast({ variant: 'destructive', title: "Error al extender", description: error.message || String(error) });
     } finally {
       setIsExtending(false);
     }
@@ -439,8 +455,12 @@ function FollowupConfigTab({ channelId, blocked }: { channelId: string, blocked:
       updatedByEmail: user.email || '',
     };
 
+    console.log("FOLLOWUP SAVE payload", payload);
+
     try {
       await setDoc(followupRef, payload, { merge: true });
+      const verify = await getDoc(followupRef);
+      console.log("FOLLOWUP AFTER SAVE", verify.data());
       toast({ title: 'Configuración de seguimiento guardada' });
     } catch (e) {
       toast({ variant: 'destructive', title: 'Error al guardar configuración' });

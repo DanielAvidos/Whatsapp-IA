@@ -4,7 +4,7 @@
 import React, { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useFirestore, useMemoFirebase, useCollection, useUser, useFirebase } from '@/firebase';
-import { collection, query, where, doc, updateDoc, serverTimestamp, setDoc, getDoc } from 'firebase/firestore';
+import { collection, query, where, doc, updateDoc, serverTimestamp, setDoc, getDoc, Timestamp } from 'firebase/firestore';
 import { httpsCallable } from 'firebase/functions';
 import { PageHeader } from '@/components/app/page-header';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -96,18 +96,34 @@ export function ChannelsPage() {
     const { data: companiesList } = useCollection<Company>(companiesQuery);
 
     const handleExtendTrial = async (channelId: string, days: number) => {
-      if (!functions || isExtending) return;
+      if (!firestore || !user || isExtending) return;
       setIsExtending(channelId);
-      toast({ title: "Procesando extensión..." });
       try {
-        const extendFn = httpsCallable(functions, 'extendChannelTrial');
-        await extendFn({ channelId, extendDays: days });
+        console.log(`[TRIAL] Extending channel ${channelId} for ${days} days`);
+        const channelRef = doc(firestore, 'channels', channelId);
+        const channelSnap = await getDoc(channelRef);
         
-        // Refetch to ensure real state is waited upon
-        if (firestore) {
-          await getDoc(doc(firestore, 'channels', channelId));
-        }
+        if (!channelSnap.exists()) throw new Error("Canal no encontrado");
         
+        const data = channelSnap.data();
+        const endsAt = data?.trial?.endsAt;
+        const currentMs = endsAt?.toDate ? endsAt.toDate().getTime() : 0;
+        
+        // baseMs is the maximum between now and the current expiration
+        const baseMs = Math.max(Date.now(), currentMs);
+        const newMs = baseMs + days * 24 * 60 * 60 * 1000;
+        const newEndsAt = Timestamp.fromDate(new Date(newMs));
+
+        await updateDoc(channelRef, {
+          "trial.endsAt": newEndsAt,
+          "trial.status": "ACTIVE",
+          "trial.extendedAt": serverTimestamp(),
+          "trial.extendedByEmail": user.email,
+          "trial.extendedByUid": user.uid,
+          "trial.reason": "manual unblock",
+          "updatedAt": serverTimestamp(),
+        });
+
         toast({ title: "Trial extendido", description: `Se han añadido ${days} días correctamente.` });
       } catch (error: any) {
         console.error("Extend error", error);
