@@ -1,7 +1,7 @@
 
 /**
- * Auto-reply WhatsApp Bot (DEV/PROD)
- * Trigger: Firestore onCreate (Gen1 / v1 API)
+ * Auto-reply & Follow-up WhatsApp Bot (DEV/PROD)
+ * Trigger: Firestore onCreate & Scheduled
  */
 
 const functions = require("firebase-functions/v1");
@@ -9,6 +9,7 @@ const logger = require("firebase-functions/logger");
 const admin = require("firebase-admin");
 const { VertexAI } = require("@google-cloud/vertexai");
 const { Storage } = require("@google-cloud/storage");
+const { DateTime } = require("luxon");
 const pdf = require("pdf-parse");
 const fs = require("fs");
 const path = require("path");
@@ -21,8 +22,22 @@ const storage = new Storage();
 // --- MODEL LOCK ---
 const GEMINI_MODEL_LOCKED = "gemini-2.5-flash";
 
+// --- HELPERS ---
 function safeText(v) {
   return typeof v === "string" ? v : "";
+}
+
+function extractText(data) {
+  const direct = safeText(data.text) || safeText(data.body) || safeText(data.messageText);
+  if (direct) return direct;
+  const msg = data.message || data.msg || {};
+  return msg.conversation || msg.extendedTextMessage?.text || "";
+}
+
+function extractFromMe(data) {
+  if (typeof data.fromMe === "boolean") return data.fromMe;
+  const key = data.key || data.message?.key || {};
+  return !!key.fromMe;
 }
 
 /**
@@ -42,7 +57,7 @@ async function loadConversationContext(channelId, jid, limitCount = 12) {
 
     return items.map(m => {
       const role = m.fromMe ? "ASSISTANT" : "USER";
-      const text = typeof m.text === "string" ? m.text : "";
+      const text = extractText(m);
       return { role, text };
     }).filter(x => x.text);
   } catch (error) {
@@ -74,7 +89,7 @@ async function loadKnowledgeBaseDocs(channelId) {
   }
 }
 
-function buildSystemPrompt({ salesStrategy, productDetails, kbDocs }) {
+function buildSystemPrompt({ salesStrategy, productDetails, kbDocs, isFollowup = false, step = 0 }) {
   const hardRules = `
 Eres un asistente automático experto en WhatsApp.
 REGLAS GLOBALES:
@@ -85,16 +100,22 @@ REGLAS GLOBALES:
 - Responde en el idioma del usuario.
 `.trim();
 
+  let followupInstruction = "";
+  if (isFollowup) {
+    followupInstruction = `\n=== INSTRUCCIÓN DE SEGUIMIENTO (Paso ${step + 1}) ===\nEste es un mensaje de seguimiento proactivo porque el cliente no ha respondido. No seas insistente, varía el tono según el paso. Si es el primer paso, solo recuerda amablemente. Si es avanzado, ofrece un valor adicional o pregunta si prefiere que no le escribamos.`;
+  }
+
   let kbSection = "";
   if (kbDocs && kbDocs.length > 0) {
     kbSection = "\n=== CONOCIMIENTO POR DOCUMENTOS ===\n";
     kbDocs.forEach(doc => {
-      kbSection += `Documento: ${doc.fileName}\nResumen: ${doc.summary}\nContenido Relevante: ${doc.extractedText.slice(0, 3000)}\n---\n`;
+      kbSection += `Documento: ${doc.fileName}\nResumen: ${doc.summary}\nContenido Relevante: ${doc.extractedText.slice(0, 2000)}\n---\n`;
     });
   }
 
   return `
 ${hardRules}
+${followupInstruction}
 
 === ESTRATEGIA Y PERSONALIDAD ===
 ${salesStrategy || "Responde como asistente profesional. Si falta info, haz 1 pregunta para avanzar."}
@@ -111,7 +132,7 @@ async function getWorkerUrl() {
   const workerUrl = data?.workerUrl;
 
   if (!workerUrl) {
-    throw new Error("Falta runtime/config.workerUrl en Firestore (debe apuntar al worker del ambiente).");
+    throw new Error("Falta runtime/config.workerUrl en Firestore.");
   }
   return String(workerUrl).replace(/\/+$/, "");
 }
@@ -129,9 +150,6 @@ async function getBotConfig(channelId) {
   };
 }
 
-/**
- * Idempotencia: subcolección bot_processed DENTRO del doc bot.
- */
 async function markProcessed(channelId, messageId, payload) {
   const ref = db.doc(`channels/${channelId}/runtime/bot/bot_processed/${messageId}`);
   const snap = await ref.get();
@@ -144,31 +162,6 @@ async function markProcessed(channelId, messageId, payload) {
   return true;
 }
 
-async function setBotError(channelId, errMsg, extra = {}) {
-  await db.doc(`channels/${channelId}/runtime/bot`).set(
-    {
-      lastError: errMsg,
-      lastErrorAt: admin.FieldValue.serverTimestamp(),
-      ...extra,
-    },
-    { merge: true }
-  );
-}
-
-async function setBotSuccess(channelId) {
-  await db.doc(`channels/${channelId}/runtime/bot`).set(
-    {
-      lastError: null,
-      lastErrorAt: null,
-      lastAutoReplyAt: admin.FieldValue.serverTimestamp(),
-    },
-    { merge: true }
-  );
-}
-
-/**
- * Genera respuesta usando el historial de mensajes y el conocimiento base.
- */
 async function generateWithGemini({ systemPrompt, messages, projectId, location }) {
   const vertexAI = new VertexAI({ project: projectId, location });
   const genModel = vertexAI.getGenerativeModel({
@@ -187,15 +180,11 @@ async function generateWithGemini({ systemPrompt, messages, projectId, location 
   });
 
   const resp = result?.response;
-  const text =
-    resp?.candidates?.[0]?.content?.parts?.map((p) => p.text).join("") || "";
+  const text = resp?.candidates?.[0]?.content?.parts?.map((p) => p.text).join("") || "";
 
   return String(text || "").trim();
 }
 
-/**
- * Envía el mensaje replicando el payload manual del frontend.
- */
 async function sendViaWorker({ workerUrl, channelId, toJid, text, meta }) {
   const url = `${workerUrl}/v1/channels/${encodeURIComponent(channelId)}/messages/send`;
 
@@ -216,6 +205,20 @@ async function sendViaWorker({ workerUrl, channelId, toJid, text, meta }) {
   }
 }
 
+// --- OPT-OUT DETECTION ---
+const OPT_OUT_KEYWORDS = ["stop", "alto", "cancelar", "no me escribas", "deja de escribir", "no me interesa", "no estoy interesado", "ya no", "baja", "unsubscribe", "quitar", "no gracias", "no quiero"];
+
+function detectOptOut(text) {
+  if (!text) return false;
+  const normalized = text.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  return OPT_OUT_KEYWORDS.some(k => normalized.includes(k));
+}
+
+// --- CLOUD FUNCTIONS ---
+
+/**
+ * Trigger: Responde mensajes entrantes.
+ */
 exports.autoReplyOnIncomingMessage = functions
   .region("us-central1")
   .firestore
@@ -224,25 +227,19 @@ exports.autoReplyOnIncomingMessage = functions
     const { channelId, jid, messageId } = context.params;
     const data = snapshot.data() || {};
 
-    const text = safeText(data.text);
-    const fromMe = !!data.fromMe;
+    const text = extractText(data);
+    const fromMe = extractFromMe(data);
     const isBot = !!data.isBot;
 
     if (!text) return null;
 
     if (fromMe || isBot) {
-      await db.doc(`channels/${channelId}/runtime/bot`).set(
-        {
-          lastSkipAt: admin.FieldValue.serverTimestamp(),
-          lastSkipReason: fromMe ? "FROM_ME" : "IS_BOT",
-          lastSkipMessagePath: snapshot.ref.path,
-        },
-        { merge: true }
-      );
+      await db.doc(`channels/${channelId}/runtime/bot`).set({
+        lastSkipAt: admin.firestore.FieldValue.serverTimestamp(),
+        lastSkipReason: fromMe ? "FROM_ME" : "IS_BOT",
+      }, { merge: true });
       return null;
     }
-
-    logger.info("[BOT] Trigger detectado", { channelId, jid, messageId });
 
     const isNew = await markProcessed(channelId, messageId, { jid, text });
     if (!isNew) return null;
@@ -255,7 +252,6 @@ exports.autoReplyOnIncomingMessage = functions
       const projectId = process.env.GOOGLE_CLOUD_PROJECT || admin.app().options.projectId;
       const location = "us-central1";
 
-      // Cargar conocimiento extendido
       const kbDocs = await loadKnowledgeBaseDocs(channelId);
       const systemPrompt = buildSystemPrompt({
         salesStrategy: bot.salesStrategy,
@@ -265,12 +261,7 @@ exports.autoReplyOnIncomingMessage = functions
 
       const messages = await loadConversationContext(channelId, jid, 12);
 
-      const reply = await generateWithGemini({
-        systemPrompt,
-        messages,
-        projectId,
-        location,
-      });
+      const reply = await generateWithGemini({ systemPrompt, messages, projectId, location });
 
       if (!reply) throw new Error("Gemini no generó respuesta.");
 
@@ -282,16 +273,157 @@ exports.autoReplyOnIncomingMessage = functions
         meta: { triggerMessageId: messageId }
       });
 
-      await setBotSuccess(channelId);
-      logger.info("[BOT] Flujo completado con éxito", { channelId, jid });
+      await db.doc(`channels/${channelId}/runtime/bot`).set({
+        lastAutoReplyAt: admin.firestore.FieldValue.serverTimestamp(),
+        lastError: null,
+      }, { merge: true });
 
     } catch (err) {
-      const msg = err?.message || String(err);
-      logger.error("[BOT] Error crítico en el flujo", { channelId, messageId, error: msg });
-      await setBotError(channelId, msg, { lastFailMessagePath: snapshot.ref.path });
+      logger.error("[BOT] Error", { channelId, error: err.message });
+      await db.doc(`channels/${channelId}/runtime/bot`).set({
+        lastError: err.message,
+        lastErrorAt: admin.firestore.FieldValue.serverTimestamp(),
+      }, { merge: true });
     }
 
     return null;
+  });
+
+/**
+ * Trigger: Actualiza estado de follow-up al llegar mensajes.
+ */
+exports.onIncomingMessageUpdateFollowupState = functions
+  .region("us-central1")
+  .firestore
+  .document("channels/{channelId}/conversations/{jid}/messages/{messageId}")
+  .onCreate(async (snapshot, context) => {
+    const { channelId, jid } = context.params;
+    const data = snapshot.data() || {};
+    const fromMe = extractFromMe(data);
+    const text = extractText(data);
+    const now = admin.firestore.FieldValue.serverTimestamp();
+
+    const followupRef = db.doc(`channels/${channelId}/conversations/${jid}/runtime/followup`);
+
+    if (!fromMe) {
+      // Mensaje del cliente: resetear o manejar opt-out
+      const isOptOut = detectOptOut(text);
+      if (isOptOut) {
+        await followupRef.set({
+          optedOut: true,
+          enabled: false,
+          stoppedReason: "OPTOUT",
+          updatedAt: now
+        }, { merge: true });
+      } else {
+        await followupRef.set({
+          step: 0,
+          lastCustomerAt: now,
+          stoppedReason: "CUSTOMER_REPLIED",
+          nextEligibleAt: null,
+          updatedAt: now
+        }, { merge: true });
+      }
+    } else {
+      // Mensaje del bot/empresa: registrar para cooldown
+      await followupRef.set({
+        lastBotAt: now,
+        updatedAt: now
+      }, { merge: true });
+    }
+    return null;
+  });
+
+/**
+ * Scheduler: Ejecuta el seguimiento horario.
+ */
+exports.followupTickHourly = functions
+  .region("us-central1")
+  .pubsub
+  .schedule("every 60 minutes")
+  .onRun(async (context) => {
+    const channelsSnap = await db.collection("channels").get();
+    
+    for (const channelDoc of channelsSnap.docs) {
+      const channelId = channelDoc.id;
+      const followupConfigSnap = await db.doc(`channels/${channelId}/runtime/bot_followup`).get();
+      const config = followupConfigSnap.exists ? followupConfigSnap.data() : {
+        enabled: true, startHour: 8, endHour: 22, timezone: "America/Mexico_City", 
+        maxSteps: 9, scheduleHours: [1, 3, 5, 8, 12, 24, 36, 48, 72], cooldownHoursAfterBot: 1
+      };
+
+      if (!config.enabled) continue;
+
+      // Validar hora actual en el timezone del canal
+      const nowInTz = DateTime.now().setZone(config.timezone);
+      if (nowInTz.hour < config.startHour || nowInTz.hour >= config.endHour) {
+        logger.info(`[FOLLOWUP] Canal ${channelId} fuera de horario (${nowInTz.hour}h)`);
+        continue;
+      }
+
+      const convsSnap = await db.collection(`channels/${channelId}/conversations`).get(); // En PROD filtrar por actividad reciente
+      const workerUrl = await getWorkerUrl();
+      const projectId = process.env.GOOGLE_CLOUD_PROJECT || admin.app().options.projectId;
+
+      for (const convDoc of convsSnap.docs) {
+        const jid = convDoc.id;
+        const stateSnap = await db.doc(`channels/${channelId}/conversations/${jid}/runtime/followup`).get();
+        if (!stateSnap.exists || !stateSnap.data().enabled || stateSnap.data().optedOut) continue;
+
+        const state = stateSnap.data();
+        const step = state.step || 0;
+        if (step >= config.maxSteps) {
+          await stateSnap.ref.update({ stoppedReason: "COMPLETED", enabled: false });
+          continue;
+        }
+
+        // Calcular elegibilidad
+        const lastCustomerAt = state.lastCustomerAt?.toDate();
+        const lastBotAt = state.lastBotAt?.toDate();
+        if (!lastCustomerAt) continue;
+
+        const hoursSinceCustomer = (Date.now() - lastCustomerAt.getTime()) / (1000 * 60 * 60);
+        const hoursSinceBot = lastBotAt ? (Date.now() - lastBotAt.getTime()) / (1000 * 60 * 60) : 999;
+
+        if (hoursSinceCustomer >= config.scheduleHours[step] && hoursSinceBot >= (config.cooldownHoursAfterBot || 1)) {
+          // Idempotencia por hora
+          const lockId = nowInTz.toFormat("yyyyMMddHH");
+          const lockRef = stateSnap.ref.collection("followup_locks").doc(lockId);
+          const lockSnap = await lockRef.get();
+          if (lockSnap.exists) continue;
+          await lockRef.set({ lockedAt: admin.firestore.FieldValue.serverTimestamp() });
+
+          try {
+            logger.info(`[FOLLOWUP] Enviando paso ${step + 1} a ${jid}`);
+            const bot = await getBotConfig(channelId);
+            const kbDocs = await loadKnowledgeBaseDocs(channelId);
+            const systemPrompt = buildSystemPrompt({ 
+              salesStrategy: bot.salesStrategy, productDetails: bot.productDetails, 
+              kbDocs, isFollowup: true, step 
+            });
+            const messages = await loadConversationContext(channelId, jid, 6);
+
+            const reply = await generateWithGemini({ systemPrompt, messages, projectId, location: "us-central1" });
+            if (!reply) throw new Error("Gemini no generó follow-up.");
+
+            await sendViaWorker({ 
+              workerUrl, channelId, toJid: jid, text: reply, 
+              meta: { type: "followup", step: step + 1 } 
+            });
+
+            await stateSnap.ref.update({
+              step: step + 1,
+              lastFollowupAt: admin.firestore.FieldValue.serverTimestamp(),
+              lastBotAt: admin.firestore.FieldValue.serverTimestamp(),
+              nextEligibleAt: admin.firestore.Timestamp.fromDate(new Date(Date.now() + (config.scheduleHours[step+1] || 24) * 3600000)),
+              updatedAt: admin.firestore.FieldValue.serverTimestamp()
+            });
+          } catch (e) {
+            logger.error(`[FOLLOWUP] Error en ${jid}`, e.message);
+          }
+        }
+      }
+    }
   });
 
 /**
@@ -302,21 +434,15 @@ exports.onKnowledgeFileFinalize = functions
   .storage.object()
   .onFinalize(async (object) => {
     const filePath = object.name; // channels/{channelId}/kb/{docId}/{fileName}
-    
-    if (!filePath.startsWith("channels/") || !filePath.includes("/kb/")) {
-      return null;
-    }
+    if (!filePath.startsWith("channels/") || !filePath.includes("/kb/")) return null;
 
     const parts = filePath.split("/");
     const channelId = parts[1];
     const docId = parts[3];
     const fileName = parts[4];
 
-    logger.info("[KB] Procesando archivo", { channelId, docId, fileName });
-
     const docRef = db.doc(`channels/${channelId}/kb_docs/${docId}`);
     const projectId = process.env.GOOGLE_CLOUD_PROJECT || admin.app().options.projectId;
-    const location = "us-central1";
     
     try {
       const bucket = storage.bucket(object.bucket);
@@ -331,55 +457,39 @@ exports.onKnowledgeFileFinalize = functions
         const data = await pdf(dataBuffer);
         extractedText = data.text;
       } else if (contentType.includes("image")) {
-        const vertexAI = new VertexAI({ project: projectId, location });
+        const vertexAI = new VertexAI({ project: projectId, location: "us-central1" });
         const genModel = vertexAI.getGenerativeModel({ model: GEMINI_MODEL_LOCKED });
-        
         const base64Image = fs.readFileSync(tempFilePath, { encoding: "base64" });
         const result = await genModel.generateContent({
-          contents: [{
-            role: "user",
-            parts: [
-              { text: "Extrae toda la información técnica y relevante de esta imagen para un sistema de atención al cliente. Si hay tablas o datos estructurados, lístalos claramente." },
-              { inlineData: { mimeType: contentType, data: base64Image } }
-            ]
-          }]
+          contents: [{ role: "user", parts: [
+            { text: "Extrae el texto y describe la información relevante de esta imagen." },
+            { inlineData: { mimeType: contentType, data: base64Image } }
+          ]}]
         });
         extractedText = result?.response?.candidates?.[0]?.content?.parts?.map(p => p.text).join("") || "";
       }
 
       fs.unlinkSync(tempFilePath);
+      if (!extractedText.trim()) throw new Error("Archivo vacío.");
 
-      if (!extractedText.trim()) throw new Error("No se pudo extraer texto del archivo.");
-
-      // Generar resumen corto
-      const vertexAI = new VertexAI({ project: projectId, location });
+      const vertexAI = new VertexAI({ project: projectId, location: "us-central1" });
       const genModel = vertexAI.getGenerativeModel({ model: GEMINI_MODEL_LOCKED });
       const summaryResult = await genModel.generateContent({
-        contents: [{
-          role: "user",
-          parts: [{ text: `Resume la siguiente información extraída de un documento para atención al cliente. Produce entre 5 y 10 puntos clave. \n\nInformación:\n${extractedText.slice(0, 15000)}` }]
-        }]
+        contents: [{ role: "user", parts: [{ text: `Resume esta información en 5-10 puntos clave:\n${extractedText.slice(0, 10000)}` }] }]
       });
-      const summary = summaryResult?.response?.candidates?.[0]?.content?.parts?.map(p => p.text).join("") || "Resumen no disponible.";
+      const summary = summaryResult?.response?.candidates?.[0]?.content?.parts?.map(p => p.text).join("") || "Sin resumen.";
 
       await docRef.set({
         status: "READY",
-        extractedText: extractedText.slice(0, 30000),
         summary,
+        extractedText: extractedText.slice(0, 30000),
         processedAt: admin.FieldValue.serverTimestamp(),
         updatedAt: admin.FieldValue.serverTimestamp(),
       }, { merge: true });
 
-      logger.info("[KB] Archivo procesado correctamente", { channelId, docId });
-
     } catch (error) {
-      logger.error("[KB] Error procesando archivo", { channelId, docId, error: error.message });
-      await docRef.set({
-        status: "ERROR",
-        error: error.message,
-        updatedAt: admin.FieldValue.serverTimestamp(),
-      }, { merge: true });
+      logger.error("[KB] Error", { docId, error: error.message });
+      await docRef.set({ status: "ERROR", error: error.message, updatedAt: admin.FieldValue.serverTimestamp() }, { merge: true });
     }
-
     return null;
   });
