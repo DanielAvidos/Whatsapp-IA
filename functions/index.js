@@ -76,6 +76,7 @@ function extractName(text) {
 
 /**
  * Trial & Access Control
+ * Source of truth: trial.endsAt
  */
 async function getChannelAccess(channelId) {
   const docRef = db.doc(`channels/${channelId}`);
@@ -98,10 +99,10 @@ async function getChannelAccess(channelId) {
 
   const now = admin.firestore.Timestamp.now();
   const isExpired = now.toMillis() > trial.endsAt.toMillis();
-  const isBlockedStatus = trial.status !== "ACTIVE";
   
-  if (isExpired || isBlockedStatus) {
-    return { blocked: true, reason: isExpired ? "TRIAL_EXPIRED" : "BLOCKED", endsAt: trial.endsAt };
+  // Only block if strictly expired by date
+  if (isExpired) {
+    return { blocked: true, reason: "TRIAL_EXPIRED", endsAt: trial.endsAt };
   }
   
   return { blocked: false, endsAt: trial.endsAt };

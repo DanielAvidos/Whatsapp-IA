@@ -32,6 +32,16 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from '@/components/ui/dialog';
 import { getIsSuperAdmin } from '@/lib/auth-helpers';
 
+/**
+ * Unified helper to determine trial state from channel document.
+ */
+function getTrialState(channel: WhatsappChannel | null | undefined) {
+  if (!channel?.trial?.endsAt) return { isActive: true, endsMs: null }; // Fallback or lazy init
+  const endsMs = channel.trial.endsAt.toMillis ? channel.trial.endsAt.toMillis() : new Date(channel.trial.endsAt as any).getTime();
+  const isActive = endsMs > Date.now();
+  return { isActive, endsMs };
+}
+
 export function ChannelDetailPage({ channelId }: { channelId: string }) {
   const { t } = useLanguage();
   const { firestore, user, functions } = useFirebase();
@@ -51,12 +61,8 @@ export function ChannelDetailPage({ channelId }: { channelId: string }) {
   const workerUrl = process.env.NEXT_PUBLIC_BAILEYS_WORKER_URL || process.env.NEXT_PUBLIC_WORKER_URL;
   const isSuperAdmin = getIsSuperAdmin(user);
 
-  const isBlocked = () => {
-    if (!channel?.trial) return false;
-    const now = new Date();
-    const endsAt = channel.trial.endsAt?.toDate() || new Date();
-    return channel.trial.status !== 'ACTIVE' || now > endsAt;
-  };
+  const trial = getTrialState(channel);
+  const isBlocked = !trial.isActive;
 
   const handleApiCall = async (endpoint: string, successMessage: string, errorMessage: string) => {
     if (!workerUrl) {
@@ -83,8 +89,8 @@ export function ChannelDetailPage({ channelId }: { channelId: string }) {
       const extendFn = httpsCallable(functions, 'extendChannelTrial');
       await extendFn({ channelId, extendDays: days });
       
-      // Force real-time refresh through direct fetch if needed, 
-      // although useDoc should pick it up.
+      // Refresh real-time via useDoc automatically picks it up, 
+      // but explicit getDoc ensures we await the write propagation.
       if (firestore) {
         await getDoc(doc(firestore, 'channels', channelId));
       }
@@ -121,12 +127,12 @@ export function ChannelDetailPage({ channelId }: { channelId: string }) {
         </div>
       </PageHeader>
       
-      {isBlocked() && (
+      {isBlocked && (
         <Alert variant="destructive" className="mb-4">
           <AlertCircle className="h-4 w-4" />
           <AlertTitle>Periodo de Prueba Expirado</AlertTitle>
           <AlertDescription>
-            Este canal ha superado su periodo de prueba de 30 días. El envío de mensajes y las funciones automáticas están deshabilitadas. Contacta con soporte para activar un plan.
+            Este canal ha superado su periodo de prueba. El envío de mensajes y las funciones automáticas están deshabilitadas. Contacta con soporte para activar un plan.
           </AlertDescription>
         </Alert>
       )}
@@ -191,11 +197,11 @@ export function ChannelDetailPage({ channelId }: { channelId: string }) {
         </TabsContent>
 
         <TabsContent value="chats">
-          {workerUrl && <ChatInterface channelId={channelId} blocked={isBlocked()} />}
+          {workerUrl && <ChatInterface channelId={channelId} blocked={isBlocked} />}
         </TabsContent>
 
         <TabsContent value="chatbot">
-          <ChatbotConfig channelId={channelId} blocked={isBlocked()} />
+          <ChatbotConfig channelId={channelId} blocked={isBlocked} />
         </TabsContent>
       </Tabs>
 
@@ -433,12 +439,8 @@ function FollowupConfigTab({ channelId, blocked }: { channelId: string, blocked:
       updatedByEmail: user.email || '',
     };
 
-    console.log("FOLLOWUP SAVE payload", payload);
-
     try {
       await setDoc(followupRef, payload, { merge: true });
-      const verify = await getDoc(followupRef);
-      console.log("FOLLOWUP AFTER SAVE", verify.data());
       toast({ title: 'Configuración de seguimiento guardada' });
     } catch (e) {
       toast({ variant: 'destructive', title: 'Error al guardar configuración' });

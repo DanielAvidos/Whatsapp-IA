@@ -78,13 +78,13 @@ export function ChannelsPage() {
         if (!channel.trial) {
           const created = channel.createdAt?.toDate() || new Date();
           const endsAt = new Date(created.getTime() + 30 * 24 * 60 * 60 * 1000);
-          setDoc(doc(firestore, 'channels', channel.id), {
+          updateDoc(doc(firestore, 'channels', channel.id), {
             trial: {
               status: 'ACTIVE',
               startsAt: created,
               endsAt: endsAt
             }
-          }, { merge: true });
+          });
         }
       });
     }, [channels, firestore]);
@@ -103,7 +103,7 @@ export function ChannelsPage() {
         const extendFn = httpsCallable(functions, 'extendChannelTrial');
         await extendFn({ channelId, extendDays: days });
         
-        // Refresh local doc
+        // Refetch to ensure real state is waited upon
         if (firestore) {
           await getDoc(doc(firestore, 'channels', channelId));
         }
@@ -206,12 +206,12 @@ export function ChannelsPage() {
     };
 
     const getTrialInfo = (channel: WhatsappChannel) => {
-      if (!channel.trial) return { text: 'Calculando...', color: 'secondary', days: 0 };
-      const endsAt = channel.trial.endsAt?.toDate() || new Date();
+      if (!channel.trial?.endsAt) return { text: 'Calculando...', color: 'secondary', days: 0 };
+      const endsAt = channel.trial.endsAt.toDate ? channel.trial.endsAt.toDate() : new Date(channel.trial.endsAt as any);
       const now = new Date();
       const days = differenceInDays(endsAt, now);
       
-      if (channel.trial.status !== 'ACTIVE' || days < 0) {
+      if (days < 0) {
         return { text: 'EXPIRADO', color: 'destructive', days };
       }
       return { text: `TRIAL: ${days}d`, color: days < 5 ? 'destructive' : 'secondary', days };
