@@ -1,7 +1,6 @@
 
 /**
  * Auto-reply & Follow-up WhatsApp Bot (DEV/PROD)
- * Trigger: Firestore onCreate & Scheduled
  */
 
 const functions = require("firebase-functions/v1");
@@ -38,6 +37,41 @@ function extractFromMe(data) {
   if (typeof data.fromMe === "boolean") return data.fromMe;
   const key = data.key || data.message?.key || {};
   return !!key.fromMe;
+}
+
+/**
+ * Extraction Helpers
+ */
+function extractEmail(text) {
+  const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
+  const match = text.match(emailRegex);
+  return match ? match[0].toLowerCase() : null;
+}
+
+function extractPhone(text) {
+  const phoneRegex = /\+?\d{10,15}/g;
+  const matches = text.match(phoneRegex);
+  if (!matches) return null;
+  // Clean dots, spaces, dashes
+  return matches.find(m => m.replace(/\D/g, '').length >= 10) || null;
+}
+
+function extractName(text) {
+  const patterns = [
+    /me llamo ([\w\s]{2,30})/i,
+    /soy ([\w\s]{2,30})/i,
+    /mi nombre es ([\w\s]{2,30})/i,
+    /mi nombre: ([\w\s]{2,30})/i,
+    /atentamente ([\w\s]{2,30})/i,
+    /atte ([\w\s]{2,30})/i
+  ];
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (match && match[1]) {
+      return match[1].trim();
+    }
+  }
+  return null;
 }
 
 /**
@@ -217,6 +251,79 @@ function detectOptOut(text) {
 // --- CLOUD FUNCTIONS ---
 
 /**
+ * Trigger: Captura el perfil del cliente.
+ */
+exports.onIncomingMessageCaptureCustomerProfile = functions
+  .region("us-central1")
+  .firestore
+  .document("channels/{channelId}/conversations/{jid}/messages/{messageId}")
+  .onCreate(async (snapshot, context) => {
+    const { channelId, jid, messageId } = context.params;
+    const data = snapshot.data() || {};
+    const fromMe = extractFromMe(data);
+    const isBot = !!data.isBot;
+
+    if (fromMe || isBot) return null;
+
+    const text = extractText(data);
+    if (!text) return null;
+
+    // Idempotencia
+    const lockRef = db.doc(`channels/${channelId}/conversations/${jid}/profile_processed/${messageId}`);
+    const lockSnap = await lockRef.get();
+    if (lockSnap.exists) return null;
+    await lockRef.set({ processedAt: admin.firestore.FieldValue.serverTimestamp() });
+
+    const email = extractEmail(text);
+    const phone = extractPhone(text);
+    const name = extractName(text);
+
+    if (!email && !phone && !name) return null;
+
+    const convRef = db.doc(`channels/${channelId}/conversations/${jid}`);
+    const convSnap = await convRef.get();
+    const existing = convSnap.exists ? (convSnap.data().customer || {}) : {};
+
+    const newCustomer = { ...existing };
+    let changed = false;
+
+    // Lógica de confianza: med si es detectado por IA/Heurística, high si es explícito
+    if (name && (!existing.name || existing.confidence?.nameConfidence !== "high")) {
+      newCustomer.name = name;
+      newCustomer.confidence = { ...newCustomer.confidence, nameConfidence: "med" };
+      changed = true;
+    }
+    if (email && !existing.email) {
+      newCustomer.email = email;
+      newCustomer.confidence = { ...newCustomer.confidence, emailConfidence: "high" };
+      changed = true;
+    }
+    if (phone && !existing.phone) {
+      newCustomer.phone = phone;
+      newCustomer.confidence = { ...newCustomer.confidence, phoneConfidence: "high" };
+      changed = true;
+    }
+
+    if (changed) {
+      newCustomer.updatedAt = admin.firestore.FieldValue.serverTimestamp();
+      newCustomer.source = "auto-extract";
+      
+      const displayName = newCustomer.name || newCustomer.email || newCustomer.phone || jid;
+      
+      await convRef.set({
+        customer: newCustomer,
+        displayName,
+        lastCustomerProfileUpdateAt: admin.firestore.FieldValue.serverTimestamp(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      }, { merge: true });
+      
+      logger.info("[PROFILE] Actualizado", { jid, changed: { name: !!name, email: !!email, phone: !!phone } });
+    }
+
+    return null;
+  });
+
+/**
  * Trigger: Responde mensajes entrantes.
  */
 exports.autoReplyOnIncomingMessage = functions
@@ -303,11 +410,9 @@ exports.onIncomingMessageUpdateFollowupState = functions
     const text = extractText(data);
     const now = admin.firestore.FieldValue.serverTimestamp();
 
-    // El estado del follow-up ahora vive en el documento de la conversación mismo
     const convRef = db.doc(`channels/${channelId}/conversations/${jid}`);
 
     if (!fromMe) {
-      // Mensaje del cliente: resetear o manejar opt-out
       const isOptOut = detectOptOut(text);
       if (isOptOut) {
         await convRef.set({
@@ -327,7 +432,6 @@ exports.onIncomingMessageUpdateFollowupState = functions
         }, { merge: true });
       }
     } else {
-      // Mensaje del bot/empresa: registrar para cooldown
       await convRef.set({
         followupLastSentAt: now,
         updatedAt: now
@@ -348,7 +452,6 @@ exports.followupTickHourly = functions
     
     for (const channelDoc of channelsSnap.docs) {
       const channelId = channelDoc.id;
-      // Ruta correcta de configuración: channels/{id}/runtime/followup
       const followupConfigSnap = await db.doc(`channels/${channelId}/runtime/followup`).get();
       
       const config = followupConfigSnap.exists ? followupConfigSnap.data() : {
@@ -358,25 +461,15 @@ exports.followupTickHourly = functions
         cadenceHours: [1, 3, 5, 8, 13, 21, 34, 55, 89]
       };
 
-      logger.info(`[FOLLOWUP] Canal ${channelId} config:`, { enabled: config.enabled, maxTouches: config.maxTouches });
-
       if (!config.enabled) continue;
 
-      // Validar hora actual en el timezone del canal
       const nowInTz = DateTime.now().setZone(config.businessHours?.timezone || "America/Mexico_City");
-      logger.info(`[FOLLOWUP] Canal ${channelId} validando horario:`, { hour: nowInTz.hour, timezone: nowInTz.zoneName });
-
-      if (nowInTz.hour < (config.businessHours?.startHour || 8) || nowInTz.hour >= (config.businessHours?.endHour || 22)) {
-        logger.info(`[FOLLOWUP] Canal ${channelId} fuera de horario (${nowInTz.hour}h)`);
-        continue;
-      }
+      if (nowInTz.hour < (config.businessHours?.startHour || 8) || nowInTz.hour >= (config.businessHours?.endHour || 22)) continue;
 
       const convsSnap = await db.collection(`channels/${channelId}/conversations`)
         .where("followupEnabled", "==", true)
         .where("followupStopped", "==", false)
         .get();
-
-      logger.info(`[FOLLOWUP] Canal ${channelId} encontró ${convsSnap.size} conversaciones candidatas.`);
 
       const workerUrl = await getWorkerUrl();
       const projectId = process.env.GOOGLE_CLOUD_PROJECT || admin.app().options.projectId;
@@ -391,7 +484,6 @@ exports.followupTickHourly = functions
           continue;
         }
 
-        // Calcular elegibilidad
         const lastCustomerAt = state.followupLastCustomerAt?.toDate();
         const lastSentAt = state.followupLastSentAt?.toDate();
         if (!lastCustomerAt) continue;
@@ -402,7 +494,6 @@ exports.followupTickHourly = functions
         const schedule = config.cadenceHours || [1, 3, 5, 8, 13, 21, 34, 55, 89];
 
         if (hoursSinceCustomer >= schedule[step] && hoursSinceBot >= 1) {
-          // Idempotencia por hora
           const lockId = nowInTz.toFormat("yyyyMMddHH");
           const lockRef = convDoc.ref.collection("followup_locks").doc(lockId);
           const lockSnap = await lockRef.get();
@@ -410,7 +501,6 @@ exports.followupTickHourly = functions
           await lockRef.set({ lockedAt: admin.firestore.FieldValue.serverTimestamp() });
 
           try {
-            logger.info(`[FOLLOWUP] Enviando paso ${step + 1} a ${jid}`);
             const bot = await getBotConfig(channelId);
             const kbDocs = await loadKnowledgeBaseDocs(channelId);
             const systemPrompt = buildSystemPrompt({ 
@@ -448,7 +538,7 @@ exports.onKnowledgeFileFinalize = functions
   .region("us-central1")
   .storage.object()
   .onFinalize(async (object) => {
-    const filePath = object.name; // channels/{channelId}/kb/{docId}/{fileName}
+    const filePath = object.name; 
     if (!filePath.startsWith("channels/") || !filePath.includes("/kb/")) return null;
 
     const parts = filePath.split("/");

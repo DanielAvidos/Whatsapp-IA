@@ -82,6 +82,21 @@ export type FollowupConfig = {
   updatedByEmail: string;
 };
 
+export type CustomerProfile = {
+  name: string | null;
+  email: string | null;
+  phone: string | null;
+  company: string | null;
+  notes: string | null;
+  updatedAt: Timestamp | FieldValue;
+  source: "auto-extract" | "manual";
+  confidence?: {
+    nameConfidence?: "low" | "med" | "high";
+    emailConfidence?: "low" | "high";
+    phoneConfidence?: "low" | "high";
+  };
+};
+
 export type Conversation = {
   id: string;
   jid: string;
@@ -91,6 +106,8 @@ export type Conversation = {
   lastMessageAt: Timestamp | FieldValue | null;
   unreadCount: number;
   updatedAt: Timestamp | FieldValue;
+  displayName?: string;
+  customer?: CustomerProfile;
   // Follow-up fields
   followupEnabled?: boolean;
   followupStage?: number;

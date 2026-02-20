@@ -2,7 +2,7 @@
 "use client";
 
 import { useState, useEffect, useRef } from 'react';
-import { Loader2, ScanQrCode, LogOut, RotateCcw, MessageSquare, Link as LinkIcon, Send, Bot, FileText, Save, History, Brain, Info, AlertCircle, CheckCircle2, Clock, PlusCircle, Trash2, Settings2, MoreVertical } from 'lucide-react';
+import { Loader2, ScanQrCode, LogOut, RotateCcw, MessageSquare, Link as LinkIcon, Send, Bot, FileText, Save, History, Brain, Info, AlertCircle, CheckCircle2, Clock, PlusCircle, Trash2, Settings2, MoreVertical, User } from 'lucide-react';
 import { useFirestore, useDoc, useMemoFirebase, useCollection, useUser, setDocumentNonBlocking, useFirebase } from '@/firebase';
 import { doc, collection, query, orderBy, limit, Timestamp, serverTimestamp, setDoc, updateDoc, deleteDoc, where, getDoc } from 'firebase/firestore';
 import { PageHeader } from '@/components/app/page-header';
@@ -28,6 +28,7 @@ import { Badge } from '@/components/ui/badge';
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion';
 import { Progress } from '@/components/ui/progress';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from '@/components/ui/dialog';
 
 export function ChannelDetailPage({ channelId }: { channelId: string }) {
   const { t } = useLanguage();
@@ -323,8 +324,6 @@ function FollowupConfigTab({ channelId }: { channelId: string }) {
   // Load config into local state only once per channel/config update
   useEffect(() => {
     if (config) {
-      console.log("[FOLLOWUP] Config cargada desde Firestore:", config);
-      console.log("[FOLLOWUP] Enabled actual:", config.enabled);
       setFormData(config);
       setHasInitialLoad(true);
     } else if (!isLoading && firestore && user && !hasInitialLoad) {
@@ -340,7 +339,6 @@ function FollowupConfigTab({ channelId }: { channelId: string }) {
         goal: "Convertir a cita/llamada o solicitar datos de contacto.",
       };
       
-      console.log("[FOLLOWUP] Documento no existe, creando defaults en:", followupRef?.path);
       setDoc(followupRef!, { 
         ...defaults, 
         updatedAt: serverTimestamp(), 
@@ -356,7 +354,6 @@ function FollowupConfigTab({ channelId }: { channelId: string }) {
   const handleSave = async () => {
     if (!followupRef || !user) return;
     
-    // Explicit construction to ensure correct field names and types for the scheduler
     const payload = {
       enabled: formData.enabled === true,
       businessHours: {
@@ -375,19 +372,10 @@ function FollowupConfigTab({ channelId }: { channelId: string }) {
       updatedByEmail: user.email || '',
     };
 
-    console.log("FOLLOWUP REF PATH", followupRef.path);
-    console.log("FOLLOWUP SAVE payload", payload);
-    
     try {
       await setDoc(followupRef, payload, { merge: true });
-      
-      // Verification log as requested
-      const verify = await getDoc(followupRef);
-      console.log("FOLLOWUP AFTER SAVE", verify.data());
-      
       toast({ title: 'Configuración de seguimiento guardada' });
     } catch (e) {
-      console.error("[FOLLOWUP] Error al guardar", e);
       toast({ variant: 'destructive', title: 'Error al guardar configuración' });
     }
   };
@@ -597,7 +585,7 @@ function DocumentsTab({ channelId }: { channelId: string }) {
       <div className="flex items-center justify-between">
         <h3 className="text-lg font-medium">Documentos de Conocimiento</h3>
         <div className="relative">
-          <Input 
+          <input 
             type="file" 
             className="hidden" 
             id="file-upload" 
@@ -714,7 +702,7 @@ function ChatInterface({ channelId, workerUrl }: { channelId: string, workerUrl:
                     className={cn("flex flex-col items-start gap-1 p-4 text-left border-b hover:bg-muted/50 transition-colors", selectedJid === conv.jid && "bg-muted")}
                   >
                     <div className="flex justify-between w-full font-semibold text-sm truncate">
-                      <span className="truncate flex-1">{conv.name || conv.jid}</span>
+                      <span className="truncate flex-1">{conv.displayName || conv.name || conv.jid}</span>
                       <div className="flex items-center gap-1 shrink-0">
                         {conv.followupStopped && <Badge variant="destructive" className="text-[8px] h-4 px-1">STOP</Badge>}
                         {conv.followupEnabled && !conv.followupStopped && (
@@ -725,7 +713,7 @@ function ChatInterface({ channelId, workerUrl }: { channelId: string, workerUrl:
                         {conv.unreadCount > 0 && <span className="bg-primary text-primary-foreground rounded-full size-5 flex items-center justify-center text-[10px]">{conv.unreadCount}</span>}
                       </div>
                     </div>
-                    <div className="flex justify-between w-full text-xs text-muted-foreground truncate">
+                    <div className="flex justify-between w-full text-[10px] text-muted-foreground truncate">
                       <span className="truncate flex-1">{conv.lastMessageText || 'Sin mensajes'}</span>
                       <span className="shrink-0 ml-2">{conv.lastMessageAt ? format((conv.lastMessageAt as Timestamp).toDate(), 'HH:mm') : ''}</span>
                     </div>
@@ -755,10 +743,95 @@ function ChatInterface({ channelId, workerUrl }: { channelId: string, workerUrl:
   );
 }
 
+function CustomerProfileDialog({ channelId, conversation, isOpen, onOpenChange }: { channelId: string, conversation: Conversation, isOpen: boolean, onOpenChange: (open: boolean) => void }) {
+  const firestore = useFirestore();
+  const { toast } = useToast();
+  const [formData, setFormData] = useState({
+    name: '',
+    email: '',
+    phone: '',
+    company: '',
+    notes: ''
+  });
+
+  useEffect(() => {
+    if (conversation?.customer) {
+      setFormData({
+        name: conversation.customer.name || '',
+        email: conversation.customer.email || '',
+        phone: conversation.customer.phone || '',
+        company: conversation.customer.company || '',
+        notes: conversation.customer.notes || ''
+      });
+    } else {
+      setFormData({ name: '', email: '', phone: '', company: '', notes: '' });
+    }
+  }, [conversation]);
+
+  const handleSave = async () => {
+    if (!firestore || !conversation) return;
+    const convRef = doc(firestore, 'channels', channelId, 'conversations', conversation.jid);
+    const displayName = formData.name || formData.email || formData.phone || conversation.jid;
+    
+    try {
+      await updateDoc(convRef, {
+        customer: {
+          ...formData,
+          updatedAt: serverTimestamp(),
+          source: 'manual'
+        },
+        displayName
+      });
+      toast({ title: 'Perfil actualizado' });
+      onOpenChange(false);
+    } catch (e) {
+      toast({ variant: 'destructive', title: 'Error al actualizar perfil' });
+    }
+  };
+
+  return (
+    <Dialog open={isOpen} onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Perfil del Cliente</DialogTitle>
+          <DialogDescription>Información capturada automáticamente o editada manualmente.</DialogDescription>
+        </DialogHeader>
+        <div className="grid gap-4 py-4">
+          <div className="grid gap-2">
+            <Label>Nombre</Label>
+            <Input value={formData.name} onChange={e => setFormData({ ...formData, name: e.target.value })} placeholder="Nombre completo" />
+          </div>
+          <div className="grid gap-2">
+            <Label>Email</Label>
+            <Input value={formData.email} onChange={e => setFormData({ ...formData, email: e.target.value })} placeholder="correo@ejemplo.com" />
+          </div>
+          <div className="grid gap-2">
+            <Label>Teléfono</Label>
+            <Input value={formData.phone} onChange={e => setFormData({ ...formData, phone: e.target.value })} placeholder="+521234567890" />
+          </div>
+          <div className="grid gap-2">
+            <Label>Empresa</Label>
+            <Input value={formData.company} onChange={e => setFormData({ ...formData, company: e.target.value })} placeholder="Nombre de la empresa" />
+          </div>
+          <div className="grid gap-2">
+            <Label>Notas</Label>
+            <Textarea value={formData.notes} onChange={e => setFormData({ ...formData, notes: e.target.value })} placeholder="Notas adicionales sobre el cliente..." />
+          </div>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>Cancelar</Button>
+          <Button onClick={handleSave}>Guardar Perfil</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 function MessageThread({ channelId, jid, workerUrl, conversation }: { channelId: string, jid: string, workerUrl: string, conversation: Conversation }) {
   const firestore = useFirestore();
   const [inputText, setInputText] = useState('');
   const [isSending, setIsSending] = useState(false);
+  const [isProfileOpen, setIsProfileOpen] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const { toast } = useToast();
 
@@ -819,10 +892,13 @@ function MessageThread({ channelId, jid, workerUrl, conversation }: { channelId:
     <>
       <CardHeader className="border-b py-3 px-4 flex-row justify-between items-center bg-card">
         <div className="flex-1 min-w-0">
-          <CardTitle className="text-sm font-bold truncate">{conversation?.name || jid}</CardTitle>
+          <CardTitle className="text-sm font-bold truncate">{conversation?.displayName || conversation?.name || jid}</CardTitle>
           <CardDescription className="text-[10px] truncate">{jid}</CardDescription>
         </div>
         <div className="flex items-center gap-2">
+          <Button variant="ghost" size="icon" className="h-8 w-8 text-primary" onClick={() => setIsProfileOpen(true)}>
+            <User className="h-4 w-4" />
+          </Button>
           {conversation.followupEnabled ? (
             <Badge variant="outline" className="bg-green-500/10 text-green-600 border-green-500/20 text-[10px]">
               FU ACTIVO
@@ -900,6 +976,13 @@ function MessageThread({ channelId, jid, workerUrl, conversation }: { channelId:
           </Button>
         </form>
       </div>
+
+      <CustomerProfileDialog 
+        channelId={channelId} 
+        conversation={conversation} 
+        isOpen={isProfileOpen} 
+        onOpenChange={setIsProfileOpen} 
+      />
     </>
   );
 }
