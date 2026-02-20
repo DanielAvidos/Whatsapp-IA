@@ -365,18 +365,26 @@ function FollowupConfigTab({ channelId }: { channelId: string }) {
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2">
                 <Label>Hora Inicio (0-23)</Label>
-                <Input type="number" value={formData.businessHours?.startHour} onChange={(e) => setFormData(prev => ({ ...prev, businessHours: { ...prev.businessHours!, startHour: parseInt(e.target.value) } }))} />
+                <Input 
+                  type="number" 
+                  value={formData.businessHours?.startHour ?? ''} 
+                  onChange={(e) => setFormData(prev => ({ ...prev, businessHours: { ...prev.businessHours!, startHour: parseInt(e.target.value) || 0 } }))} 
+                />
               </div>
               <div className="space-y-2">
                 <Label>Hora Fin (0-23)</Label>
-                <Input type="number" value={formData.businessHours?.endHour} onChange={(e) => setFormData(prev => ({ ...prev, businessHours: { ...prev.businessHours!, endHour: parseInt(e.target.value) } }))} />
+                <Input 
+                  type="number" 
+                  value={formData.businessHours?.endHour ?? ''} 
+                  onChange={(e) => setFormData(prev => ({ ...prev, businessHours: { ...prev.businessHours!, endHour: parseInt(e.target.value) || 0 } }))} 
+                />
               </div>
             </div>
 
             <div className="space-y-2">
               <Label>Cadencia (Horas separadas por coma)</Label>
               <Input 
-                value={formData.cadenceHours?.join(', ')} 
+                value={formData.cadenceHours?.join(', ') ?? ''} 
                 onChange={(e) => {
                   const arr = e.target.value.split(',').map(v => parseInt(v.trim())).filter(v => !isNaN(v));
                   setFormData(prev => ({ ...prev, cadenceHours: arr, maxTouches: arr.length }));
@@ -388,7 +396,7 @@ function FollowupConfigTab({ channelId }: { channelId: string }) {
             <div className="space-y-2">
               <Label>Palabras para detener (Separadas por coma)</Label>
               <Input 
-                value={formData.stopKeywords?.join(', ')} 
+                value={formData.stopKeywords?.join(', ') ?? ''} 
                 onChange={(e) => setFormData(prev => ({ ...prev, stopKeywords: e.target.value.split(',').map(v => v.trim()).filter(v => v) }))} 
               />
             </div>
@@ -396,7 +404,7 @@ function FollowupConfigTab({ channelId }: { channelId: string }) {
             <div className="space-y-2">
               <Label>Objetivo de los mensajes</Label>
               <Textarea 
-                value={formData.goal} 
+                value={formData.goal ?? ''} 
                 onChange={(e) => setFormData(prev => ({ ...prev, goal: e.target.value }))}
                 placeholder="Ej: Conseguir una llamada de diagnóstico"
               />
