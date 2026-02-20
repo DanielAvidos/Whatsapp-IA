@@ -315,6 +315,11 @@ function FollowupConfigTab({ channelId }: { channelId: string }) {
   const [formData, setFormData] = useState<Partial<FollowupConfig>>({});
   const [hasInitialLoad, setHasInitialLoad] = useState(false);
 
+  // Reset initial load status when channel changes
+  useEffect(() => {
+    setHasInitialLoad(false);
+  }, [channelId]);
+
   // Load config into local state only once per channel/config update
   useEffect(() => {
     if (config) {
