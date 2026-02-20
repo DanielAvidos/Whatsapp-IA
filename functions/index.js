@@ -57,7 +57,7 @@ async function loadConversationContext(channelId, jid, limitCount = 12) {
 async function loadKnowledgeBaseDocs(channelId) {
   try {
     const snap = await db
-      .collection(`channels/${channelId}/runtime/kb_docs`)
+      .collection(`channels/${channelId}/kb_docs`)
       .where("status", "==", "READY")
       .orderBy("processedAt", "desc")
       .limit(5)
@@ -148,7 +148,7 @@ async function setBotError(channelId, errMsg, extra = {}) {
   await db.doc(`channels/${channelId}/runtime/bot`).set(
     {
       lastError: errMsg,
-      lastErrorAt: admin.firestore.FieldValue.serverTimestamp(),
+      lastErrorAt: admin.FieldValue.serverTimestamp(),
       ...extra,
     },
     { merge: true }
@@ -160,7 +160,7 @@ async function setBotSuccess(channelId) {
     {
       lastError: null,
       lastErrorAt: null,
-      lastAutoReplyAt: admin.firestore.FieldValue.serverTimestamp(),
+      lastAutoReplyAt: admin.FieldValue.serverTimestamp(),
     },
     { merge: true }
   );
@@ -233,7 +233,7 @@ exports.autoReplyOnIncomingMessage = functions
     if (fromMe || isBot) {
       await db.doc(`channels/${channelId}/runtime/bot`).set(
         {
-          lastSkipAt: admin.firestore.FieldValue.serverTimestamp(),
+          lastSkipAt: admin.FieldValue.serverTimestamp(),
           lastSkipReason: fromMe ? "FROM_ME" : "IS_BOT",
           lastSkipMessagePath: snapshot.ref.path,
         },
@@ -314,7 +314,7 @@ exports.onKnowledgeFileFinalize = functions
 
     logger.info("[KB] Procesando archivo", { channelId, docId, fileName });
 
-    const docRef = db.doc(`channels/${channelId}/runtime/kb_docs/${docId}`);
+    const docRef = db.doc(`channels/${channelId}/kb_docs/${docId}`);
     const projectId = process.env.GOOGLE_CLOUD_PROJECT || admin.app().options.projectId;
     const location = "us-central1";
     
@@ -366,8 +366,8 @@ exports.onKnowledgeFileFinalize = functions
         status: "READY",
         extractedText: extractedText.slice(0, 30000),
         summary,
-        processedAt: admin.firestore.FieldValue.serverTimestamp(),
-        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        processedAt: admin.FieldValue.serverTimestamp(),
+        updatedAt: admin.FieldValue.serverTimestamp(),
       }, { merge: true });
 
       logger.info("[KB] Archivo procesado correctamente", { channelId, docId });
@@ -377,7 +377,7 @@ exports.onKnowledgeFileFinalize = functions
       await docRef.set({
         status: "ERROR",
         error: error.message,
-        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        updatedAt: admin.FieldValue.serverTimestamp(),
       }, { merge: true });
     }
 

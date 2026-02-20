@@ -302,7 +302,7 @@ function DocumentsTab({ channelId }: { channelId: string }) {
 
   const docsRef = useMemoFirebase(() => {
     if (!firestore) return null;
-    return query(collection(firestore, 'channels', channelId, 'runtime', 'kb_docs'), orderBy('createdAt', 'desc'));
+    return query(collection(firestore, 'channels', channelId, 'kb_docs'), orderBy('createdAt', 'desc'));
   }, [firestore, channelId]);
 
   const { data: docs, isLoading } = useCollection<any>(docsRef);
@@ -327,7 +327,7 @@ function DocumentsTab({ channelId }: { channelId: string }) {
       const storagePath = `channels/${channelId}/kb/${docId}/${file.name}`;
       const fileRef = ref(storage, storagePath);
 
-      const kbDocRef = doc(firestore, 'channels', channelId, 'runtime', 'kb_docs', docId);
+      const kbDocRef = doc(firestore, 'channels', channelId, 'kb_docs', docId);
       await setDoc(kbDocRef, {
         docId,
         fileName: file.name,
@@ -375,7 +375,7 @@ function DocumentsTab({ channelId }: { channelId: string }) {
       const fileRef = ref(storage, storagePath);
       await deleteObject(fileRef).catch(e => console.warn("Storage delete failed", e));
 
-      const kbDocRef = doc(firestore, 'channels', channelId, 'runtime', 'kb_docs', docId);
+      const kbDocRef = doc(firestore, 'channels', channelId, 'kb_docs', docId);
       await deleteDoc(kbDocRef);
 
       toast({ title: 'Documento eliminado' });
