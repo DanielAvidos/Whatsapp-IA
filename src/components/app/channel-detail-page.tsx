@@ -1,10 +1,10 @@
 
 "use client";
 
-import { useState, useEffect, useRef, useCallback } from 'react';
-import { Loader2, ScanQrCode, LogOut, RotateCcw, MessageSquare, Link as LinkIcon, Send, Bot, FileText, Save, History, Brain, Info, AlertCircle, CheckCircle2, ShieldAlert, ChevronDown, Terminal, RefreshCw, PlusCircle, Trash2, Calendar, Clock, Target, MessageCircle, Settings2, MoreVertical } from 'lucide-react';
-import { useFirestore, useDoc, useMemoFirebase, useCollection, useUser, setDocumentNonBlocking, useFirebase, updateDocumentNonBlocking } from '@/firebase';
-import { doc, collection, query, orderBy, limit, Timestamp, serverTimestamp, setDoc, updateDoc, deleteDoc, where, getDocs, getDoc } from 'firebase/firestore';
+import { useState, useEffect, useRef } from 'react';
+import { Loader2, ScanQrCode, LogOut, RotateCcw, MessageSquare, Link as LinkIcon, Send, Bot, FileText, Save, History, Brain, Info, AlertCircle, CheckCircle2, Clock, PlusCircle, Trash2, Settings2, MoreVertical } from 'lucide-react';
+import { useFirestore, useDoc, useMemoFirebase, useCollection, useUser, setDocumentNonBlocking, useFirebase } from '@/firebase';
+import { doc, collection, query, orderBy, limit, Timestamp, serverTimestamp, setDoc, updateDoc, deleteDoc, where, getDoc } from 'firebase/firestore';
 import { PageHeader } from '@/components/app/page-header';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -27,8 +27,7 @@ import { useToast } from '@/hooks/use-toast';
 import { Badge } from '@/components/ui/badge';
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion';
 import { Progress } from '@/components/ui/progress';
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, DropdownMenuSeparator } from '@/components/ui/dropdown-menu';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 
 export function ChannelDetailPage({ channelId }: { channelId: string }) {
   const { t } = useLanguage();
@@ -314,16 +313,16 @@ function FollowupConfigTab({ channelId }: { channelId: string }) {
   const { data: activeConversations } = useCollection(activeFollowupsQuery);
 
   const [formData, setFormData] = useState<Partial<FollowupConfig>>({});
-  const isInitialized = useRef(false);
+  const [hasInitialLoad, setHasInitialLoad] = useState(false);
 
+  // Load config into local state only once per channel/config update
   useEffect(() => {
-    console.log(`[FOLLOWUP] Cargando config para canal: ${channelId} en ${followupRef?.path}`);
-    
     if (config) {
+      console.log("[FOLLOWUP] Config cargada desde Firestore:", config);
       setFormData(config);
-      isInitialized.current = true;
-    } else if (!isLoading && firestore && user && !isInitialized.current) {
-      // Default config if not exists - Create only once
+      setHasInitialLoad(true);
+    } else if (!isLoading && firestore && user && !hasInitialLoad) {
+      // Document doesn't exist, create it with defaults
       const defaults: Partial<FollowupConfig> = {
         enabled: false,
         businessHours: { startHour: 8, endHour: 22, timezone: "America/Mexico_City" },
@@ -335,7 +334,7 @@ function FollowupConfigTab({ channelId }: { channelId: string }) {
         goal: "Convertir a cita/llamada o solicitar datos de contacto.",
       };
       
-      console.log(`[FOLLOWUP] Creando defaults en ${followupRef?.path}`);
+      console.log("[FOLLOWUP] Documento no existe, creando defaults en:", followupRef?.path);
       setDoc(followupRef!, { 
         ...defaults, 
         updatedAt: serverTimestamp(), 
@@ -343,24 +342,42 @@ function FollowupConfigTab({ channelId }: { channelId: string }) {
         updatedByEmail: user.email 
       }, { merge: true });
       
-      isInitialized.current = true;
+      setFormData(defaults);
+      setHasInitialLoad(true);
     }
-  }, [config, isLoading, firestore, user, followupRef, channelId]);
+  }, [config, isLoading, firestore, user, followupRef, channelId, hasInitialLoad]);
 
   const handleSave = async () => {
     if (!followupRef || !user) return;
     
-    const patch = {
-      ...formData,
+    // Explicit construction to ensure correct field names and types for the scheduler
+    const payload = {
+      enabled: formData.enabled === true,
+      businessHours: {
+        startHour: Number(formData.businessHours?.startHour ?? 8),
+        endHour: Number(formData.businessHours?.endHour ?? 22),
+        timezone: formData.businessHours?.timezone ?? "America/Mexico_City"
+      },
+      maxTouches: Number(formData.maxTouches ?? 9),
+      cadenceHours: formData.cadenceHours ?? [1, 3, 5, 8, 13, 21, 34, 55, 89],
+      stopKeywords: formData.stopKeywords ?? [],
+      resumeKeywords: formData.resumeKeywords ?? [],
+      toneProfile: formData.toneProfile ?? "",
+      goal: formData.goal ?? "",
       updatedAt: serverTimestamp(),
       updatedByUid: user.uid,
       updatedByEmail: user.email || '',
     };
 
-    console.log(`[FOLLOWUP] Guardando en ${followupRef.path}`, patch);
+    console.log("FOLLOWUP SAVE PATH", followupRef.path, payload);
     
     try {
-      await setDoc(followupRef, patch, { merge: true });
+      await setDoc(followupRef, payload, { merge: true });
+      
+      // Verification log as requested
+      const verify = await getDoc(followupRef);
+      console.log("FOLLOWUP AFTER SAVE", verify.data());
+      
       toast({ title: 'Configuración de seguimiento guardada' });
     } catch (e) {
       console.error("[FOLLOWUP] Error al guardar", e);
@@ -368,7 +385,7 @@ function FollowupConfigTab({ channelId }: { channelId: string }) {
     }
   };
 
-  if (isLoading && !isInitialized.current) return <div className="space-y-4"><Skeleton className="h-48 w-full" /><Skeleton className="h-48 w-full" /></div>;
+  if (isLoading && !hasInitialLoad) return <div className="space-y-4"><Skeleton className="h-48 w-full" /><Skeleton className="h-48 w-full" /></div>;
 
   return (
     <div className="grid gap-6 md:grid-cols-3">
@@ -482,7 +499,6 @@ function DocumentsTab({ channelId }: { channelId: string }) {
 
   const docsRef = useMemoFirebase(() => {
     if (!firestore) return null;
-    // Simple path based on fix for odd segments
     return query(collection(firestore, 'channels', channelId, 'kb_docs'), orderBy('createdAt', 'desc'));
   }, [firestore, channelId]);
 
@@ -833,7 +849,6 @@ function MessageThread({ channelId, jid, workerUrl, conversation }: { channelId:
               ))}
               <div ref={scrollRef} />
               
-              {/* Followup Status Block (Debug) */}
               <div className="mt-8 border-t pt-4">
                 <div className="bg-card/50 rounded-lg p-3 border border-dashed text-[10px] space-y-2">
                   <p className="font-bold uppercase tracking-wider text-muted-foreground flex items-center gap-1">
