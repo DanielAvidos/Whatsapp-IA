@@ -303,31 +303,33 @@ exports.onIncomingMessageUpdateFollowupState = functions
     const text = extractText(data);
     const now = admin.firestore.FieldValue.serverTimestamp();
 
-    const followupRef = db.doc(`channels/${channelId}/conversations/${jid}/runtime/followup`);
+    // El estado del follow-up ahora vive en el documento de la conversación mismo
+    const convRef = db.doc(`channels/${channelId}/conversations/${jid}`);
 
     if (!fromMe) {
       // Mensaje del cliente: resetear o manejar opt-out
       const isOptOut = detectOptOut(text);
       if (isOptOut) {
-        await followupRef.set({
-          optedOut: true,
-          enabled: false,
-          stoppedReason: "OPTOUT",
+        await convRef.set({
+          followupStopped: true,
+          followupEnabled: false,
+          followupStopReason: "OPTOUT",
+          followupStopAt: now,
           updatedAt: now
         }, { merge: true });
       } else {
-        await followupRef.set({
-          step: 0,
-          lastCustomerAt: now,
-          stoppedReason: "CUSTOMER_REPLIED",
-          nextEligibleAt: null,
+        await convRef.set({
+          followupStage: 0,
+          followupLastCustomerAt: now,
+          followupStopReason: "CUSTOMER_REPLIED",
+          followupNextAt: null,
           updatedAt: now
         }, { merge: true });
       }
     } else {
       // Mensaje del bot/empresa: registrar para cooldown
-      await followupRef.set({
-        lastBotAt: now,
+      await convRef.set({
+        followupLastSentAt: now,
         updatedAt: now
       }, { merge: true });
     }
@@ -346,49 +348,56 @@ exports.followupTickHourly = functions
     
     for (const channelDoc of channelsSnap.docs) {
       const channelId = channelDoc.id;
-      const followupConfigSnap = await db.doc(`channels/${channelId}/runtime/bot_followup`).get();
+      // Ruta correcta de configuración: channels/{id}/runtime/followup
+      const followupConfigSnap = await db.doc(`channels/${channelId}/runtime/followup`).get();
       const config = followupConfigSnap.exists ? followupConfigSnap.data() : {
-        enabled: true, startHour: 8, endHour: 22, timezone: "America/Mexico_City", 
-        maxSteps: 9, scheduleHours: [1, 3, 5, 8, 12, 24, 36, 48, 72], cooldownHoursAfterBot: 1
+        enabled: false, 
+        businessHours: { startHour: 8, endHour: 22, timezone: "America/Mexico_City" }, 
+        maxTouches: 9, 
+        cadenceHours: [1, 3, 5, 8, 13, 21, 34, 55, 89]
       };
 
       if (!config.enabled) continue;
 
       // Validar hora actual en el timezone del canal
-      const nowInTz = DateTime.now().setZone(config.timezone);
-      if (nowInTz.hour < config.startHour || nowInTz.hour >= config.endHour) {
+      const nowInTz = DateTime.now().setZone(config.businessHours?.timezone || "America/Mexico_City");
+      if (nowInTz.hour < (config.businessHours?.startHour || 8) || nowInTz.hour >= (config.businessHours?.endHour || 22)) {
         logger.info(`[FOLLOWUP] Canal ${channelId} fuera de horario (${nowInTz.hour}h)`);
         continue;
       }
 
-      const convsSnap = await db.collection(`channels/${channelId}/conversations`).get(); // En PROD filtrar por actividad reciente
+      const convsSnap = await db.collection(`channels/${channelId}/conversations`)
+        .where("followupEnabled", "==", true)
+        .where("followupStopped", "==", false)
+        .get();
+
       const workerUrl = await getWorkerUrl();
       const projectId = process.env.GOOGLE_CLOUD_PROJECT || admin.app().options.projectId;
 
       for (const convDoc of convsSnap.docs) {
         const jid = convDoc.id;
-        const stateSnap = await db.doc(`channels/${channelId}/conversations/${jid}/runtime/followup`).get();
-        if (!stateSnap.exists || !stateSnap.data().enabled || stateSnap.data().optedOut) continue;
-
-        const state = stateSnap.data();
-        const step = state.step || 0;
-        if (step >= config.maxSteps) {
-          await stateSnap.ref.update({ stoppedReason: "COMPLETED", enabled: false });
+        const state = convDoc.data();
+        
+        const step = state.followupStage || 0;
+        if (step >= (config.maxTouches || 9)) {
+          await convDoc.ref.update({ followupStopReason: "COMPLETED", followupEnabled: false });
           continue;
         }
 
         // Calcular elegibilidad
-        const lastCustomerAt = state.lastCustomerAt?.toDate();
-        const lastBotAt = state.lastBotAt?.toDate();
+        const lastCustomerAt = state.followupLastCustomerAt?.toDate();
+        const lastSentAt = state.followupLastSentAt?.toDate();
         if (!lastCustomerAt) continue;
 
         const hoursSinceCustomer = (Date.now() - lastCustomerAt.getTime()) / (1000 * 60 * 60);
-        const hoursSinceBot = lastBotAt ? (Date.now() - lastBotAt.getTime()) / (1000 * 60 * 60) : 999;
+        const hoursSinceBot = lastSentAt ? (Date.now() - lastSentAt.getTime()) / (1000 * 60 * 60) : 999;
 
-        if (hoursSinceCustomer >= config.scheduleHours[step] && hoursSinceBot >= (config.cooldownHoursAfterBot || 1)) {
+        const schedule = config.cadenceHours || [1, 3, 5, 8, 13, 21, 34, 55, 89];
+
+        if (hoursSinceCustomer >= schedule[step] && hoursSinceBot >= 1) {
           // Idempotencia por hora
           const lockId = nowInTz.toFormat("yyyyMMddHH");
-          const lockRef = stateSnap.ref.collection("followup_locks").doc(lockId);
+          const lockRef = convDoc.ref.collection("followup_locks").doc(lockId);
           const lockSnap = await lockRef.get();
           if (lockSnap.exists) continue;
           await lockRef.set({ lockedAt: admin.firestore.FieldValue.serverTimestamp() });
@@ -411,11 +420,10 @@ exports.followupTickHourly = functions
               meta: { type: "followup", step: step + 1 } 
             });
 
-            await stateSnap.ref.update({
-              step: step + 1,
-              lastFollowupAt: admin.firestore.FieldValue.serverTimestamp(),
-              lastBotAt: admin.firestore.FieldValue.serverTimestamp(),
-              nextEligibleAt: admin.firestore.Timestamp.fromDate(new Date(Date.now() + (config.scheduleHours[step+1] || 24) * 3600000)),
+            await convDoc.ref.update({
+              followupStage: step + 1,
+              followupLastSentAt: admin.firestore.FieldValue.serverTimestamp(),
+              followupNextAt: admin.firestore.Timestamp.fromDate(new Date(Date.now() + (schedule[step+1] || 24) * 3600000)),
               updatedAt: admin.firestore.FieldValue.serverTimestamp()
             });
           } catch (e) {

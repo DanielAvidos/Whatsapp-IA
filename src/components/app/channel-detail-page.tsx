@@ -4,7 +4,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { Loader2, ScanQrCode, LogOut, RotateCcw, MessageSquare, Link as LinkIcon, Send, Bot, FileText, Save, History, Brain, Info, AlertCircle, CheckCircle2, ShieldAlert, ChevronDown, Terminal, RefreshCw, PlusCircle, Trash2, Calendar, Clock, Target, MessageCircle, Settings2, MoreVertical } from 'lucide-react';
 import { useFirestore, useDoc, useMemoFirebase, useCollection, useUser, setDocumentNonBlocking, useFirebase, updateDocumentNonBlocking } from '@/firebase';
-import { doc, collection, query, orderBy, limit, Timestamp, serverTimestamp, setDoc, updateDoc, deleteDoc, where, getDocs } from 'firebase/firestore';
+import { doc, collection, query, orderBy, limit, Timestamp, serverTimestamp, setDoc, updateDoc, deleteDoc, where, getDocs, getDoc } from 'firebase/firestore';
 import { PageHeader } from '@/components/app/page-header';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -314,12 +314,16 @@ function FollowupConfigTab({ channelId }: { channelId: string }) {
   const { data: activeConversations } = useCollection(activeFollowupsQuery);
 
   const [formData, setFormData] = useState<Partial<FollowupConfig>>({});
+  const isInitialized = useRef(false);
 
   useEffect(() => {
+    console.log(`[FOLLOWUP] Cargando config para canal: ${channelId} en ${followupRef?.path}`);
+    
     if (config) {
       setFormData(config);
-    } else if (!isLoading && firestore && user) {
-      // Default config if not exists
+      isInitialized.current = true;
+    } else if (!isLoading && firestore && user && !isInitialized.current) {
+      // Default config if not exists - Create only once
       const defaults: Partial<FollowupConfig> = {
         enabled: false,
         businessHours: { startHour: 8, endHour: 22, timezone: "America/Mexico_City" },
@@ -330,22 +334,41 @@ function FollowupConfigTab({ channelId }: { channelId: string }) {
         toneProfile: "Profesional, cercano, breve. 1 pregunta por mensaje.",
         goal: "Convertir a cita/llamada o solicitar datos de contacto.",
       };
-      setDoc(followupRef!, { ...defaults, updatedAt: serverTimestamp(), updatedByUid: user.uid, updatedByEmail: user.email }, { merge: true });
+      
+      console.log(`[FOLLOWUP] Creando defaults en ${followupRef?.path}`);
+      setDoc(followupRef!, { 
+        ...defaults, 
+        updatedAt: serverTimestamp(), 
+        updatedByUid: user.uid, 
+        updatedByEmail: user.email 
+      }, { merge: true });
+      
+      isInitialized.current = true;
     }
-  }, [config, isLoading, firestore, user, followupRef]);
+  }, [config, isLoading, firestore, user, followupRef, channelId]);
 
   const handleSave = async () => {
     if (!followupRef || !user) return;
-    await updateDoc(followupRef, {
+    
+    const patch = {
       ...formData,
       updatedAt: serverTimestamp(),
       updatedByUid: user.uid,
-      updatedByEmail: user.email,
-    });
-    toast({ title: 'Configuración de seguimiento guardada' });
+      updatedByEmail: user.email || '',
+    };
+
+    console.log(`[FOLLOWUP] Guardando en ${followupRef.path}`, patch);
+    
+    try {
+      await setDoc(followupRef, patch, { merge: true });
+      toast({ title: 'Configuración de seguimiento guardada' });
+    } catch (e) {
+      console.error("[FOLLOWUP] Error al guardar", e);
+      toast({ variant: 'destructive', title: 'Error al guardar configuración' });
+    }
   };
 
-  if (isLoading) return <div className="space-y-4"><Skeleton className="h-48 w-full" /><Skeleton className="h-48 w-full" /></div>;
+  if (isLoading && !isInitialized.current) return <div className="space-y-4"><Skeleton className="h-48 w-full" /><Skeleton className="h-48 w-full" /></div>;
 
   return (
     <div className="grid gap-6 md:grid-cols-3">
@@ -443,7 +466,7 @@ function FollowupConfigTab({ channelId }: { channelId: string }) {
           <Clock className="h-4 w-4 text-amber-500" />
           <AlertTitle className="text-xs">Ventana Horaria</AlertTitle>
           <AlertDescription className="text-[10px]">
-            El seguimiento solo enviará mensajes de {config?.businessHours?.startHour}:00 a {config?.businessHours?.endHour}:00 ({config?.businessHours?.timezone}).
+            El seguimiento solo enviará mensajes de {config?.businessHours?.startHour ?? 8}:00 a {config?.businessHours?.endHour ?? 22}:00 ({config?.businessHours?.timezone || 'GMT'}).
           </AlertDescription>
         </Alert>
       </div>
