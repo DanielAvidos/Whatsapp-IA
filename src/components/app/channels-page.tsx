@@ -1,19 +1,21 @@
+
 "use client";
 
 import React, { useEffect, useState } from 'react';
 import Link from 'next/link';
-import { useFirestore, useMemoFirebase, useCollection, useUser } from '@/firebase';
-import { collection, query, where, doc, updateDoc, serverTimestamp } from 'firebase/firestore';
+import { useFirestore, useMemoFirebase, useCollection, useUser, useFirebase } from '@/firebase';
+import { collection, query, where, doc, updateDoc, serverTimestamp, setDoc } from 'firebase/firestore';
+import { httpsCallable } from 'firebase/functions';
 import { PageHeader } from '@/components/app/page-header';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Button } from '@/components/ui/button';
-import { PlusCircle, MoreHorizontal, RotateCcw, Wrench, Edit2, Building2, MessageSquare, Link as LinkIcon } from 'lucide-react';
+import { PlusCircle, MoreHorizontal, RotateCcw, Wrench, Edit2, Building2, MessageSquare, Link as LinkIcon, CalendarClock, History } from 'lucide-react';
 import { StatusBadge } from '@/components/app/status-badge';
 import type { WhatsappChannel, Company } from '@/lib/types';
 import { Skeleton } from '@/components/ui/skeleton';
 import { useToast } from '@/hooks/use-toast';
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, DropdownMenuSeparator, DropdownMenuLabel } from '@/components/ui/dropdown-menu';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from '@/components/ui/dialog';
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from '@/components/ui/form';
 import { Input } from '@/components/ui/input';
@@ -23,6 +25,7 @@ import { zodResolver } from '@hookform/resolvers/zod';
 import * as z from 'zod';
 import { getIsSuperAdmin, getMyCompany } from '@/lib/auth-helpers';
 import { Badge } from '@/components/ui/badge';
+import { format, differenceInDays } from 'date-fns';
 
 const channelSchema = z.object({
   displayName: z.string().min(2, "Alias must be at least 2 characters."),
@@ -31,7 +34,7 @@ const channelSchema = z.object({
 type ChannelFormValues = z.infer<typeof channelSchema>;
 
 export function ChannelsPage() {
-    const firestore = useFirestore();
+    const { firestore, functions } = useFirebase();
     const { user } = useUser();
     const { toast } = useToast();
     const [addDialogOpen, setAddDialogOpen] = useState(false);
@@ -55,7 +58,6 @@ export function ChannelsPage() {
       resolve();
     }, [firestore, user, isSuperAdmin]);
 
-    // Queries for channels
     const channelsQuery = useMemoFirebase(() => {
         if (!firestore) return null;
         const colRef = collection(firestore, 'channels');
@@ -68,12 +70,41 @@ export function ChannelsPage() {
 
     const { data: channels, isLoading } = useCollection<WhatsappChannel>(channelsQuery);
 
-    // Query for companies (only for superadmin assignment)
+    // Lazy Trial Init
+    useEffect(() => {
+      if (!channels || !firestore) return;
+      channels.forEach(channel => {
+        if (!channel.trial) {
+          const created = channel.createdAt?.toDate() || new Date();
+          const endsAt = new Date(created.getTime() + 30 * 24 * 60 * 60 * 1000);
+          setDoc(doc(firestore, 'channels', channel.id), {
+            trial: {
+              status: 'ACTIVE',
+              startsAt: created,
+              endsAt: endsAt
+            }
+          }, { merge: true });
+        }
+      });
+    }, [channels, firestore]);
+
     const companiesQuery = useMemoFirebase(() => {
       if (!firestore || !isSuperAdmin) return null;
       return collection(firestore, 'companies');
     }, [firestore, isSuperAdmin]);
     const { data: companiesList } = useCollection<Company>(companiesQuery);
+
+    const handleExtendTrial = async (channelId: string, days: number) => {
+      if (!functions) return;
+      toast({ title: "Procesando extensión..." });
+      try {
+        const extendFn = httpsCallable(functions, 'extendChannelTrial');
+        await extendFn({ channelId, extendDays: days });
+        toast({ title: "Periodo de prueba extendido", description: `Se han añadido ${days} días.` });
+      } catch (error) {
+        toast({ variant: 'destructive', title: "Error", description: String(error) });
+      }
+    };
 
     const addForm = useForm<ChannelFormValues>({
       resolver: zodResolver(channelSchema),
@@ -159,6 +190,18 @@ export function ChannelsPage() {
       }
     };
 
+    const getTrialInfo = (channel: WhatsappChannel) => {
+      if (!channel.trial) return { text: 'Calculando...', color: 'secondary', days: 0 };
+      const endsAt = channel.trial.endsAt?.toDate() || new Date();
+      const now = new Date();
+      const days = differenceInDays(endsAt, now);
+      
+      if (channel.trial.status !== 'ACTIVE' || days < 0) {
+        return { text: 'EXPIRADO', color: 'destructive', days };
+      }
+      return { text: `TRIAL: ${days}d`, color: days < 5 ? 'destructive' : 'secondary', days };
+    };
+
     const getStatusForBadge = (status: WhatsappChannel['status'] | undefined) => {
         if (!status) return 'DISCONNECTED';
         if (status === 'QR') return 'CONNECTING';
@@ -186,6 +229,7 @@ export function ChannelsPage() {
                             <TableRow>
                                 <TableHead>Nombre</TableHead>
                                 <TableHead>Estado</TableHead>
+                                <TableHead>Prueba</TableHead>
                                 <TableHead>Teléfono</TableHead>
                                 {isSuperAdmin && <TableHead>Empresa</TableHead>}
                                 <TableHead className="text-right">Acciones</TableHead>
@@ -194,7 +238,7 @@ export function ChannelsPage() {
                         <TableBody>
                             {showLoading && (
                                 <TableRow>
-                                    <TableCell colSpan={isSuperAdmin ? 5 : 4}>
+                                    <TableCell colSpan={isSuperAdmin ? 6 : 5}>
                                         <div className="space-y-2">
                                             <Skeleton className="h-8 w-full" />
                                             <Skeleton className="h-8 w-full" />
@@ -202,12 +246,20 @@ export function ChannelsPage() {
                                     </TableCell>
                                 </TableRow>
                             )}
-                            {channels?.map((channel) => (
+                            {channels?.map((channel) => {
+                                const trial = getTrialInfo(channel);
+                                return (
                                 <TableRow key={channel.id}>
                                     <TableCell className="font-medium">
                                       {channel.displayName || channel.id}
                                     </TableCell>
                                     <TableCell><StatusBadge status={getStatusForBadge(channel.status)} /></TableCell>
+                                    <TableCell>
+                                      <Badge variant={trial.color as any} className="flex items-center gap-1 w-fit whitespace-nowrap">
+                                        <CalendarClock className="h-3 w-3" />
+                                        {trial.text}
+                                      </Badge>
+                                    </TableCell>
                                     <TableCell>{channel.phoneE164 || 'Sin vincular'}</TableCell>
                                     {isSuperAdmin && (
                                       <TableCell>
@@ -233,9 +285,10 @@ export function ChannelsPage() {
                                                         <MoreHorizontal className="h-4 w-4" />
                                                     </Button>
                                                 </DropdownMenuTrigger>
-                                                <DropdownMenuContent align="end">
+                                                <DropdownMenuContent align="end" className="w-56">
                                                     {isSuperAdmin && (
                                                       <>
+                                                        <DropdownMenuLabel>Administración</DropdownMenuLabel>
                                                         <DropdownMenuItem onSelect={() => {
                                                           setSelectedChannel(channel);
                                                           editForm.setValue('displayName', channel.displayName || '');
@@ -251,6 +304,14 @@ export function ChannelsPage() {
                                                             <LinkIcon className="mr-2 h-4 w-4" />
                                                             {channel.companyId ? "Reasignar Empresa" : "Asignar a Empresa"}
                                                         </DropdownMenuItem>
+                                                        
+                                                        <DropdownMenuSeparator />
+                                                        <DropdownMenuLabel className="flex items-center gap-2"><History className="h-3 w-3" /> Extender Trial</DropdownMenuLabel>
+                                                        <DropdownMenuItem onClick={() => handleExtendTrial(channel.id, 7)}>+7 Días</DropdownMenuItem>
+                                                        <DropdownMenuItem onClick={() => handleExtendTrial(channel.id, 30)}>+30 Días</DropdownMenuItem>
+                                                        <DropdownMenuItem onClick={() => handleExtendTrial(channel.id, 90)}>+90 Días</DropdownMenuItem>
+                                                        
+                                                        <DropdownMenuSeparator />
                                                         <DropdownMenuItem onSelect={() => handleAction(channel.id, '/repair', 'Reparación iniciada')}>
                                                             <Wrench className="mr-2 h-4 w-4" />
                                                             Reparar Canal
@@ -266,10 +327,10 @@ export function ChannelsPage() {
                                         </div>
                                     </TableCell>
                                 </TableRow>
-                            ))}
+                            )})}
                              {!showLoading && channels?.length === 0 && (
                                 <TableRow>
-                                    <TableCell colSpan={isSuperAdmin ? 5 : 4} className="text-center py-12">
+                                    <TableCell colSpan={isSuperAdmin ? 6 : 5} className="text-center py-12">
                                         <div className="flex flex-col items-center gap-2">
                                           <MessageSquare className="h-8 w-8 text-muted-foreground opacity-20" />
                                           <p className="text-muted-foreground">

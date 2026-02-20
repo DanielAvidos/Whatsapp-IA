@@ -45,6 +45,18 @@ export type ApiKey = {
   createdAt: string;
 };
 
+export type TrialStatus = 'ACTIVE' | 'EXPIRED' | 'DISABLED';
+
+export type TrialConfig = {
+  status: TrialStatus;
+  startsAt: Timestamp;
+  endsAt: Timestamp;
+  extendedByUid?: string | null;
+  extendedByEmail?: string | null;
+  extendedAt?: Timestamp | null;
+  reason?: string | null;
+};
+
 export type WhatsappChannel = {
   id: string;
   displayName: string;
@@ -53,6 +65,7 @@ export type WhatsappChannel = {
   qrDataUrl: string | null;
   phoneE164: string | null;
   lastSeenAt: Timestamp | null;
+  createdAt: Timestamp;
   updatedAt: FieldValue | Timestamp;
   lastError: any;
   linked: boolean;
@@ -62,6 +75,10 @@ export type WhatsappChannel = {
     message: string;
     at: Timestamp;
   } | null;
+  trial?: TrialConfig;
+  billing?: {
+    plan: 'TRIAL' | 'PAID' | 'BLOCKED';
+  };
 };
 
 export type FollowupConfig = {

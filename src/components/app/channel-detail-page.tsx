@@ -2,9 +2,10 @@
 "use client";
 
 import { useState, useEffect, useRef } from 'react';
-import { Loader2, ScanQrCode, LogOut, RotateCcw, MessageSquare, Link as LinkIcon, Send, Bot, FileText, Save, History, Brain, Info, AlertCircle, CheckCircle2, Clock, PlusCircle, Trash2, Settings2, MoreVertical, User } from 'lucide-react';
+import { Loader2, ScanQrCode, LogOut, RotateCcw, MessageSquare, Link as LinkIcon, Send, Bot, FileText, Save, History, Brain, Info, AlertCircle, CheckCircle2, Clock, PlusCircle, Trash2, Settings2, MoreVertical, User, CalendarClock } from 'lucide-react';
 import { useFirestore, useDoc, useMemoFirebase, useCollection, useUser, setDocumentNonBlocking, useFirebase } from '@/firebase';
 import { doc, collection, query, orderBy, limit, Timestamp, serverTimestamp, setDoc, updateDoc, deleteDoc, where, getDoc } from 'firebase/firestore';
+import { httpsCallable } from 'firebase/functions';
 import { PageHeader } from '@/components/app/page-header';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -17,7 +18,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Alert, AlertTitle, AlertDescription } from '@/components/ui/alert';
 import { Input } from '@/components/ui/input';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { format } from 'date-fns';
+import { format, differenceInDays } from 'date-fns';
 import { cn } from '@/lib/utils';
 import Link from 'next/link';
 import { Switch } from '@/components/ui/switch';
@@ -29,10 +30,11 @@ import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/
 import { Progress } from '@/components/ui/progress';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from '@/components/ui/dialog';
+import { getIsSuperAdmin } from '@/lib/auth-helpers';
 
 export function ChannelDetailPage({ channelId }: { channelId: string }) {
   const { t } = useLanguage();
-  const firestore = useFirestore();
+  const { firestore, user, functions } = useFirebase();
   const { toast } = useToast();
   
   const channelRef = useMemoFirebase(() => {
@@ -46,6 +48,14 @@ export function ChannelDetailPage({ channelId }: { channelId: string }) {
   const [activeTab, setActiveTab] = useState('connection');
 
   const workerUrl = process.env.NEXT_PUBLIC_BAILEYS_WORKER_URL || process.env.NEXT_PUBLIC_WORKER_URL;
+  const isSuperAdmin = getIsSuperAdmin(user);
+
+  const isBlocked = () => {
+    if (!channel?.trial) return false;
+    const now = new Date();
+    const endsAt = channel.trial.endsAt?.toDate() || new Date();
+    return channel.trial.status !== 'ACTIVE' || now > endsAt;
+  };
 
   const handleApiCall = async (endpoint: string, successMessage: string, errorMessage: string) => {
     if (!workerUrl) {
@@ -64,12 +74,48 @@ export function ChannelDetailPage({ channelId }: { channelId: string }) {
   const handleDisconnect = () => handleApiCall('/disconnect', 'Desconectando...', 'Error al desconectar');
   const handleResetSession = () => handleApiCall('/resetSession', 'Reiniciando sesión...', 'Error al reiniciar sesión');
 
+  const handleExtendTrial = async (days: number) => {
+    if (!functions) return;
+    toast({ title: "Procesando extensión..." });
+    try {
+      const extendFn = httpsCallable(functions, 'extendChannelTrial');
+      await extendFn({ channelId, extendDays: days });
+      toast({ title: "Periodo de prueba extendido" });
+    } catch (error) {
+      toast({ variant: 'destructive', title: "Error", description: String(error) });
+    }
+  };
+
   return (
     <main className="container mx-auto p-4 md:p-6 lg:p-8">
       <PageHeader title={channel?.displayName || 'Cargando...'} description={t('manage.connection')}>
-        <Button variant="outline" asChild><Link href="/channels">Volver a Canales</Link></Button>
+        <div className="flex gap-2">
+          {isSuperAdmin && (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="outline"><CalendarClock className="mr-2 h-4 w-4" /> Trial</Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuItem onClick={() => handleExtendTrial(7)}>Extender +7 días</DropdownMenuItem>
+                <DropdownMenuItem onClick={() => handleExtendTrial(30)}>Extender +30 días</DropdownMenuItem>
+                <DropdownMenuItem onClick={() => handleExtendTrial(90)}>Extender +90 días</DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          )}
+          <Button variant="outline" asChild><Link href="/channels">Volver a Canales</Link></Button>
+        </div>
       </PageHeader>
       
+      {isBlocked() && (
+        <Alert variant="destructive" className="mb-4">
+          <AlertCircle className="h-4 w-4" />
+          <AlertTitle>Periodo de Prueba Expirado</AlertTitle>
+          <AlertDescription>
+            Este canal ha superado su periodo de prueba de 30 días. El envío de mensajes y las funciones automáticas están deshabilitadas. Contacta con soporte para activar un plan.
+          </AlertDescription>
+        </Alert>
+      )}
+
       {!workerUrl && (activeTab === 'connection' || activeTab === 'chats') && (
         <Alert variant="destructive" className="mb-4">
           <AlertTitle>Configuración Incompleta</AlertTitle>
@@ -130,11 +176,11 @@ export function ChannelDetailPage({ channelId }: { channelId: string }) {
         </TabsContent>
 
         <TabsContent value="chats">
-          {workerUrl && <ChatInterface channelId={channelId} workerUrl={workerUrl} />}
+          {workerUrl && <ChatInterface channelId={channelId} blocked={isBlocked()} />}
         </TabsContent>
 
         <TabsContent value="chatbot">
-          <ChatbotConfig channelId={channelId} />
+          <ChatbotConfig channelId={channelId} blocked={isBlocked()} />
         </TabsContent>
       </Tabs>
 
@@ -143,7 +189,7 @@ export function ChannelDetailPage({ channelId }: { channelId: string }) {
   );
 }
 
-function ChatbotConfig({ channelId }: { channelId: string }) {
+function ChatbotConfig({ channelId, blocked }: { channelId: string, blocked: boolean }) {
   const { user } = useUser();
   const firestore = useFirestore();
   const { toast } = useToast();
@@ -167,7 +213,7 @@ function ChatbotConfig({ channelId }: { channelId: string }) {
   }, [botConfig]);
 
   const handleSaveBot = async (overrides: Partial<BotConfig> = {}) => {
-    if (!firestore || !user || !botRef) return;
+    if (!firestore || !user || !botRef || blocked) return;
     
     const data = {
       enabled: overrides.enabled !== undefined ? overrides.enabled : (botConfig?.enabled || false),
@@ -227,7 +273,7 @@ function ChatbotConfig({ channelId }: { channelId: string }) {
                   id="bot-enabled" 
                   checked={botConfig?.enabled || false} 
                   onCheckedChange={(checked) => handleSaveBot({ enabled: checked })}
-                  disabled={isBotLoading}
+                  disabled={isBotLoading || blocked}
                 />
                 <Label htmlFor="bot-enabled">IA Activada</Label>
               </div>
@@ -244,6 +290,7 @@ function ChatbotConfig({ channelId }: { channelId: string }) {
                       className="min-h-[150px]"
                       value={localProductContent}
                       onChange={(e) => setLocalProductContent(e.target.value)}
+                      disabled={blocked}
                     />
                   </div>
                   <div className="space-y-2">
@@ -253,6 +300,7 @@ function ChatbotConfig({ channelId }: { channelId: string }) {
                       className="min-h-[150px]"
                       value={localSalesContent}
                       onChange={(e) => setLocalSalesContent(e.target.value)}
+                      disabled={blocked}
                     />
                   </div>
                   <div className="flex justify-between items-center">
@@ -260,7 +308,7 @@ function ChatbotConfig({ channelId }: { channelId: string }) {
                       <History className="h-3 w-3" />
                       {botConfig?.updatedAt ? `Actualizado por ${botConfig.updatedByEmail} el ${formatDate(botConfig.updatedAt)}` : 'Sin datos'}
                     </div>
-                    <Button onClick={() => handleSaveBot()}>
+                    <Button onClick={() => handleSaveBot()} disabled={blocked}>
                       <Save className="mr-2 h-4 w-4" />
                       Guardar Conocimiento
                     </Button>
@@ -287,14 +335,14 @@ function ChatbotConfig({ channelId }: { channelId: string }) {
         </TabsContent>
 
         <TabsContent value="followup" className="pt-4">
-          <FollowupConfigTab channelId={channelId} />
+          <FollowupConfigTab channelId={channelId} blocked={blocked} />
         </TabsContent>
       </Tabs>
     </div>
   );
 }
 
-function FollowupConfigTab({ channelId }: { channelId: string }) {
+function FollowupConfigTab({ channelId, blocked }: { channelId: string, blocked: boolean }) {
   const { user } = useUser();
   const firestore = useFirestore();
   const { toast } = useToast();
@@ -316,18 +364,15 @@ function FollowupConfigTab({ channelId }: { channelId: string }) {
   const [formData, setFormData] = useState<Partial<FollowupConfig>>({});
   const [hasInitialLoad, setHasInitialLoad] = useState(false);
 
-  // Reset initial load status when channel changes
   useEffect(() => {
     setHasInitialLoad(false);
   }, [channelId]);
 
-  // Load config into local state only once per channel/config update
   useEffect(() => {
     if (config) {
       setFormData(config);
       setHasInitialLoad(true);
     } else if (!isLoading && firestore && user && !hasInitialLoad) {
-      // Document doesn't exist, create it with defaults
       const defaults: Partial<FollowupConfig> = {
         enabled: false,
         businessHours: { startHour: 8, endHour: 22, timezone: "America/Mexico_City" },
@@ -352,7 +397,7 @@ function FollowupConfigTab({ channelId }: { channelId: string }) {
   }, [config, isLoading, firestore, user, followupRef, channelId, hasInitialLoad]);
 
   const handleSave = async () => {
-    if (!followupRef || !user) return;
+    if (!followupRef || !user || blocked) return;
     
     const payload = {
       enabled: formData.enabled === true,
@@ -396,7 +441,8 @@ function FollowupConfigTab({ channelId }: { channelId: string }) {
               <Switch 
                 id="global-followup-switch"
                 checked={formData.enabled === true} 
-                onCheckedChange={(val) => setFormData(prev => ({ ...prev, enabled: val }))} 
+                onCheckedChange={(val) => setFormData(prev => ({ ...prev, enabled: val }))}
+                disabled={blocked}
               />
             </div>
           </CardHeader>
@@ -408,6 +454,7 @@ function FollowupConfigTab({ channelId }: { channelId: string }) {
                   type="number" 
                   value={formData.businessHours?.startHour ?? ''} 
                   onChange={(e) => setFormData(prev => ({ ...prev, businessHours: { ...prev.businessHours!, startHour: parseInt(e.target.value) || 0 } }))} 
+                  disabled={blocked}
                 />
               </div>
               <div className="space-y-2">
@@ -416,6 +463,7 @@ function FollowupConfigTab({ channelId }: { channelId: string }) {
                   type="number" 
                   value={formData.businessHours?.endHour ?? ''} 
                   onChange={(e) => setFormData(prev => ({ ...prev, businessHours: { ...prev.businessHours!, endHour: parseInt(e.target.value) || 0 } }))} 
+                  disabled={blocked}
                 />
               </div>
             </div>
@@ -428,6 +476,7 @@ function FollowupConfigTab({ channelId }: { channelId: string }) {
                   const arr = e.target.value.split(',').map(v => parseInt(v.trim())).filter(v => !isNaN(v));
                   setFormData(prev => ({ ...prev, cadenceHours: arr, maxTouches: arr.length }));
                 }} 
+                disabled={blocked}
               />
               <p className="text-[10px] text-muted-foreground">Ejemplo: 1, 3, 5, 24, 48... (horas desde el último mensaje del cliente)</p>
             </div>
@@ -437,6 +486,7 @@ function FollowupConfigTab({ channelId }: { channelId: string }) {
               <Input 
                 value={formData.stopKeywords?.join(', ') ?? ''} 
                 onChange={(e) => setFormData(prev => ({ ...prev, stopKeywords: e.target.value.split(',').map(v => v.trim()).filter(v => v) }))} 
+                disabled={blocked}
               />
             </div>
 
@@ -446,10 +496,11 @@ function FollowupConfigTab({ channelId }: { channelId: string }) {
                 value={formData.goal ?? ''} 
                 onChange={(e) => setFormData(prev => ({ ...prev, goal: e.target.value }))}
                 placeholder="Ej: Conseguir una llamada de diagnóstico"
+                disabled={blocked}
               />
             </div>
 
-            <Button className="w-full" onClick={handleSave}><Save className="mr-2 h-4 w-4" /> Guardar Cambios</Button>
+            <Button className="w-full" onClick={handleSave} disabled={blocked}><Save className="mr-2 h-4 w-4" /> Guardar Cambios</Button>
           </CardContent>
         </Card>
       </div>
@@ -676,7 +727,7 @@ function DocumentsTab({ channelId }: { channelId: string }) {
   );
 }
 
-function ChatInterface({ channelId, workerUrl }: { channelId: string, workerUrl: string }) {
+function ChatInterface({ channelId, blocked }: { channelId: string, blocked: boolean }) {
   const firestore = useFirestore();
   const [selectedJid, setSelectedJid] = useState<string | null>(null);
 
@@ -729,8 +780,8 @@ function ChatInterface({ channelId, workerUrl }: { channelId: string, workerUrl:
           <MessageThread 
             channelId={channelId} 
             jid={selectedJid} 
-            workerUrl={workerUrl} 
             conversation={conversations?.find(c => c.jid === selectedJid)!} 
+            blocked={blocked}
           />
         ) : (
           <div className="flex flex-col items-center justify-center h-full text-muted-foreground p-8">
@@ -827,8 +878,8 @@ function CustomerProfileDialog({ channelId, conversation, isOpen, onOpenChange }
   );
 }
 
-function MessageThread({ channelId, jid, workerUrl, conversation }: { channelId: string, jid: string, workerUrl: string, conversation: Conversation }) {
-  const firestore = useFirestore();
+function MessageThread({ channelId, jid, conversation, blocked }: { channelId: string, jid: string, conversation: Conversation, blocked: boolean }) {
+  const { firestore, functions } = useFirebase();
   const [inputText, setInputText] = useState('');
   const [isSending, setIsSending] = useState(false);
   const [isProfileOpen, setIsProfileOpen] = useState(false);
@@ -844,38 +895,31 @@ function MessageThread({ channelId, jid, workerUrl, conversation }: { channelId:
 
   useEffect(() => { scrollRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages]);
 
-  useEffect(() => {
-    if (jid && workerUrl) fetch(`${workerUrl}/v1/channels/${channelId}/conversations/${encodeURIComponent(jid)}/markRead`, { method: 'POST', mode: 'cors' }).catch(() => {});
-  }, [jid, channelId, workerUrl]);
-
   const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!inputText.trim() || isSending || !workerUrl) return;
+    if (!inputText.trim() || isSending || !functions || blocked) return;
     setIsSending(true);
     try {
-      const res = await fetch(`${workerUrl}/v1/channels/${channelId}/messages/send`, { 
-        method: 'POST', 
-        headers: { 'Content-Type': 'application/json' }, 
-        body: JSON.stringify({ to: jid, text: inputText.trim() }) 
-      });
-      if (!res.ok) throw new Error('Error al enviar');
+      const sendFn = httpsCallable(functions, 'sendMessageProxy');
+      await sendFn({ channelId, to: jid, text: inputText.trim() });
       setInputText('');
-    } catch (e) { 
-      toast({ variant: 'destructive', title: 'Error', description: String(e) }); 
+    } catch (e: any) { 
+      const msg = e.details?.reason === 'TRIAL_EXPIRED' ? 'Prueba expirada. No puedes enviar mensajes.' : String(e);
+      toast({ variant: 'destructive', title: 'Error', description: msg }); 
     } finally { 
       setIsSending(false); 
     }
   };
 
   const handleToggleFollowup = async () => {
-    if (!firestore) return;
+    if (!firestore || blocked) return;
     const convRef = doc(firestore, 'channels', channelId, 'conversations', jid);
     await updateDoc(convRef, { followupEnabled: !conversation.followupEnabled });
     toast({ title: conversation.followupEnabled ? 'Seguimiento desactivado' : 'Seguimiento activado' });
   };
 
   const handleResetFollowup = async () => {
-    if (!firestore) return;
+    if (!firestore || blocked) return;
     const convRef = doc(firestore, 'channels', channelId, 'conversations', jid);
     await updateDoc(convRef, {
       followupStage: 0,
@@ -909,10 +953,10 @@ function MessageThread({ channelId, jid, workerUrl, conversation }: { channelId:
           <DropdownMenu>
             <DropdownMenuTrigger asChild><Button variant="ghost" size="icon" className="h-8 w-8"><MoreVertical className="h-4 w-4" /></Button></DropdownMenuTrigger>
             <DropdownMenuContent align="end">
-              <DropdownMenuItem onClick={handleToggleFollowup}>
+              <DropdownMenuItem onClick={handleToggleFollowup} disabled={blocked}>
                 {conversation.followupEnabled ? 'Desactivar Seguimiento' : 'Activar Seguimiento'}
               </DropdownMenuItem>
-              <DropdownMenuItem onClick={handleResetFollowup}>
+              <DropdownMenuItem onClick={handleResetFollowup} disabled={blocked}>
                 Reiniciar Seguimiento
               </DropdownMenuItem>
             </DropdownMenuContent>
@@ -964,14 +1008,20 @@ function MessageThread({ channelId, jid, workerUrl, conversation }: { channelId:
         </ScrollArea>
       </CardContent>
       <div className="p-4 border-t bg-card">
+        {blocked && (
+          <Alert variant="destructive" className="mb-2 py-2">
+            <AlertCircle className="h-3 w-3" />
+            <AlertDescription className="text-xs">Trial expirado. Funciones bloqueadas.</AlertDescription>
+          </Alert>
+        )}
         <form onSubmit={handleSendMessage} className="flex gap-2">
           <Input 
-            placeholder="Escribe un mensaje..." 
+            placeholder={blocked ? "Canal expirado..." : "Escribe un mensaje..."}
             value={inputText} 
             onChange={(e) => setInputText(e.target.value)} 
-            disabled={isSending} 
+            disabled={isSending || blocked} 
           />
-          <Button type="submit" size="icon" disabled={isSending || !inputText.trim()}>
+          <Button type="submit" size="icon" disabled={isSending || !inputText.trim() || blocked}>
             {isSending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
           </Button>
         </form>

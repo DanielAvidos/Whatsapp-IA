@@ -1,3 +1,4 @@
+
 'use client';
 
 import { firebaseConfig, validateFirebaseConfig } from '@/firebase/config';
@@ -5,6 +6,7 @@ import { initializeApp, getApps, getApp, FirebaseApp } from 'firebase/app';
 import { getAuth } from 'firebase/auth';
 import { getFirestore } from 'firebase/firestore';
 import { getAnalytics, isSupported } from 'firebase/analytics';
+import { getFunctions } from 'firebase/functions';
 
 export function initializeFirebase() {
   if (typeof window === 'undefined') {
@@ -43,7 +45,8 @@ export function getSdks(firebaseApp: FirebaseApp) {
   return {
     firebaseApp,
     auth: getAuth(firebaseApp),
-    firestore: getFirestore(firebaseApp)
+    firestore: getFirestore(firebaseApp),
+    functions: getFunctions(firebaseApp, 'us-central1')
   };
 }
 

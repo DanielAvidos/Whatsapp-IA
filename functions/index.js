@@ -20,6 +20,7 @@ const storage = new Storage();
 
 // --- MODEL LOCK ---
 const GEMINI_MODEL_LOCKED = "gemini-2.5-flash";
+const SUPERADMIN_EMAIL = "superadmin@avidos.com";
 
 // --- HELPERS ---
 function safeText(v) {
@@ -52,7 +53,6 @@ function extractPhone(text) {
   const phoneRegex = /\+?\d{10,15}/g;
   const matches = text.match(phoneRegex);
   if (!matches) return null;
-  // Clean dots, spaces, dashes
   return matches.find(m => m.replace(/\D/g, '').length >= 10) || null;
 }
 
@@ -72,6 +72,39 @@ function extractName(text) {
     }
   }
   return null;
+}
+
+/**
+ * Trial & Access Control
+ */
+async function getChannelAccess(channelId) {
+  const docRef = db.doc(`channels/${channelId}`);
+  const snap = await docRef.get();
+  if (!snap.exists) return { blocked: true, reason: "NOT_FOUND" };
+  const data = snap.data();
+  
+  let trial = data.trial;
+  // Lazy init if missing
+  if (!trial) {
+    const created = data.createdAt ? data.createdAt.toDate() : new Date();
+    const endsAt = new Date(created.getTime() + 30 * 24 * 60 * 60 * 1000);
+    trial = {
+      status: "ACTIVE",
+      startsAt: admin.firestore.Timestamp.fromDate(created),
+      endsAt: admin.firestore.Timestamp.fromDate(endsAt),
+    };
+    await docRef.update({ trial });
+  }
+
+  const now = admin.firestore.Timestamp.now();
+  const isExpired = now.toMillis() > trial.endsAt.toMillis();
+  const isBlockedStatus = trial.status !== "ACTIVE";
+  
+  if (isExpired || isBlockedStatus) {
+    return { blocked: true, reason: isExpired ? "TRIAL_EXPIRED" : "BLOCKED", endsAt: trial.endsAt };
+  }
+  
+  return { blocked: false, endsAt: trial.endsAt };
 }
 
 /**
@@ -251,6 +284,73 @@ function detectOptOut(text) {
 // --- CLOUD FUNCTIONS ---
 
 /**
+ * Admin: Extender Trial (Callable)
+ */
+exports.extendChannelTrial = functions.region("us-central1").https.onCall(async (data, context) => {
+  if (!context.auth) throw new functions.https.HttpsError("unauthenticated", "Auth required");
+  
+  const userEmail = context.auth.token.email || "";
+  if (userEmail.toLowerCase() !== SUPERADMIN_EMAIL) {
+    throw new functions.https.HttpsError("permission-denied", "Only SuperAdmin can extend trials.");
+  }
+
+  const { channelId, extendDays, endsAt, reason } = data;
+  const channelRef = db.doc(`channels/${channelId}`);
+  const snap = await channelRef.get();
+  
+  if (!snap.exists) throw new functions.https.HttpsError("not-found", "Channel not found");
+  
+  const currentData = snap.data();
+  let currentEndsAt = currentData.trial?.endsAt?.toDate() || new Date();
+  
+  // New endsAt
+  let newEndsAt;
+  if (endsAt) {
+    newEndsAt = new Date(endsAt);
+  } else {
+    const baseDate = Math.max(currentEndsAt.getTime(), Date.now());
+    newEndsAt = new Date(baseDate + (extendDays || 30) * 24 * 60 * 60 * 1000);
+  }
+
+  const trialUpdate = {
+    status: "ACTIVE",
+    endsAt: admin.firestore.Timestamp.fromDate(newEndsAt),
+    extendedByUid: context.auth.uid,
+    extendedByEmail: userEmail,
+    extendedAt: admin.firestore.FieldValue.serverTimestamp(),
+    reason: reason || "Extension manual"
+  };
+
+  await channelRef.set({ trial: trialUpdate }, { merge: true });
+  return { success: true, trial: trialUpdate };
+});
+
+/**
+ * Proxy: Send Message with Trial Check
+ */
+exports.sendMessageProxy = functions.region("us-central1").https.onCall(async (data, context) => {
+  if (!context.auth) throw new functions.https.HttpsError("unauthenticated", "Auth required");
+  
+  const { channelId, to, text } = data;
+  const access = await getChannelAccess(channelId);
+  
+  if (access.blocked) {
+    throw new functions.https.HttpsError("permission-denied", "Channel access blocked", { reason: access.reason });
+  }
+
+  const workerUrl = await getWorkerUrl();
+  await sendViaWorker({ 
+    workerUrl, 
+    channelId, 
+    toJid: to, 
+    text,
+    meta: { source: "proxy", senderUid: context.auth.uid }
+  });
+
+  return { success: true };
+});
+
+/**
  * Trigger: Captura el perfil del cliente.
  */
 exports.onIncomingMessageCaptureCustomerProfile = functions
@@ -287,7 +387,6 @@ exports.onIncomingMessageCaptureCustomerProfile = functions
     const newCustomer = { ...existing };
     let changed = false;
 
-    // Lógica de confianza: med si es detectado por IA/Heurística, high si es explícito
     if (name && (!existing.name || existing.confidence?.nameConfidence !== "high")) {
       newCustomer.name = name;
       newCustomer.confidence = { ...newCustomer.confidence, nameConfidence: "med" };
@@ -307,17 +406,13 @@ exports.onIncomingMessageCaptureCustomerProfile = functions
     if (changed) {
       newCustomer.updatedAt = admin.firestore.FieldValue.serverTimestamp();
       newCustomer.source = "auto-extract";
-      
       const displayName = newCustomer.name || newCustomer.email || newCustomer.phone || jid;
-      
       await convRef.set({
         customer: newCustomer,
         displayName,
         lastCustomerProfileUpdateAt: admin.firestore.FieldValue.serverTimestamp(),
         updatedAt: admin.firestore.FieldValue.serverTimestamp()
       }, { merge: true });
-      
-      logger.info("[PROFILE] Actualizado", { jid, changed: { name: !!name, email: !!email, phone: !!phone } });
     }
 
     return null;
@@ -348,6 +443,12 @@ exports.autoReplyOnIncomingMessage = functions
       return null;
     }
 
+    const access = await getChannelAccess(channelId);
+    if (access.blocked) {
+      logger.info("[ACCESS] Canal bloqueado. Skip autoReply", { channelId, reason: access.reason });
+      return null;
+    }
+
     const isNew = await markProcessed(channelId, messageId, { jid, text });
     if (!isNew) return null;
 
@@ -367,7 +468,6 @@ exports.autoReplyOnIncomingMessage = functions
       });
 
       const messages = await loadConversationContext(channelId, jid, 12);
-
       const reply = await generateWithGemini({ systemPrompt, messages, projectId, location });
 
       if (!reply) throw new Error("Gemini no generó respuesta.");
@@ -452,14 +552,12 @@ exports.followupTickHourly = functions
     
     for (const channelDoc of channelsSnap.docs) {
       const channelId = channelDoc.id;
-      const followupConfigSnap = await db.doc(`channels/${channelId}/runtime/followup`).get();
       
-      const config = followupConfigSnap.exists ? followupConfigSnap.data() : {
-        enabled: false, 
-        businessHours: { startHour: 8, endHour: 22, timezone: "America/Mexico_City" }, 
-        maxTouches: 9, 
-        cadenceHours: [1, 3, 5, 8, 13, 21, 34, 55, 89]
-      };
+      const access = await getChannelAccess(channelId);
+      if (access.blocked) continue;
+
+      const followupConfigSnap = await db.doc(`channels/${channelId}/runtime/followup`).get();
+      const config = followupConfigSnap.exists ? followupConfigSnap.data() : { enabled: false };
 
       if (!config.enabled) continue;
 
@@ -477,7 +575,6 @@ exports.followupTickHourly = functions
       for (const convDoc of convsSnap.docs) {
         const jid = convDoc.id;
         const state = convDoc.data();
-        
         const step = state.followupStage || 0;
         if (step >= (config.maxTouches || 9)) {
           await convDoc.ref.update({ followupStopReason: "COMPLETED", followupEnabled: false });
@@ -490,7 +587,6 @@ exports.followupTickHourly = functions
 
         const hoursSinceCustomer = (Date.now() - lastCustomerAt.getTime()) / (1000 * 60 * 60);
         const hoursSinceBot = lastSentAt ? (Date.now() - lastSentAt.getTime()) / (1000 * 60 * 60) : 999;
-
         const schedule = config.cadenceHours || [1, 3, 5, 8, 13, 21, 34, 55, 89];
 
         if (hoursSinceCustomer >= schedule[step] && hoursSinceBot >= 1) {
@@ -508,7 +604,6 @@ exports.followupTickHourly = functions
               kbDocs, isFollowup: true, step 
             });
             const messages = await loadConversationContext(channelId, jid, 6);
-
             const reply = await generateWithGemini({ systemPrompt, messages, projectId, location: "us-central1" });
             if (!reply) throw new Error("Gemini no generó follow-up.");
 
