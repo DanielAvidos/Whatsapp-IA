@@ -1,3 +1,4 @@
+
 /**
  * Auto-reply WhatsApp Bot (DEV/PROD)
  * Trigger: Firestore onCreate (Gen1 / v1 API)
@@ -7,13 +8,17 @@ const functions = require("firebase-functions/v1");
 const logger = require("firebase-functions/logger");
 const admin = require("firebase-admin");
 const { VertexAI } = require("@google-cloud/vertexai");
+const { Storage } = require("@google-cloud/storage");
+const pdf = require("pdf-parse");
+const fs = require("fs");
+const path = require("path");
+const os = require("os");
 
 admin.initializeApp();
 const db = admin.firestore();
+const storage = new Storage();
 
 // --- MODEL LOCK ---
-// ESTA CONSTANTE BLOQUEA EL MODELO PARA EVITAR REGRESIONES A VERSIONES OBSOLETAS O INESTABLES.
-// NO MODIFICAR SIN PRUEBAS DE COMPATIBILIDAD CON VERTEX AI SDK.
 const GEMINI_MODEL_LOCKED = "gemini-2.5-flash";
 
 function safeText(v) {
@@ -46,7 +51,30 @@ async function loadConversationContext(channelId, jid, limitCount = 12) {
   }
 }
 
-function buildSystemPrompt({ salesStrategy, productDetails }) {
+/**
+ * Carga los documentos de conocimiento listos del canal.
+ */
+async function loadKnowledgeBaseDocs(channelId) {
+  try {
+    const snap = await db
+      .collection(`channels/${channelId}/runtime/kb_docs`)
+      .where("status", "==", "READY")
+      .orderBy("processedAt", "desc")
+      .limit(5)
+      .get();
+    
+    return snap.docs.map(d => ({
+      fileName: d.data().fileName,
+      summary: d.data().summary,
+      extractedText: d.data().extractedText || "",
+    }));
+  } catch (error) {
+    logger.error("[BOT] Error loading KB docs", { channelId, error: error.message });
+    return [];
+  }
+}
+
+function buildSystemPrompt({ salesStrategy, productDetails, kbDocs }) {
   const hardRules = `
 Eres un asistente automático experto en WhatsApp.
 REGLAS GLOBALES:
@@ -57,6 +85,14 @@ REGLAS GLOBALES:
 - Responde en el idioma del usuario.
 `.trim();
 
+  let kbSection = "";
+  if (kbDocs && kbDocs.length > 0) {
+    kbSection = "\n=== CONOCIMIENTO POR DOCUMENTOS ===\n";
+    kbDocs.forEach(doc => {
+      kbSection += `Documento: ${doc.fileName}\nResumen: ${doc.summary}\nContenido Relevante: ${doc.extractedText.slice(0, 3000)}\n---\n`;
+    });
+  }
+
   return `
 ${hardRules}
 
@@ -65,6 +101,7 @@ ${salesStrategy || "Responde como asistente profesional. Si falta info, haz 1 pr
 
 === BASE DE CONOCIMIENTO (PRODUCTO/SERVICIO) ===
 ${productDetails || ""}
+${kbSection}
 `.trim();
 }
 
@@ -86,7 +123,7 @@ async function getBotConfig(channelId) {
 
   return {
     enabled: d?.enabled !== undefined ? !!d.enabled : true,
-    model: GEMINI_MODEL_LOCKED, // MODELO BLOQUEADO PARA ESTABILIDAD
+    model: GEMINI_MODEL_LOCKED,
     productDetails: safeText(d?.productDetails),
     salesStrategy: safeText(d?.salesStrategy),
   };
@@ -130,18 +167,17 @@ async function setBotSuccess(channelId) {
 }
 
 /**
- * Genera respuesta usando el historial de mensajes.
+ * Genera respuesta usando el historial de mensajes y el conocimiento base.
  */
 async function generateWithGemini({ systemPrompt, messages, projectId, location }) {
   const vertexAI = new VertexAI({ project: projectId, location });
   const genModel = vertexAI.getGenerativeModel({
-    model: GEMINI_MODEL_LOCKED, // SIEMPRE USA EL MODELO BLOQUEADO
+    model: GEMINI_MODEL_LOCKED,
     generationConfig: { maxOutputTokens: 512, temperature: 0.6 },
   });
 
-  // Formateamos el historial para que Gemini lo entienda como un diálogo
   const historyString = messages
-    .map(m => `${m.role}: ${m.text}`)
+    .map(m => `${m.role.toUpperCase()}: ${m.text}`)
     .join("\n");
 
   const fullPrompt = `${systemPrompt}\n\n=== HISTORIAL DE CONVERSACIÓN ===\n${historyString}\n\nASSISTANT:`;
@@ -194,7 +230,6 @@ exports.autoReplyOnIncomingMessage = functions
 
     if (!text) return null;
 
-    // Ignorar si es enviado por nosotros o por el bot
     if (fromMe || isBot) {
       await db.doc(`channels/${channelId}/runtime/bot`).set(
         {
@@ -209,36 +244,27 @@ exports.autoReplyOnIncomingMessage = functions
 
     logger.info("[BOT] Trigger detectado", { channelId, jid, messageId });
 
-    // Idempotencia
     const isNew = await markProcessed(channelId, messageId, { jid, text });
-    if (!isNew) {
-      logger.info("[BOT] Mensaje ya procesado", { messageId });
-      return null;
-    }
+    if (!isNew) return null;
 
     try {
-      // 1. Obtener configuración
       const bot = await getBotConfig(channelId);
-      if (!bot.enabled) {
-        logger.info("[BOT] El bot está desactivado para este canal", { channelId });
-        return null;
-      }
+      if (!bot.enabled) return null;
 
       const workerUrl = await getWorkerUrl();
       const projectId = process.env.GOOGLE_CLOUD_PROJECT || admin.app().options.projectId;
       const location = "us-central1";
 
+      // Cargar conocimiento extendido
+      const kbDocs = await loadKnowledgeBaseDocs(channelId);
       const systemPrompt = buildSystemPrompt({
         salesStrategy: bot.salesStrategy,
         productDetails: bot.productDetails,
+        kbDocs,
       });
 
-      // 2. Cargar contexto (historial)
-      logger.info("[BOT] Cargando contexto de conversación", { jid });
       const messages = await loadConversationContext(channelId, jid, 12);
 
-      // 3. Generar respuesta con Gemini
-      logger.info("[BOT] Generando respuesta con Gemini", { model: GEMINI_MODEL_LOCKED });
       const reply = await generateWithGemini({
         systemPrompt,
         messages,
@@ -246,10 +272,8 @@ exports.autoReplyOnIncomingMessage = functions
         location,
       });
 
-      if (!reply) throw new Error("Gemini no generó ninguna respuesta válida.");
+      if (!reply) throw new Error("Gemini no generó respuesta.");
 
-      // 4. Enviar vía worker
-      logger.info("[BOT] Enviando respuesta al worker", { toJid: jid });
       await sendViaWorker({ 
         workerUrl, 
         channelId, 
@@ -258,7 +282,6 @@ exports.autoReplyOnIncomingMessage = functions
         meta: { triggerMessageId: messageId }
       });
 
-      // 5. Registrar éxito
       await setBotSuccess(channelId);
       logger.info("[BOT] Flujo completado con éxito", { channelId, jid });
 
@@ -266,6 +289,96 @@ exports.autoReplyOnIncomingMessage = functions
       const msg = err?.message || String(err);
       logger.error("[BOT] Error crítico en el flujo", { channelId, messageId, error: msg });
       await setBotError(channelId, msg, { lastFailMessagePath: snapshot.ref.path });
+    }
+
+    return null;
+  });
+
+/**
+ * Trigger: Procesa archivos subidos a la base de conocimientos.
+ */
+exports.onKnowledgeFileFinalize = functions
+  .region("us-central1")
+  .storage.object()
+  .onFinalize(async (object) => {
+    const filePath = object.name; // channels/{channelId}/kb/{docId}/{fileName}
+    
+    if (!filePath.startsWith("channels/") || !filePath.includes("/kb/")) {
+      return null;
+    }
+
+    const parts = filePath.split("/");
+    const channelId = parts[1];
+    const docId = parts[3];
+    const fileName = parts[4];
+
+    logger.info("[KB] Procesando archivo", { channelId, docId, fileName });
+
+    const docRef = db.doc(`channels/${channelId}/runtime/kb_docs/${docId}`);
+    const projectId = process.env.GOOGLE_CLOUD_PROJECT || admin.app().options.projectId;
+    const location = "us-central1";
+    
+    try {
+      const bucket = storage.bucket(object.bucket);
+      const tempFilePath = path.join(os.tmpdir(), fileName);
+      await bucket.file(filePath).download({ destination: tempFilePath });
+
+      let extractedText = "";
+      const contentType = object.contentType || "";
+
+      if (contentType.includes("pdf")) {
+        const dataBuffer = fs.readFileSync(tempFilePath);
+        const data = await pdf(dataBuffer);
+        extractedText = data.text;
+      } else if (contentType.includes("image")) {
+        const vertexAI = new VertexAI({ project: projectId, location });
+        const genModel = vertexAI.getGenerativeModel({ model: GEMINI_MODEL_LOCKED });
+        
+        const base64Image = fs.readFileSync(tempFilePath, { encoding: "base64" });
+        const result = await genModel.generateContent({
+          contents: [{
+            role: "user",
+            parts: [
+              { text: "Extrae toda la información técnica y relevante de esta imagen para un sistema de atención al cliente. Si hay tablas o datos estructurados, lístalos claramente." },
+              { inlineData: { mimeType: contentType, data: base64Image } }
+            ]
+          }]
+        });
+        extractedText = result?.response?.candidates?.[0]?.content?.parts?.map(p => p.text).join("") || "";
+      }
+
+      fs.unlinkSync(tempFilePath);
+
+      if (!extractedText.trim()) throw new Error("No se pudo extraer texto del archivo.");
+
+      // Generar resumen corto
+      const vertexAI = new VertexAI({ project: projectId, location });
+      const genModel = vertexAI.getGenerativeModel({ model: GEMINI_MODEL_LOCKED });
+      const summaryResult = await genModel.generateContent({
+        contents: [{
+          role: "user",
+          parts: [{ text: `Resume la siguiente información extraída de un documento para atención al cliente. Produce entre 5 y 10 puntos clave. \n\nInformación:\n${extractedText.slice(0, 15000)}` }]
+        }]
+      });
+      const summary = summaryResult?.response?.candidates?.[0]?.content?.parts?.map(p => p.text).join("") || "Resumen no disponible.";
+
+      await docRef.set({
+        status: "READY",
+        extractedText: extractedText.slice(0, 30000),
+        summary,
+        processedAt: admin.firestore.FieldValue.serverTimestamp(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      }, { merge: true });
+
+      logger.info("[KB] Archivo procesado correctamente", { channelId, docId });
+
+    } catch (error) {
+      logger.error("[KB] Error procesando archivo", { channelId, docId, error: error.message });
+      await docRef.set({
+        status: "ERROR",
+        error: error.message,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      }, { merge: true });
     }
 
     return null;

@@ -1,9 +1,10 @@
+
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { Loader2, ScanQrCode, LogOut, RotateCcw, MessageSquare, Link as LinkIcon, Send, Bot, FileText, Save, History, Brain, Info, AlertCircle, CheckCircle2, ShieldAlert, ChevronDown, Terminal, RefreshCw } from 'lucide-react';
-import { useFirestore, useDoc, useMemoFirebase, useCollection, useUser, setDocumentNonBlocking } from '@/firebase';
-import { doc, collection, query, orderBy, limit, Timestamp, serverTimestamp } from 'firebase/firestore';
+import { Loader2, ScanQrCode, LogOut, RotateCcw, MessageSquare, Link as LinkIcon, Send, Bot, FileText, Save, History, Brain, Info, AlertCircle, CheckCircle2, ShieldAlert, ChevronDown, Terminal, RefreshCw, PlusCircle, Trash2 } from 'lucide-react';
+import { useFirestore, useDoc, useMemoFirebase, useCollection, useUser, setDocumentNonBlocking, useFirebase } from '@/firebase';
+import { doc, collection, query, orderBy, limit, Timestamp, serverTimestamp, setDoc, updateDoc, deleteDoc } from 'firebase/firestore';
 import { PageHeader } from '@/components/app/page-header';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -25,6 +26,7 @@ import { Textarea } from '@/components/ui/textarea';
 import { useToast } from '@/hooks/use-toast';
 import { Badge } from '@/components/ui/badge';
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion';
+import { Progress } from '@/components/ui/progress';
 
 export function ChannelDetailPage({ channelId }: { channelId: string }) {
   const { t } = useLanguage();
@@ -158,7 +160,6 @@ function ChatbotConfig({ channelId }: { channelId: string }) {
   const { data: botConfig, isLoading } = useDoc<BotConfig>(botRef);
   const { data: runtimeConfig } = useDoc<any>(runtimeConfigRef);
 
-  // Local state for editing
   const [localProductContent, setLocalProductContent] = useState('');
   const [localSalesContent, setLocalSalesContent] = useState('');
 
@@ -183,7 +184,7 @@ function ChatbotConfig({ channelId }: { channelId: string }) {
     };
 
     setDocumentNonBlocking(botRef, data, { merge: true });
-    toast({ title: 'Configuración guardada en Firestore' });
+    toast({ title: 'Configuración guardada' });
   };
 
   const formatDate = (val: any) => {
@@ -200,7 +201,7 @@ function ChatbotConfig({ channelId }: { channelId: string }) {
         <Alert className="bg-primary/5 border-primary/20">
           <Info className="h-4 w-4" />
           <AlertTitle>Configuración de IA (Firestore)</AlertTitle>
-          <AlertDescription>El bot se activa automáticamente al recibir mensajes mediante Cloud Functions si el switch está ON.</AlertDescription>
+          <AlertDescription>El bot se activa automáticamente al recibir mensajes si el switch está ON.</AlertDescription>
         </Alert>
 
         {botConfig?.lastAutoReplyAt && (
@@ -283,37 +284,196 @@ function ChatbotConfig({ channelId }: { channelId: string }) {
               )}
             </CardContent>
           </Card>
-
-          <Card className="border-muted bg-muted/20">
-            <CardHeader className="py-3">
-              <div className="flex items-center gap-2 text-sm font-bold text-muted-foreground">
-                <Terminal className="h-4 w-4" />
-                Diagnóstico del Entorno
-              </div>
-            </CardHeader>
-            <CardContent>
-               <div className="space-y-3 text-xs">
-                 <div className="flex items-center justify-between">
-                    <span className="text-muted-foreground">Worker URL (Runtime Config):</span>
-                    <Badge variant="outline" className="font-mono text-[10px]">{runtimeConfig?.workerUrl || 'No configurada'}</Badge>
-                 </div>
-                 <div className="flex items-center justify-between">
-                    <span className="text-muted-foreground">Modelo IA:</span>
-                    <Badge variant="secondary" className="font-mono text-[10px]">{botConfig?.model || 'gemini-2.5-flash'}</Badge>
-                 </div>
-                 <div className="flex items-center justify-between">
-                    <span className="text-muted-foreground">Idempotencia:</span>
-                    <span className="font-mono text-[10px]">Activada (Firestore)</span>
-                 </div>
-               </div>
-            </CardContent>
-          </Card>
         </TabsContent>
 
         <TabsContent value="documents" className="pt-4">
-          <Card className="h-48 flex flex-col items-center justify-center border-dashed"><FileText className="h-10 w-10 text-muted-foreground/30" /><p className="font-medium">Carga de Documentos</p><p className="text-xs text-muted-foreground">Próximamente disponible.</p></Card>
+          <DocumentsTab channelId={channelId} />
         </TabsContent>
       </Tabs>
+    </div>
+  );
+}
+
+function DocumentsTab({ channelId }: { channelId: string }) {
+  const { firestore, firebaseApp } = useFirebase();
+  const { toast } = useToast();
+  const [isUploading, setIsUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
+
+  const docsRef = useMemoFirebase(() => {
+    if (!firestore) return null;
+    return query(collection(firestore, 'channels', channelId, 'runtime', 'kb_docs'), orderBy('createdAt', 'desc'));
+  }, [firestore, channelId]);
+
+  const { data: docs, isLoading } = useCollection<any>(docsRef);
+
+  const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !firebaseApp || !firestore) return;
+
+    const allowedTypes = ['application/pdf', 'image/png', 'image/jpeg', 'image/webp'];
+    if (!allowedTypes.includes(file.type)) {
+      toast({ variant: 'destructive', title: 'Archivo no soportado', description: 'Sube PDF o imágenes (PNG, JPG, WEBP)' });
+      return;
+    }
+
+    setIsUploading(true);
+    setUploadProgress(0);
+
+    try {
+      const { getStorage, ref, uploadBytesResumable, getDownloadURL } = await import('firebase/storage');
+      const storage = getStorage(firebaseApp);
+      const docId = Math.random().toString(36).substring(7);
+      const storagePath = `channels/${channelId}/kb/${docId}/${file.name}`;
+      const fileRef = ref(storage, storagePath);
+
+      const kbDocRef = doc(firestore, 'channels', channelId, 'runtime', 'kb_docs', docId);
+      await setDoc(kbDocRef, {
+        docId,
+        fileName: file.name,
+        contentType: file.type,
+        storagePath,
+        sizeBytes: file.size,
+        status: 'PROCESSING',
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+
+      const uploadTask = uploadBytesResumable(fileRef, file);
+
+      uploadTask.on('state_changed', 
+        (snapshot) => {
+          const progress = (snapshot.bytesTransferred / snapshot.totalBytes) * 100;
+          setUploadProgress(progress);
+        },
+        (error) => {
+          toast({ variant: 'destructive', title: 'Error en subida', description: error.message });
+          setIsUploading(false);
+        },
+        async () => {
+          const downloadUrl = await getDownloadURL(fileRef);
+          await updateDoc(kbDocRef, {
+            downloadUrl,
+            updatedAt: serverTimestamp(),
+          });
+          setIsUploading(false);
+          toast({ title: 'Archivo subido', description: 'El archivo se está procesando...' });
+        }
+      );
+    } catch (error) {
+      toast({ variant: 'destructive', title: 'Error', description: String(error) });
+      setIsUploading(false);
+    }
+  };
+
+  const handleDelete = async (docId: string, storagePath: string) => {
+    if (!firestore || !firebaseApp) return;
+    try {
+      const { getStorage, ref, deleteObject } = await import('firebase/storage');
+      const storage = getStorage(firebaseApp);
+      
+      const fileRef = ref(storage, storagePath);
+      await deleteObject(fileRef).catch(e => console.warn("Storage delete failed", e));
+
+      const kbDocRef = doc(firestore, 'channels', channelId, 'runtime', 'kb_docs', docId);
+      await deleteDoc(kbDocRef);
+
+      toast({ title: 'Documento eliminado' });
+    } catch (error) {
+      toast({ variant: 'destructive', title: 'Error al eliminar', description: String(error) });
+    }
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <h3 className="text-lg font-medium">Documentos de Conocimiento</h3>
+        <div className="relative">
+          <Input 
+            type="file" 
+            className="hidden" 
+            id="file-upload" 
+            accept=".pdf,.png,.jpg,.jpeg,.webp"
+            onChange={handleUpload}
+            disabled={isUploading}
+          />
+          <Button asChild disabled={isUploading}>
+            <label htmlFor="file-upload" className="cursor-pointer">
+              {isUploading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <PlusCircle className="mr-2 h-4 w-4" />}
+              Subir Archivo
+            </label>
+          </Button>
+        </div>
+      </div>
+
+      {isUploading && (
+        <div className="space-y-2">
+          <div className="flex justify-between text-xs">
+            <span>Subiendo...</span>
+            <span>{Math.round(uploadProgress)}%</span>
+          </div>
+          <Progress value={uploadProgress} className="h-1" />
+        </div>
+      )}
+
+      <div className="grid gap-4">
+        {isLoading ? (
+          <div className="space-y-2"><Skeleton className="h-24 w-full" /><Skeleton className="h-24 w-full" /></div>
+        ) : docs?.length === 0 ? (
+          <div className="flex flex-col items-center justify-center p-8 border border-dashed rounded-lg text-muted-foreground">
+            <FileText className="h-8 w-8 mb-2 opacity-20" />
+            <p className="text-sm text-center">No hay documentos cargados.<br/>Sube PDFs o imágenes para entrenar al bot.</p>
+          </div>
+        ) : (
+          docs?.map((doc) => (
+            <Card key={doc.id} className="overflow-hidden">
+              <CardContent className="p-4 flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div className="size-10 rounded bg-primary/10 flex items-center justify-center text-primary">
+                    {doc.contentType.includes('pdf') ? <FileText className="h-5 w-5" /> : <img src={doc.downloadUrl || 'https://picsum.photos/seed/doc/40/40'} className="size-10 object-cover rounded" />}
+                  </div>
+                  <div>
+                    <p className="text-sm font-medium line-clamp-1">{doc.fileName}</p>
+                    <div className="flex items-center gap-2 mt-1">
+                      <StatusBadge status={doc.status} className="text-[10px] h-4 px-1" />
+                      <span className="text-[10px] text-muted-foreground">{(doc.sizeBytes / 1024).toFixed(1)} KB</span>
+                    </div>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  {doc.status === 'READY' && doc.downloadUrl && (
+                    <Button variant="ghost" size="icon" asChild>
+                      <a href={doc.downloadUrl} target="_blank" rel="noreferrer"><LinkIcon className="h-4 w-4" /></a>
+                    </Button>
+                  )}
+                  <Button variant="ghost" size="icon" className="text-destructive" onClick={() => handleDelete(doc.id, doc.storagePath)}>
+                    <Trash2 className="h-4 w-4" />
+                  </Button>
+                </div>
+              </CardContent>
+              {doc.status === 'ERROR' && doc.error && (
+                <div className="px-4 pb-4">
+                  <Alert variant="destructive" className="py-2 text-[10px]">
+                    <AlertCircle className="h-3 w-3" />
+                    <AlertTitle className="text-[10px]">Error de procesamiento</AlertTitle>
+                    <AlertDescription className="text-[10px]">{doc.error}</AlertDescription>
+                  </Alert>
+                </div>
+              )}
+              {doc.status === 'READY' && doc.summary && (
+                <Accordion type="single" collapsible className="border-t px-4">
+                  <AccordionItem value="summary" className="border-0">
+                    <AccordionTrigger className="py-2 text-[10px] hover:no-underline font-bold uppercase tracking-wider text-muted-foreground">Ver Resumen de Conocimiento</AccordionTrigger>
+                    <AccordionContent className="text-[11px] pb-4">
+                      <div className="bg-muted/30 p-2 rounded whitespace-pre-wrap">{doc.summary}</div>
+                    </AccordionContent>
+                  </AccordionItem>
+                </Accordion>
+              )}
+            </Card>
+          ))
+        )}
+      </div>
     </div>
   );
 }
@@ -407,4 +567,3 @@ function MessageThread({ channelId, jid, workerUrl, name }: { channelId: string,
     </>
   );
 }
-
