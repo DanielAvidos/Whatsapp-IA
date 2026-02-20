@@ -2,15 +2,15 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { Loader2, ScanQrCode, LogOut, RotateCcw, MessageSquare, Link as LinkIcon, Send, Bot, FileText, Save, History, Brain, Info, AlertCircle, CheckCircle2, ShieldAlert, ChevronDown, Terminal, RefreshCw, PlusCircle, Trash2 } from 'lucide-react';
-import { useFirestore, useDoc, useMemoFirebase, useCollection, useUser, setDocumentNonBlocking, useFirebase } from '@/firebase';
-import { doc, collection, query, orderBy, limit, Timestamp, serverTimestamp, setDoc, updateDoc, deleteDoc } from 'firebase/firestore';
+import { Loader2, ScanQrCode, LogOut, RotateCcw, MessageSquare, Link as LinkIcon, Send, Bot, FileText, Save, History, Brain, Info, AlertCircle, CheckCircle2, ShieldAlert, ChevronDown, Terminal, RefreshCw, PlusCircle, Trash2, Calendar, Clock, Target, MessageCircle, Settings2, MoreVertical } from 'lucide-react';
+import { useFirestore, useDoc, useMemoFirebase, useCollection, useUser, setDocumentNonBlocking, useFirebase, updateDocumentNonBlocking } from '@/firebase';
+import { doc, collection, query, orderBy, limit, Timestamp, serverTimestamp, setDoc, updateDoc, deleteDoc, where, getDocs } from 'firebase/firestore';
 import { PageHeader } from '@/components/app/page-header';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useLanguage } from '@/context/language-provider';
-import type { WhatsappChannel, Conversation, Message, BotConfig } from '@/lib/types';
+import type { WhatsappChannel, Conversation, Message, BotConfig, FollowupConfig } from '@/lib/types';
 import { StatusBadge } from '@/components/app/status-badge';
 import { QrCodeDialog } from '@/components/app/qr-code-dialog';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -27,6 +27,8 @@ import { useToast } from '@/hooks/use-toast';
 import { Badge } from '@/components/ui/badge';
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion';
 import { Progress } from '@/components/ui/progress';
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, DropdownMenuSeparator } from '@/components/ui/dropdown-menu';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 
 export function ChannelDetailPage({ channelId }: { channelId: string }) {
   const { t } = useLanguage();
@@ -68,7 +70,7 @@ export function ChannelDetailPage({ channelId }: { channelId: string }) {
         <Button variant="outline" asChild><Link href="/channels">Volver a Canales</Link></Button>
       </PageHeader>
       
-      {!workerUrl && (
+      {!workerUrl && (activeTab === 'connection' || activeTab === 'chats') && (
         <Alert variant="destructive" className="mb-4">
           <AlertTitle>Configuración Incompleta</AlertTitle>
           <AlertDescription>La variable de entorno NEXT_PUBLIC_BAILEYS_WORKER_URL no está configurada.</AlertDescription>
@@ -152,13 +154,7 @@ function ChatbotConfig({ channelId }: { channelId: string }) {
     return doc(firestore, 'channels', channelId, 'runtime', 'bot');
   }, [firestore, channelId]);
 
-  const runtimeConfigRef = useMemoFirebase(() => {
-    if (!firestore) return null;
-    return doc(firestore, 'runtime', 'config');
-  }, [firestore]);
-
-  const { data: botConfig, isLoading } = useDoc<BotConfig>(botRef);
-  const { data: runtimeConfig } = useDoc<any>(runtimeConfigRef);
+  const { data: botConfig, isLoading: isBotLoading } = useDoc<BotConfig>(botRef);
 
   const [localProductContent, setLocalProductContent] = useState('');
   const [localSalesContent, setLocalSalesContent] = useState('');
@@ -170,7 +166,7 @@ function ChatbotConfig({ channelId }: { channelId: string }) {
     }
   }, [botConfig]);
 
-  const handleSave = async (overrides: Partial<BotConfig> = {}) => {
+  const handleSaveBot = async (overrides: Partial<BotConfig> = {}) => {
     if (!firestore || !user || !botRef) return;
     
     const data = {
@@ -184,7 +180,7 @@ function ChatbotConfig({ channelId }: { channelId: string }) {
     };
 
     setDocumentNonBlocking(botRef, data, { merge: true });
-    toast({ title: 'Configuración guardada' });
+    toast({ title: 'Configuración de IA guardada' });
   };
 
   const formatDate = (val: any) => {
@@ -197,29 +193,29 @@ function ChatbotConfig({ channelId }: { channelId: string }) {
 
   return (
     <div className="space-y-6">
-      <div className="grid gap-4 md:grid-cols-2">
-        <Alert className="bg-primary/5 border-primary/20">
-          <Info className="h-4 w-4" />
-          <AlertTitle>Configuración de IA (Firestore)</AlertTitle>
-          <AlertDescription>El bot se activa automáticamente al recibir mensajes si el switch está ON.</AlertDescription>
-        </Alert>
-
-        {botConfig?.lastAutoReplyAt && (
-          <Alert className="bg-green-500/5 border-green-500/20">
-            <CheckCircle2 className="h-4 w-4 text-green-500" />
-            <AlertTitle>Actividad del Bot</AlertTitle>
-            <AlertDescription>Última respuesta: {formatDate(botConfig.lastAutoReplyAt)}</AlertDescription>
-          </Alert>
-        )}
-      </div>
-
       <Tabs value={activeSubTab} onValueChange={setActiveSubTab} className="w-full">
-        <TabsList className="grid w-full grid-cols-2 max-w-md">
+        <TabsList className="grid w-full grid-cols-3 max-w-lg">
           <TabsTrigger value="training" className="flex items-center gap-2"><Brain className="h-4 w-4" />Entrenamiento</TabsTrigger>
           <TabsTrigger value="documents" className="flex items-center gap-2"><FileText className="h-4 w-4" />Documentos</TabsTrigger>
+          <TabsTrigger value="followup" className="flex items-center gap-2"><History className="h-4 w-4" />Seguimiento</TabsTrigger>
         </TabsList>
 
         <TabsContent value="training" className="space-y-4 pt-4">
+          <div className="grid gap-4 md:grid-cols-2 mb-4">
+            <Alert className="bg-primary/5 border-primary/20">
+              <Info className="h-4 w-4" />
+              <AlertTitle>Configuración de IA</AlertTitle>
+              <AlertDescription>El bot responde automáticamente usando conocimiento base y estrategia de ventas.</AlertDescription>
+            </Alert>
+            {botConfig?.lastAutoReplyAt && (
+              <Alert className="bg-green-500/5 border-green-500/20">
+                <CheckCircle2 className="h-4 w-4 text-green-500" />
+                <AlertTitle>Actividad del Bot</AlertTitle>
+                <AlertDescription>Última respuesta: {formatDate(botConfig.lastAutoReplyAt)}</AlertDescription>
+              </Alert>
+            )}
+          </div>
+
           <Card>
             <CardHeader className="flex flex-row items-center justify-between space-y-0">
               <div className="space-y-1">
@@ -230,14 +226,14 @@ function ChatbotConfig({ channelId }: { channelId: string }) {
                 <Switch 
                   id="bot-enabled" 
                   checked={botConfig?.enabled || false} 
-                  onCheckedChange={(checked) => handleSave({ enabled: checked } as any)}
-                  disabled={isLoading}
+                  onCheckedChange={(checked) => handleSaveBot({ enabled: checked })}
+                  disabled={isBotLoading}
                 />
                 <Label htmlFor="bot-enabled">IA Activada</Label>
               </div>
             </CardHeader>
             <CardContent className="space-y-6">
-              {isLoading ? (
+              {isBotLoading ? (
                 <div className="space-y-4"><Skeleton className="h-32 w-full" /><Skeleton className="h-32 w-full" /></div>
               ) : (
                 <>
@@ -264,9 +260,9 @@ function ChatbotConfig({ channelId }: { channelId: string }) {
                       <History className="h-3 w-3" />
                       {botConfig?.updatedAt ? `Actualizado por ${botConfig.updatedByEmail} el ${formatDate(botConfig.updatedAt)}` : 'Sin datos'}
                     </div>
-                    <Button onClick={() => handleSave()} disabled={isLoading}>
+                    <Button onClick={() => handleSaveBot()}>
                       <Save className="mr-2 h-4 w-4" />
-                      Guardar en Firestore
+                      Guardar Conocimiento
                     </Button>
                   </div>
                   
@@ -289,7 +285,160 @@ function ChatbotConfig({ channelId }: { channelId: string }) {
         <TabsContent value="documents" className="pt-4">
           <DocumentsTab channelId={channelId} />
         </TabsContent>
+
+        <TabsContent value="followup" className="pt-4">
+          <FollowupConfigTab channelId={channelId} />
+        </TabsContent>
       </Tabs>
+    </div>
+  );
+}
+
+function FollowupConfigTab({ channelId }: { channelId: string }) {
+  const { user } = useUser();
+  const firestore = useFirestore();
+  const { toast } = useToast();
+  
+  const followupRef = useMemoFirebase(() => {
+    if (!firestore) return null;
+    return doc(firestore, 'channels', channelId, 'runtime', 'followup');
+  }, [firestore, channelId]);
+
+  const { data: config, isLoading } = useDoc<FollowupConfig>(followupRef);
+
+  // Stats
+  const activeFollowupsQuery = useMemoFirebase(() => {
+    if (!firestore) return null;
+    return query(collection(firestore, 'channels', channelId, 'conversations'), where('followupEnabled', '==', true));
+  }, [firestore, channelId]);
+  const { data: activeConversations } = useCollection(activeFollowupsQuery);
+
+  const [formData, setFormData] = useState<Partial<FollowupConfig>>({});
+
+  useEffect(() => {
+    if (config) {
+      setFormData(config);
+    } else if (!isLoading && firestore && user) {
+      // Default config if not exists
+      const defaults: Partial<FollowupConfig> = {
+        enabled: false,
+        businessHours: { startHour: 8, endHour: 22, timezone: "America/Mexico_City" },
+        maxTouches: 9,
+        cadenceHours: [1, 3, 5, 8, 13, 21, 34, 55, 89],
+        stopKeywords: ["alto", "stop", "no me interesa", "deja de escribir", "cancelar", "baja"],
+        resumeKeywords: ["info", "información", "precio", "cotizar", "quiero"],
+        toneProfile: "Profesional, cercano, breve. 1 pregunta por mensaje.",
+        goal: "Convertir a cita/llamada o solicitar datos de contacto.",
+      };
+      setDoc(followupRef!, { ...defaults, updatedAt: serverTimestamp(), updatedByUid: user.uid, updatedByEmail: user.email }, { merge: true });
+    }
+  }, [config, isLoading, firestore, user, followupRef]);
+
+  const handleSave = async () => {
+    if (!followupRef || !user) return;
+    await updateDoc(followupRef, {
+      ...formData,
+      updatedAt: serverTimestamp(),
+      updatedByUid: user.uid,
+      updatedByEmail: user.email,
+    });
+    toast({ title: 'Configuración de seguimiento guardada' });
+  };
+
+  if (isLoading) return <div className="space-y-4"><Skeleton className="h-48 w-full" /><Skeleton className="h-48 w-full" /></div>;
+
+  return (
+    <div className="grid gap-6 md:grid-cols-3">
+      <div className="md:col-span-2 space-y-6">
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0">
+            <div>
+              <CardTitle className="text-lg">Reglas de Seguimiento</CardTitle>
+              <CardDescription>Configura cuándo y cómo el bot contacta proactivamente.</CardDescription>
+            </div>
+            <Switch 
+              checked={formData.enabled || false} 
+              onCheckedChange={(val) => setFormData(prev => ({ ...prev, enabled: val }))} 
+            />
+          </CardHeader>
+          <CardContent className="space-y-6">
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label>Hora Inicio (0-23)</Label>
+                <Input type="number" value={formData.businessHours?.startHour} onChange={(e) => setFormData(prev => ({ ...prev, businessHours: { ...prev.businessHours!, startHour: parseInt(e.target.value) } }))} />
+              </div>
+              <div className="space-y-2">
+                <Label>Hora Fin (0-23)</Label>
+                <Input type="number" value={formData.businessHours?.endHour} onChange={(e) => setFormData(prev => ({ ...prev, businessHours: { ...prev.businessHours!, endHour: parseInt(e.target.value) } }))} />
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <Label>Cadencia (Horas separadas por coma)</Label>
+              <Input 
+                value={formData.cadenceHours?.join(', ')} 
+                onChange={(e) => {
+                  const arr = e.target.value.split(',').map(v => parseInt(v.trim())).filter(v => !isNaN(v));
+                  setFormData(prev => ({ ...prev, cadenceHours: arr, maxTouches: arr.length }));
+                }} 
+              />
+              <p className="text-[10px] text-muted-foreground">Ejemplo: 1, 3, 5, 24, 48... (horas desde el último mensaje del cliente)</p>
+            </div>
+
+            <div className="space-y-2">
+              <Label>Palabras para detener (Separadas por coma)</Label>
+              <Input 
+                value={formData.stopKeywords?.join(', ')} 
+                onChange={(e) => setFormData(prev => ({ ...prev, stopKeywords: e.target.value.split(',').map(v => v.trim()).filter(v => v) }))} 
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label>Objetivo de los mensajes</Label>
+              <Textarea 
+                value={formData.goal} 
+                onChange={(e) => setFormData(prev => ({ ...prev, goal: e.target.value }))}
+                placeholder="Ej: Conseguir una llamada de diagnóstico"
+              />
+            </div>
+
+            <Button className="w-full" onClick={handleSave}><Save className="mr-2 h-4 w-4" /> Guardar Cambios</Button>
+          </CardContent>
+        </Card>
+      </div>
+
+      <div className="space-y-6">
+        <Card>
+          <CardHeader><CardTitle className="text-sm">Estado del Seguimiento</CardTitle></CardHeader>
+          <CardContent className="space-y-4">
+            <div className="flex justify-between items-center py-2 border-b">
+              <span className="text-sm text-muted-foreground">Global Canal:</span>
+              <StatusBadge status={config?.enabled ? 'active' : 'disabled'} />
+            </div>
+            <div className="flex justify-between items-center py-2 border-b">
+              <span className="text-sm text-muted-foreground">Conversaciones Activas:</span>
+              <span className="font-bold">{activeConversations?.length || 0}</span>
+            </div>
+            <div className="flex justify-between items-center py-2 border-b">
+              <span className="text-sm text-muted-foreground">Pasos Configurados:</span>
+              <span className="font-bold">{config?.maxTouches || 0}</span>
+            </div>
+            {config?.updatedAt && (
+              <div className="text-[10px] text-muted-foreground mt-2">
+                Último cambio por {config.updatedByEmail} el {format((config.updatedAt as Timestamp).toDate(), 'PPpp')}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        <Alert className="bg-amber-500/5 border-amber-500/20">
+          <Clock className="h-4 w-4 text-amber-500" />
+          <AlertTitle className="text-xs">Ventana Horaria</AlertTitle>
+          <AlertDescription className="text-[10px]">
+            El seguimiento solo enviará mensajes de {config?.businessHours?.startHour}:00 a {config?.businessHours?.endHour}:00 ({config?.businessHours?.timezone}).
+          </AlertDescription>
+        </Alert>
+      </div>
     </div>
   );
 }
@@ -302,6 +451,7 @@ function DocumentsTab({ channelId }: { channelId: string }) {
 
   const docsRef = useMemoFirebase(() => {
     if (!firestore) return null;
+    // Simple path based on fix for odd segments
     return query(collection(firestore, 'channels', channelId, 'kb_docs'), orderBy('createdAt', 'desc'));
   }, [firestore, channelId]);
 
@@ -430,7 +580,9 @@ function DocumentsTab({ channelId }: { channelId: string }) {
               <CardContent className="p-4 flex items-center justify-between">
                 <div className="flex items-center gap-3">
                   <div className="size-10 rounded bg-primary/10 flex items-center justify-center text-primary">
-                    {doc.contentType.includes('pdf') ? <FileText className="h-5 w-5" /> : <img src={doc.downloadUrl || 'https://picsum.photos/seed/doc/40/40'} className="size-10 object-cover rounded" />}
+                    {doc.contentType.includes('pdf') ? <FileText className="h-5 w-5" /> : (
+                      doc.downloadUrl ? <img src={doc.downloadUrl} className="size-10 object-cover rounded" alt="" /> : <FileText className="h-5 w-5" />
+                    )}
                   </div>
                   <div>
                     <p className="text-sm font-medium line-clamp-1">{doc.fileName}</p>
@@ -490,7 +642,7 @@ function ChatInterface({ channelId, workerUrl }: { channelId: string, workerUrl:
   const { data: conversations, isLoading: isLoadingConversations } = useCollection<Conversation>(conversationsQuery);
 
   return (
-    <div className="grid grid-cols-1 md:grid-cols-3 gap-6 h-[600px]">
+    <div className="grid grid-cols-1 md:grid-cols-3 gap-6 h-[650px]">
       <Card className="md:col-span-1 flex flex-col overflow-hidden">
         <CardHeader className="pb-3"><CardTitle className="text-lg">Conversaciones</CardTitle></CardHeader>
         <CardContent className="flex-1 overflow-hidden p-0">
@@ -498,9 +650,27 @@ function ChatInterface({ channelId, workerUrl }: { channelId: string, workerUrl:
             {isLoadingConversations ? <div className="p-4 space-y-4"><Skeleton className="h-12 w-full" /><Skeleton className="h-12 w-full" /></div> : conversations?.length === 0 ? <div className="p-8 text-center text-sm">No hay conversaciones.</div> : (
               <div className="flex flex-col">
                 {conversations?.map((conv) => (
-                  <button key={conv.jid} onClick={() => setSelectedJid(conv.jid)} className={cn("flex flex-col items-start gap-1 p-4 text-left border-b hover:bg-muted/50", selectedJid === conv.jid && "bg-muted")}>
-                    <div className="flex justify-between w-full font-semibold text-sm truncate">{conv.name || conv.jid}{conv.unreadCount > 0 && <span className="bg-primary text-primary-foreground rounded-full size-5 flex items-center justify-center text-[10px]">{conv.unreadCount}</span>}</div>
-                    <div className="flex justify-between w-full text-xs text-muted-foreground truncate">{conv.lastMessageText || 'Sin mensajes'}<span>{conv.lastMessageAt ? format((conv.lastMessageAt as Timestamp).toDate(), 'HH:mm') : ''}</span></div>
+                  <button 
+                    key={conv.jid} 
+                    onClick={() => setSelectedJid(conv.jid)} 
+                    className={cn("flex flex-col items-start gap-1 p-4 text-left border-b hover:bg-muted/50 transition-colors", selectedJid === conv.jid && "bg-muted")}
+                  >
+                    <div className="flex justify-between w-full font-semibold text-sm truncate">
+                      <span className="truncate flex-1">{conv.name || conv.jid}</span>
+                      <div className="flex items-center gap-1 shrink-0">
+                        {conv.followupStopped && <Badge variant="destructive" className="text-[8px] h-4 px-1">STOP</Badge>}
+                        {conv.followupEnabled && !conv.followupStopped && (
+                          <Badge variant="outline" className="text-[8px] h-4 px-1 bg-green-500/10 text-green-600 border-green-500/20">
+                            FU {conv.followupStage ? `S#${conv.followupStage}` : 'ON'}
+                          </Badge>
+                        )}
+                        {conv.unreadCount > 0 && <span className="bg-primary text-primary-foreground rounded-full size-5 flex items-center justify-center text-[10px]">{conv.unreadCount}</span>}
+                      </div>
+                    </div>
+                    <div className="flex justify-between w-full text-xs text-muted-foreground truncate">
+                      <span className="truncate flex-1">{conv.lastMessageText || 'Sin mensajes'}</span>
+                      <span className="shrink-0 ml-2">{conv.lastMessageAt ? format((conv.lastMessageAt as Timestamp).toDate(), 'HH:mm') : ''}</span>
+                    </div>
                   </button>
                 ))}
               </div>
@@ -508,12 +678,26 @@ function ChatInterface({ channelId, workerUrl }: { channelId: string, workerUrl:
           </ScrollArea>
         </CardContent>
       </Card>
-      <Card className="md:col-span-2 flex flex-col overflow-hidden">{selectedJid ? <MessageThread channelId={channelId} jid={selectedJid} workerUrl={workerUrl} name={conversations?.find(c => c.jid === selectedJid)?.name || selectedJid} /> : <div className="flex flex-col items-center justify-center h-full text-muted-foreground p-8"><MessageSquare className="size-12 mb-4 opacity-20" /><p>Selecciona un chat.</p></div>}</Card>
+      <Card className="md:col-span-2 flex flex-col overflow-hidden">
+        {selectedJid ? (
+          <MessageThread 
+            channelId={channelId} 
+            jid={selectedJid} 
+            workerUrl={workerUrl} 
+            conversation={conversations?.find(c => c.jid === selectedJid)!} 
+          />
+        ) : (
+          <div className="flex flex-col items-center justify-center h-full text-muted-foreground p-8">
+            <MessageSquare className="size-12 mb-4 opacity-20" />
+            <p>Selecciona un chat para ver los mensajes.</p>
+          </div>
+        )}
+      </Card>
     </div>
   );
 }
 
-function MessageThread({ channelId, jid, workerUrl, name }: { channelId: string, jid: string, workerUrl: string, name: string }) {
+function MessageThread({ channelId, jid, workerUrl, conversation }: { channelId: string, jid: string, workerUrl: string, conversation: Conversation }) {
   const firestore = useFirestore();
   const [inputText, setInputText] = useState('');
   const [isSending, setIsSending] = useState(false);
@@ -538,31 +722,126 @@ function MessageThread({ channelId, jid, workerUrl, name }: { channelId: string,
     if (!inputText.trim() || isSending || !workerUrl) return;
     setIsSending(true);
     try {
-      const res = await fetch(`${workerUrl}/v1/channels/${channelId}/messages/send`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ to: jid, text: inputText.trim() }) });
+      const res = await fetch(`${workerUrl}/v1/channels/${channelId}/messages/send`, { 
+        method: 'POST', 
+        headers: { 'Content-Type': 'application/json' }, 
+        body: JSON.stringify({ to: jid, text: inputText.trim() }) 
+      });
       if (!res.ok) throw new Error('Error al enviar');
       setInputText('');
-    } catch (e) { toast({ variant: 'destructive', title: 'Error', description: String(e) }); } finally { setIsSending(false); }
+    } catch (e) { 
+      toast({ variant: 'destructive', title: 'Error', description: String(e) }); 
+    } finally { 
+      setIsSending(false); 
+    }
+  };
+
+  const handleToggleFollowup = async () => {
+    if (!firestore) return;
+    const convRef = doc(firestore, 'channels', channelId, 'conversations', jid);
+    await updateDoc(convRef, { followupEnabled: !conversation.followupEnabled });
+    toast({ title: conversation.followupEnabled ? 'Seguimiento desactivado' : 'Seguimiento activado' });
+  };
+
+  const handleResetFollowup = async () => {
+    if (!firestore) return;
+    const convRef = doc(firestore, 'channels', channelId, 'conversations', jid);
+    await updateDoc(convRef, {
+      followupStage: 0,
+      followupNextAt: null,
+      followupStopped: false,
+      followupStopReason: null,
+      followupStopAt: null,
+      updatedAt: serverTimestamp()
+    });
+    toast({ title: 'Seguimiento reiniciado' });
   };
 
   return (
     <>
-      <CardHeader className="border-b py-3 px-4 flex-row justify-between"><div><CardTitle className="text-sm font-bold">{name}</CardTitle><CardDescription className="text-[10px]">{jid}</CardDescription></div></CardHeader>
+      <CardHeader className="border-b py-3 px-4 flex-row justify-between items-center bg-card">
+        <div className="flex-1 min-w-0">
+          <CardTitle className="text-sm font-bold truncate">{conversation?.name || jid}</CardTitle>
+          <CardDescription className="text-[10px] truncate">{jid}</CardDescription>
+        </div>
+        <div className="flex items-center gap-2">
+          {conversation.followupEnabled ? (
+            <Badge variant="outline" className="bg-green-500/10 text-green-600 border-green-500/20 text-[10px]">
+              FU ACTIVO
+            </Badge>
+          ) : (
+            <Badge variant="outline" className="text-[10px]">FU INACTIVO</Badge>
+          )}
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild><Button variant="ghost" size="icon" className="h-8 w-8"><MoreVertical className="h-4 w-4" /></Button></DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem onClick={handleToggleFollowup}>
+                {conversation.followupEnabled ? 'Desactivar Seguimiento' : 'Activar Seguimiento'}
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={handleResetFollowup}>
+                Reiniciar Seguimiento
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
+      </CardHeader>
+      
       <CardContent className="flex-1 overflow-hidden p-0 relative bg-muted/20">
         <ScrollArea className="h-full p-4">
           {isLoading ? <div className="space-y-4"><Skeleton className="h-10 w-2/3" /><Skeleton className="h-10 w-1/2 ml-auto" /></div> : (
             <div className="flex flex-col gap-2">
               {messages?.map((msg) => (
                 <div key={msg.id} className={cn("max-w-[80%] rounded-lg p-3 text-sm shadow-sm", msg.fromMe ? "bg-primary text-primary-foreground ml-auto rounded-tr-none" : "bg-card mr-auto rounded-tl-none")}>
-                  <p>{msg.text}</p><div className="text-[10px] mt-1 opacity-70 flex justify-end gap-1">{format(new Date(msg.timestamp), 'HH:mm')}{msg.fromMe && <span>{msg.status || 'sent'}</span>}</div>
+                  <p className="whitespace-pre-wrap">{msg.text}</p>
+                  <div className="text-[10px] mt-1 opacity-70 flex justify-end gap-1">
+                    {format(new Date(msg.timestamp), 'HH:mm')}
+                    {msg.fromMe && <span>{msg.status || 'sent'}</span>}
+                    {msg.isBot && <Bot className="h-3 w-3" />}
+                  </div>
                 </div>
               ))}
               <div ref={scrollRef} />
+              
+              {/* Followup Status Block (Debug) */}
+              <div className="mt-8 border-t pt-4">
+                <div className="bg-card/50 rounded-lg p-3 border border-dashed text-[10px] space-y-2">
+                  <p className="font-bold uppercase tracking-wider text-muted-foreground flex items-center gap-1">
+                    <Settings2 className="h-3 w-3" /> Estado del Seguimiento
+                  </p>
+                  <div className="grid grid-cols-2 gap-x-4 gap-y-1">
+                    <span className="text-muted-foreground">Habilitado:</span>
+                    <span className={conversation.followupEnabled ? 'text-green-600 font-bold' : ''}>{conversation.followupEnabled ? 'SÍ' : 'NO'}</span>
+                    
+                    <span className="text-muted-foreground">Etapa Actual:</span>
+                    <span>{conversation.followupStage ?? 0}</span>
+                    
+                    <span className="text-muted-foreground">Próximo Envío:</span>
+                    <span>{conversation.followupNextAt ? format((conversation.followupNextAt as Timestamp).toDate(), 'PPpp') : '---'}</span>
+                    
+                    <span className="text-muted-foreground">Detección STOP:</span>
+                    <span>{conversation.followupStopped ? `SÍ (${conversation.followupStopReason})` : 'NO'}</span>
+                    
+                    <span className="text-muted-foreground">Último del Cliente:</span>
+                    <span>{conversation.followupLastCustomerAt ? format((conversation.followupLastCustomerAt as Timestamp).toDate(), 'PPpp') : '---'}</span>
+                  </div>
+                </div>
+              </div>
             </div>
           )}
         </ScrollArea>
       </CardContent>
-      <div className="p-4 border-t">
-        <form onSubmit={handleSendMessage} className="flex gap-2"><Input placeholder="Escribe un mensaje..." value={inputText} onChange={(e) => setInputText(e.target.value)} disabled={isSending} /><Button type="submit" size="icon" disabled={isSending || !inputText.trim()}>{isSending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}</Button></form>
+      <div className="p-4 border-t bg-card">
+        <form onSubmit={handleSendMessage} className="flex gap-2">
+          <Input 
+            placeholder="Escribe un mensaje..." 
+            value={inputText} 
+            onChange={(e) => setInputText(e.target.value)} 
+            disabled={isSending} 
+          />
+          <Button type="submit" size="icon" disabled={isSending || !inputText.trim()}>
+            {isSending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+          </Button>
+        </form>
       </div>
     </>
   );

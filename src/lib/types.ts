@@ -64,6 +64,24 @@ export type WhatsappChannel = {
   } | null;
 };
 
+export type FollowupConfig = {
+  enabled: boolean;
+  businessHours: {
+    startHour: number;
+    endHour: number;
+    timezone: string;
+  };
+  maxTouches: number;
+  cadenceHours: number[];
+  stopKeywords: string[];
+  resumeKeywords: string[];
+  toneProfile: string;
+  goal: string;
+  updatedAt: Timestamp | FieldValue;
+  updatedByUid: string;
+  updatedByEmail: string;
+};
+
 export type Conversation = {
   id: string;
   jid: string;
@@ -73,6 +91,15 @@ export type Conversation = {
   lastMessageAt: Timestamp | FieldValue | null;
   unreadCount: number;
   updatedAt: Timestamp | FieldValue;
+  // Follow-up fields
+  followupEnabled?: boolean;
+  followupStage?: number;
+  followupNextAt?: Timestamp | null;
+  followupLastSentAt?: Timestamp | null;
+  followupLastCustomerAt?: Timestamp | null;
+  followupStopped?: boolean;
+  followupStopReason?: string | null;
+  followupStopAt?: Timestamp | null;
 };
 
 export type Message = {
