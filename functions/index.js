@@ -76,7 +76,6 @@ function extractName(text) {
 
 /**
  * Trial & Access Control
- * Source of truth: trial.endsAt
  */
 async function getChannelAccess(channelId) {
   const docRef = db.doc(`channels/${channelId}`);
@@ -99,10 +98,10 @@ async function getChannelAccess(channelId) {
 
   const now = admin.firestore.Timestamp.now();
   const isExpired = now.toMillis() > trial.endsAt.toMillis();
+  const isBlockedStatus = trial.status !== "ACTIVE";
   
-  // Only block if strictly expired by date
-  if (isExpired) {
-    return { blocked: true, reason: "TRIAL_EXPIRED", endsAt: trial.endsAt };
+  if (isExpired || isBlockedStatus) {
+    return { blocked: true, reason: isExpired ? "TRIAL_EXPIRED" : "BLOCKED", endsAt: trial.endsAt };
   }
   
   return { blocked: false, endsAt: trial.endsAt };
@@ -286,56 +285,60 @@ function detectOptOut(text) {
 
 /**
  * Admin: Extender Trial (Callable)
- * Role: superadmin@avidos.com
  */
 exports.extendChannelTrial = functions.region("us-central1").https.onCall(async (data, context) => {
   if (!context.auth) {
+    logger.warn("[TRIAL] Unauthenticated request");
     throw new functions.https.HttpsError("unauthenticated", "Auth required");
   }
   
   const userEmail = context.auth.token.email || "";
   if (userEmail.toLowerCase() !== SUPERADMIN_EMAIL) {
-    logger.warn("[TRIAL] Unauthorized attempt", { email: userEmail });
+    logger.warn("[TRIAL] Unauthorized request", { userEmail });
     throw new functions.https.HttpsError("permission-denied", "Only SuperAdmin can extend trials.");
   }
 
-  const { channelId, extendDays } = data;
-  if (!channelId || !extendDays) {
-    throw new functions.https.HttpsError("invalid-argument", "channelId and extendDays are required.");
+  const { channelId, extendDays, endsAt, reason } = data;
+  logger.info("[TRIAL] extend requested", { channelId, extendDays, callerEmail: userEmail });
+
+  try {
+    const channelRef = db.doc(`channels/${channelId}`);
+    const snap = await channelRef.get();
+    
+    if (!snap.exists) {
+      logger.warn("[TRIAL] Channel not found", { channelId });
+      throw new functions.https.HttpsError("not-found", "Channel not found");
+    }
+    
+    const currentData = snap.data();
+    let currentEndsAt = currentData.trial?.endsAt?.toDate() || new Date();
+    
+    // New endsAt
+    let newEndsAt;
+    if (endsAt) {
+      newEndsAt = new Date(endsAt);
+    } else {
+      const baseDate = Math.max(currentEndsAt.getTime(), Date.now());
+      newEndsAt = new Date(baseDate + (extendDays || 30) * 24 * 60 * 60 * 1000);
+    }
+
+    const trialUpdate = {
+      status: "ACTIVE",
+      endsAt: admin.firestore.Timestamp.fromDate(newEndsAt),
+      extendedByUid: context.auth.uid,
+      extendedByEmail: userEmail,
+      extendedAt: admin.firestore.FieldValue.serverTimestamp(),
+      reason: reason || "Extension manual"
+    };
+
+    await channelRef.set({ trial: trialUpdate }, { merge: true });
+    logger.info("[TRIAL] extend success", { channelId, newEndsAt });
+
+    return { ok: true, trial: trialUpdate, channelId };
+  } catch (error) {
+    logger.error("[TRIAL] extend failed", { channelId, error: error.message });
+    throw new functions.https.HttpsError("internal", error.message);
   }
-
-  logger.info("[TRIAL] Extension requested", { channelId, extendDays, by: userEmail });
-
-  const channelRef = db.doc(`channels/${channelId}`);
-  const snap = await channelRef.get();
-  
-  if (!snap.exists) {
-    throw new functions.https.HttpsError("not-found", "Channel not found");
-  }
-  
-  const currentData = snap.data();
-  // Base date is max of (current endsAt OR now)
-  let currentEndsAt = currentData.trial?.endsAt ? currentData.trial.endsAt.toDate() : new Date();
-  const baseTime = Math.max(currentEndsAt.getTime(), Date.now());
-  const newEndsAtDate = new Date(baseTime + (extendDays * 24 * 60 * 60 * 1000));
-
-  const trialUpdate = {
-    status: "ACTIVE",
-    startsAt: currentData.trial?.startsAt || currentData.createdAt || admin.firestore.Timestamp.now(),
-    endsAt: admin.firestore.Timestamp.fromDate(newEndsAtDate),
-    extendedByUid: context.auth.uid,
-    extendedByEmail: userEmail,
-    extendedAt: admin.firestore.FieldValue.serverTimestamp(),
-  };
-
-  await channelRef.set({ 
-    trial: trialUpdate,
-    updatedAt: admin.firestore.FieldValue.serverTimestamp()
-  }, { merge: true });
-
-  logger.info("[TRIAL] Extension successful", { channelId, newEndsAt: newEndsAtDate.toISOString() });
-
-  return { ok: true, trial: trialUpdate, channelId };
 });
 
 /**
@@ -531,16 +534,26 @@ exports.onIncomingMessageUpdateFollowupState = functions
         await convRef.set({
           followupStopped: true,
           followupEnabled: false,
+          followupNextAt: null,
           followupStopReason: "OPTOUT",
           followupStopAt: now,
           updatedAt: now
         }, { merge: true });
       } else {
+        // Reset follow-up state when customer replies
+        const followupConfigSnap = await db.doc(`channels/${channelId}/runtime/followup`).get();
+        const config = followupConfigSnap.exists ? followupConfigSnap.data() : {};
+        const cadence = config.cadenceHours || [1, 3, 5, 8, 13, 21, 34, 55, 89];
+        
+        // Next follow-up timestamp (step 0 cadence)
+        const nextAtDate = new Date(Date.now() + (cadence[0] || 1) * 3600000);
+
         await convRef.set({
           followupStage: 0,
+          followupStopped: false,
           followupLastCustomerAt: now,
           followupStopReason: "CUSTOMER_REPLIED",
-          followupNextAt: null,
+          followupNextAt: admin.firestore.Timestamp.fromDate(nextAtDate),
           updatedAt: now
         }, { merge: true });
       }
@@ -561,6 +574,9 @@ exports.followupTickHourly = functions
   .pubsub
   .schedule("every 60 minutes")
   .onRun(async (context) => {
+    const nowTs = admin.firestore.Timestamp.now();
+    logger.info("[FOLLOWUP] Tick start", { now: nowTs.toDate().toISOString() });
+
     const channelsSnap = await db.collection("channels").get();
     
     for (const channelDoc of channelsSnap.docs) {
@@ -572,11 +588,18 @@ exports.followupTickHourly = functions
       const followupConfigSnap = await db.doc(`channels/${channelId}/runtime/followup`).get();
       const config = followupConfigSnap.exists ? followupConfigSnap.data() : { enabled: false };
 
-      if (!config.enabled) continue;
+      if (!config.enabled) {
+        logger.info("[FOLLOWUP] Channel disabled", { channelId });
+        continue;
+      }
 
       const nowInTz = DateTime.now().setZone(config.businessHours?.timezone || "America/Mexico_City");
-      if (nowInTz.hour < (config.businessHours?.startHour || 8) || nowInTz.hour >= (config.businessHours?.endHour || 22)) continue;
+      if (nowInTz.hour < (config.businessHours?.startHour || 8) || nowInTz.hour >= (config.businessHours?.endHour || 22)) {
+        logger.info("[FOLLOWUP] Outside business hours", { channelId, hour: nowInTz.hour });
+        continue;
+      }
 
+      // Query conversations with follow-up enabled and not stopped
       const convsSnap = await db.collection(`channels/${channelId}/conversations`)
         .where("followupEnabled", "==", true)
         .where("followupStopped", "==", false)
@@ -585,57 +608,100 @@ exports.followupTickHourly = functions
       const workerUrl = await getWorkerUrl();
       const projectId = process.env.GOOGLE_CLOUD_PROJECT || admin.app().options.projectId;
 
+      let metrics = { total: convsSnap.size, eligible: 0, sent: 0, errors: 0, skippedLock: 0, skippedNoNextAt: 0, backfilled: 0 };
+
       for (const convDoc of convsSnap.docs) {
         const jid = convDoc.id;
         const state = convDoc.data();
         const step = state.followupStage || 0;
-        if (step >= (config.maxTouches || 9)) {
-          await convDoc.ref.update({ followupStopReason: "COMPLETED", followupEnabled: false });
+        const cadence = config.cadenceHours || [1, 3, 5, 8, 13, 21, 34, 55, 89];
+
+        // 1. Backfill if followupNextAt is missing
+        if (!state.followupNextAt && state.followupLastCustomerAt) {
+          const lastCust = state.followupLastCustomerAt.toDate();
+          const backfillDate = new Date(lastCust.getTime() + (cadence[step] || 24) * 3600000);
+          await convDoc.ref.update({ followupNextAt: admin.firestore.Timestamp.fromDate(backfillDate) });
+          metrics.backfilled++;
+          continue; // Skip sending in the same tick to avoid spam
+        }
+
+        if (!state.followupNextAt) {
+          metrics.skippedNoNextAt++;
           continue;
         }
 
-        const lastCustomerAt = state.followupLastCustomerAt?.toDate();
-        const lastSentAt = state.followupLastSentAt?.toDate();
-        if (!lastCustomerAt) continue;
+        // 2. Eligibility check by timestamp
+        if (state.followupNextAt.toMillis() > nowTs.toMillis()) {
+          continue;
+        }
 
-        const hoursSinceCustomer = (Date.now() - lastCustomerAt.getTime()) / (1000 * 60 * 60);
-        const hoursSinceBot = lastSentAt ? (Date.now() - lastSentAt.getTime()) / (1000 * 60 * 60) : 999;
-        const schedule = config.cadenceHours || [1, 3, 5, 8, 13, 21, 34, 55, 89];
+        metrics.eligible++;
 
-        if (hoursSinceCustomer >= schedule[step] && hoursSinceBot >= 1) {
-          const lockId = nowInTz.toFormat("yyyyMMddHH");
-          const lockRef = convDoc.ref.collection("followup_locks").doc(lockId);
-          const lockSnap = await lockRef.get();
-          if (lockSnap.exists) continue;
-          await lockRef.set({ lockedAt: admin.firestore.FieldValue.serverTimestamp() });
+        // 3. Max touches check
+        if (step >= (config.maxTouches || cadence.length)) {
+          await convDoc.ref.update({ followupStopReason: "COMPLETED", followupEnabled: false, followupNextAt: null });
+          continue;
+        }
 
-          try {
-            const bot = await getBotConfig(channelId);
-            const kbDocs = await loadKnowledgeBaseDocs(channelId);
-            const systemPrompt = buildSystemPrompt({ 
-              salesStrategy: bot.salesStrategy, productDetails: bot.productDetails, 
-              kbDocs, isFollowup: true, step 
-            });
-            const messages = await loadConversationContext(channelId, jid, 6);
-            const reply = await generateWithGemini({ systemPrompt, messages, projectId, location: "us-central1" });
-            if (!reply) throw new Error("Gemini no generó follow-up.");
+        // 4. Idempotency lock
+        const lockId = nowInTz.toFormat("yyyyMMddHH");
+        const lockRef = convDoc.ref.collection("followup_locks").doc(lockId);
+        const lockSnap = await lockRef.get();
+        if (lockSnap.exists) {
+          metrics.skippedLock++;
+          continue;
+        }
+        await lockRef.set({ lockedAt: admin.firestore.FieldValue.serverTimestamp() });
 
-            await sendViaWorker({ 
-              workerUrl, channelId, toJid: jid, text: reply, 
-              meta: { type: "followup", step: step + 1 } 
-            });
+        try {
+          const bot = await getBotConfig(channelId);
+          const kbDocs = await loadKnowledgeBaseDocs(channelId);
+          const systemPrompt = buildSystemPrompt({ 
+            salesStrategy: bot.salesStrategy, productDetails: bot.productDetails, 
+            kbDocs, isFollowup: true, step 
+          });
+          const messages = await loadConversationContext(channelId, jid, 6);
+          const reply = await generateWithGemini({ systemPrompt, messages, projectId, location: "us-central1" });
+          
+          if (!reply) throw new Error("Gemini no generó follow-up.");
 
-            await convDoc.ref.update({
-              followupStage: step + 1,
-              followupLastSentAt: admin.firestore.FieldValue.serverTimestamp(),
-              followupNextAt: admin.firestore.Timestamp.fromDate(new Date(Date.now() + (schedule[step+1] || 24) * 3600000)),
-              updatedAt: admin.firestore.FieldValue.serverTimestamp()
-            });
-          } catch (e) {
-            logger.error(`[FOLLOWUP] Error en ${jid}`, e.message);
+          await sendViaWorker({ 
+            workerUrl, channelId, toJid: jid, text: reply, 
+            meta: { type: "followup", step: step + 1 } 
+          });
+
+          // Calculate next step
+          const nextStep = step + 1;
+          let nextAt = null;
+          let followupEnabled = true;
+          let stopReason = state.followupStopReason || null;
+
+          if (nextStep < (config.maxTouches || cadence.length)) {
+            const nextInterval = cadence[nextStep] || 24;
+            const lastCust = state.followupLastCustomerAt?.toDate() || new Date();
+            nextAt = admin.firestore.Timestamp.fromDate(new Date(lastCust.getTime() + nextInterval * 3600000));
+          } else {
+            followupEnabled = false;
+            stopReason = "COMPLETED";
           }
+
+          await convDoc.ref.update({
+            followupStage: nextStep,
+            followupLastSentAt: admin.firestore.FieldValue.serverTimestamp(),
+            followupNextAt: nextAt,
+            followupEnabled: followupEnabled,
+            followupStopReason: stopReason,
+            updatedAt: admin.firestore.FieldValue.serverTimestamp()
+          });
+
+          metrics.sent++;
+        } catch (e) {
+          metrics.errors++;
+          logger.error(`[FOLLOWUP] Error en ${jid}`, e.message);
         }
       }
+
+      logger.info("[FOLLOWUP] Channel metrics", { channelId, metrics });
     }
   });
 
