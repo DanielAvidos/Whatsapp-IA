@@ -3,6 +3,7 @@
 
 import React, { useEffect, useState } from 'react';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import { useFirestore, useMemoFirebase, useCollection, useUser, useFirebase } from '@/firebase';
 import { collection, query, where, doc, updateDoc, serverTimestamp, setDoc, getDoc, Timestamp } from 'firebase/firestore';
 import { httpsCallable } from 'firebase/functions';
@@ -36,6 +37,7 @@ type ChannelFormValues = z.infer<typeof channelSchema>;
 export function ChannelsPage() {
     const { firestore, functions } = useFirebase();
     const { user } = useUser();
+    const router = useRouter();
     const { toast } = useToast();
     const [addDialogOpen, setAddDialogOpen] = useState(false);
     const [editDialogOpen, setEditDialogOpen] = useState(false);
@@ -71,6 +73,13 @@ export function ChannelsPage() {
 
     const { data: channels, isLoading } = useCollection<WhatsappChannel>(channelsQuery);
 
+    // AUTO-REDIRECT FOR COMPANY USERS
+    useEffect(() => {
+      if (!isSuperAdmin && channels && channels.length > 0 && !isLoading && !isResolvingCompany) {
+        router.replace(`/channels/${channels[0].id}`);
+      }
+    }, [isSuperAdmin, channels, isLoading, isResolvingCompany, router]);
+
     // Lazy Trial Init
     useEffect(() => {
       if (!channels || !firestore) return;
@@ -99,7 +108,6 @@ export function ChannelsPage() {
       if (!firestore || !user || isExtending) return;
       setIsExtending(channelId);
       try {
-        console.log(`[TRIAL] Extending channel ${channelId} for ${days} days`);
         const channelRef = doc(firestore, 'channels', channelId);
         const channelSnap = await getDoc(channelRef);
         
@@ -109,7 +117,6 @@ export function ChannelsPage() {
         const endsAt = data?.trial?.endsAt;
         const currentMs = endsAt?.toDate ? endsAt.toDate().getTime() : 0;
         
-        // baseMs is the maximum between now and the current expiration
         const baseMs = Math.max(Date.now(), currentMs);
         const newMs = baseMs + days * 24 * 60 * 60 * 1000;
         const newEndsAt = Timestamp.fromDate(new Date(newMs));
@@ -126,12 +133,7 @@ export function ChannelsPage() {
 
         toast({ title: "Trial extendido", description: `Se han añadido ${days} días correctamente.` });
       } catch (error: any) {
-        console.error("Extend error", error);
-        toast({ 
-          variant: 'destructive', 
-          title: "Error al extender", 
-          description: error.message || "No se pudo procesar la extensión." 
-        });
+        toast({ variant: 'destructive', title: "Error al extender", description: error.message || "No se pudo procesar." });
       } finally {
         setIsExtending(null);
       }
@@ -240,6 +242,15 @@ export function ChannelsPage() {
     };
 
     const showLoading = isLoading || (isResolvingCompany && !isSuperAdmin);
+
+    // If company user, show skeleton while redirecting to avoid list flicker
+    if (!isSuperAdmin && !isLoading && !isResolvingCompany && channels && channels.length > 0) {
+      return (
+        <div className="flex h-screen w-full items-center justify-center p-8">
+          <Loader2 className="h-8 w-8 animate-spin text-primary" />
+        </div>
+      );
+    }
 
     return (
         <main className="container mx-auto p-4 md:p-6 lg:p-8">
