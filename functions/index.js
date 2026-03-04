@@ -370,67 +370,6 @@ exports.sendMessageProxy = functions.region("us-central1").https.onCall(async (d
 });
 
 /**
- * Manual Trigger: Ejecuta un paso de seguimiento inmediatamente (IA).
- */
-exports.triggerManualFollowup = functions.region("us-central1").https.onCall(async (data, context) => {
-  if (!context.auth) throw new functions.https.HttpsError("unauthenticated", "Auth required");
-  
-  const { channelId, jid } = data;
-  logger.info("[MANUAL_FU] Triggered", { channelId, jid, user: context.auth.token.email });
-
-  try {
-    const access = await getChannelAccess(channelId);
-    if (access.blocked) throw new Error("Canal bloqueado (Trial)");
-
-    const convRef = db.doc(`channels/${channelId}/conversations/${jid}`);
-    const convSnap = await convRef.get();
-    if (!convSnap.exists) throw new Error("Conversación no encontrada");
-
-    const state = convSnap.data();
-    const step = state.followupStage || 0;
-
-    const bot = await getBotConfig(channelId);
-    const kbDocs = await loadKnowledgeBaseDocs(channelId);
-    const systemPrompt = buildSystemPrompt({ 
-      salesStrategy: bot.salesStrategy, productDetails: bot.productDetails, 
-      kbDocs, isFollowup: true, step 
-    });
-    
-    const messages = await loadConversationContext(channelId, jid, 6);
-    const projectId = process.env.GOOGLE_CLOUD_PROJECT || admin.app().options.projectId;
-    const reply = await generateWithGemini({ systemPrompt, messages, projectId, location: "us-central1" });
-    
-    if (!reply) throw new Error("Gemini no generó respuesta.");
-
-    const workerUrl = await getWorkerUrl();
-    await sendViaWorker({ 
-      workerUrl, channelId, toJid: jid, text: reply, 
-      meta: { type: "manual_followup", step: step + 1, triggeredBy: context.auth.token.email } 
-    });
-
-    const followupConfigSnap = await db.doc(`channels/${channelId}/runtime/followup`).get();
-    const config = followupConfigSnap.exists ? followupConfigSnap.data() : {};
-    const cadence = config.cadenceHours || [1, 3, 5, 8, 13, 21, 34, 55, 89];
-    
-    const nextStep = step + 1;
-    const nextInterval = cadence[nextStep] || 24;
-    const nextAt = admin.firestore.Timestamp.fromDate(new Date(Date.now() + nextInterval * 3600000));
-
-    await convRef.update({
-      followupStage: nextStep,
-      followupLastSentAt: admin.firestore.FieldValue.serverTimestamp(),
-      followupNextAt: nextAt,
-      updatedAt: admin.firestore.FieldValue.serverTimestamp()
-    });
-
-    return { ok: true, reply };
-  } catch (err) {
-    logger.error("[MANUAL_FU] Error", err.message);
-    throw new functions.https.HttpsError("internal", err.message);
-  }
-});
-
-/**
  * Trigger: Captura el perfil del cliente.
  */
 exports.onIncomingMessageCaptureCustomerProfile = functions

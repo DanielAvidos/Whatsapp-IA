@@ -18,7 +18,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Alert, AlertTitle, AlertDescription } from '@/components/ui/alert';
 import { Input } from '@/components/ui/input';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { format, differenceInDays } from 'date-fns';
+import { format } from 'date-fns';
 import { cn } from '@/lib/utils';
 import Link from 'next/link';
 import { Switch } from '@/components/ui/switch';
@@ -942,7 +942,7 @@ function MessageThread({ channelId, jid, conversation, blocked }: { channelId: s
     if (!text || isSending || !functions || blocked) return;
 
     setIsSending(true);
-    console.log('[CHAT_SEND] payload', { channelId, jid, textLen: text.length });
+    console.log('[CHAT_SEND] try', { channelId, jid, len: text.length });
 
     try {
       const sendFn = httpsCallable(functions, 'sendMessageProxy');
@@ -977,20 +977,6 @@ function MessageThread({ channelId, jid, conversation, blocked }: { channelId: s
       }); 
     } finally { 
       setIsSending(false); 
-    }
-  };
-
-  const handleManualIA = async () => {
-    if (isSending || blocked || !functions) return;
-    setIsSending(true);
-    try {
-      const triggerFn = httpsCallable(functions, 'triggerManualFollowup');
-      await triggerFn({ channelId, jid });
-      toast({ title: "Respuesta de IA enviada" });
-    } catch (err: any) {
-      toast({ variant: 'destructive', title: "Error IA", description: err.message });
-    } finally {
-      setIsSending(false);
     }
   };
 
@@ -1036,9 +1022,6 @@ function MessageThread({ channelId, jid, conversation, blocked }: { channelId: s
           <DropdownMenu>
             <DropdownMenuTrigger asChild><Button variant="ghost" size="icon" className="h-8 w-8"><MoreVertical className="h-4 w-4" /></Button></DropdownMenuTrigger>
             <DropdownMenuContent align="end">
-              <DropdownMenuItem onClick={handleManualIA} disabled={blocked}>
-                Responder ahora (IA)
-              </DropdownMenuItem>
               <DropdownMenuItem onClick={handleToggleFollowup} disabled={blocked}>
                 {conversation.followupEnabled ? 'Desactivar Seguimiento' : 'Activar Seguimiento'}
               </DropdownMenuItem>
@@ -1086,18 +1069,6 @@ function MessageThread({ channelId, jid, conversation, blocked }: { channelId: s
                     
                     <span className="text-muted-foreground">Último del Cliente:</span>
                     <span>{conversation.followupLastCustomerAt ? format((conversation.followupLastCustomerAt as Timestamp).toDate(), 'PPpp') : '---'}</span>
-                  </div>
-                  <div className="pt-2">
-                    <Button 
-                      variant="outline" 
-                      size="sm" 
-                      className="w-full text-[10px] h-7"
-                      onClick={handleManualIA}
-                      disabled={isSending || blocked}
-                    >
-                      {isSending ? <Loader2 className="h-3 w-3 animate-spin mr-1" /> : <Bot className="h-3 w-3 mr-1" />}
-                      Responder ahora (IA)
-                    </Button>
                   </div>
                 </div>
               </div>
