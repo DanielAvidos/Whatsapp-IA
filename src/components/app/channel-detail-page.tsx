@@ -1,7 +1,7 @@
 
 "use client";
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import { Loader2, ScanQrCode, LogOut, RotateCcw, MessageSquare, Link as LinkIcon, Send, Bot, FileText, Save, History, Brain, Info, AlertCircle, CheckCircle2, Clock, PlusCircle, Trash2, Settings2, MoreVertical, User, CalendarClock } from 'lucide-react';
 import { useFirestore, useDoc, useMemoFirebase, useCollection, useUser, setDocumentNonBlocking, useFirebase } from '@/firebase';
 import { doc, collection, query, orderBy, limit, Timestamp, serverTimestamp, setDoc, updateDoc, deleteDoc, where, getDoc, addDoc } from 'firebase/firestore';
@@ -32,11 +32,13 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from '@/components/ui/dialog';
 import { getIsSuperAdmin } from '@/lib/auth-helpers';
 
+const GEMINI_MODEL_LOCKED = "gemini-2.5-flash";
+
 /**
  * Unified helper to determine trial state from channel document.
  */
 function getTrialState(channel: WhatsappChannel | null | undefined) {
-  if (!channel?.trial?.endsAt) return { isActive: true, endsMs: null }; // Fallback or lazy init
+  if (!channel?.trial?.endsAt) return { isActive: true, endsMs: null };
   const endsAt = channel.trial.endsAt;
   const endsMs = endsAt?.toDate ? endsAt.toDate().getTime() : (endsAt?.seconds ? endsAt.seconds * 1000 : 0);
   const now = Date.now();
@@ -454,12 +456,8 @@ function FollowupConfigTab({ channelId, blocked }: { channelId: string, blocked:
       updatedByEmail: user.email || '',
     };
 
-    console.log("FOLLOWUP SAVE payload", payload);
-
     try {
       await setDoc(followupRef, payload, { merge: true });
-      const verify = await getDoc(followupRef);
-      console.log("FOLLOWUP AFTER SAVE", verify.data());
       toast({ title: 'Configuración de seguimiento guardada' });
     } catch (e) {
       toast({ variant: 'destructive', title: 'Error al guardar configuración' });
@@ -935,7 +933,36 @@ function MessageThread({ channelId, jid, conversation, blocked }: { channelId: s
 
   const { data: messages, isLoading } = useCollection<Message>(messagesQuery);
 
-  useEffect(() => { scrollRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages]);
+  // DEDUPLICACIÓN EN UI
+  const dedupedMessages = useMemo(() => {
+    const seen = new Set<string>();
+    const out: Message[] = [];
+    
+    // Ordenar por timestamp para procesar en secuencia
+    const sorted = [...(messages ?? [])].sort((a, b) => {
+      const ta = a.timestamp?.toDate ? a.timestamp.toDate().getTime() : Number(a.timestamp || 0);
+      const tb = b.timestamp?.toDate ? b.timestamp.toDate().getTime() : Number(b.timestamp || 0);
+      return ta - tb;
+    });
+
+    for (const m of sorted) {
+      const ts = m.timestamp?.toDate ? m.timestamp.toDate().getTime() : Number(m.timestamp || 0);
+      const bucket = Math.floor(ts / 60000); // Ventana de 1 minuto
+      
+      // La clave colapsa mensajes idénticos enviados en el mismo minuto
+      // Si tiene clientMessageId, es la referencia maestra
+      const key = m.clientMessageId
+        ? `cid:${m.clientMessageId}`
+        : `${m.fromMe ? "me" : "them"}|${m.text}|${bucket}`;
+      
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(m);
+    }
+    return out;
+  }, [messages]);
+
+  useEffect(() => { scrollRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [dedupedMessages]);
 
   const handleSendMessage = async (e: React.FormEvent) => {
     if (e) e.preventDefault();
@@ -948,51 +975,49 @@ function MessageThread({ channelId, jid, conversation, blocked }: { channelId: s
     }
     if (isSending) return;
 
-    if (!firebaseApp || !functions) {
-      console.error('[CHAT_SEND] Missing firebaseApp/functions');
-      toast({ variant: 'destructive', title: 'Config Firebase incompleta', description: 'No se pudo inicializar Functions (firebaseApp/functions).' });
-      return;
-    }
-    if (!firestore) {
-      console.error('[CHAT_SEND] Missing firestore');
-      toast({ variant: 'destructive', title: 'Config Firebase incompleta', description: 'No se pudo inicializar Firestore.' });
+    if (!firebaseApp || !functions || !firestore) {
+      toast({ variant: 'destructive', title: 'Config Firebase incompleta' });
       return;
     }
 
     setIsSending(true);
-    console.log('[CHAT_SEND] try', { channelId, jid, len: text.length });
+    
+    // Generación de ID de cliente para deduplicación
+    const clientMessageId = (globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`);
+    const msgDocRef = doc(firestore, 'channels', channelId, 'conversations', jid, 'messages', clientMessageId);
 
     try {
-      const sendFn = httpsCallable(functions, "sendMessageProxy");
-      await sendFn({ channelId, to: jid, text });
-
-      // Optimistic/Manual save to Firestore so it appears immediately
-      const messagesRef = collection(firestore, 'channels', channelId, 'conversations', jid, 'messages');
-      await addDoc(messagesRef, {
+      // ESCRITURA OPTIMISTA con ID fijo
+      await setDoc(msgDocRef, {
+        id: clientMessageId,
+        clientMessageId,
         jid,
         text,
         fromMe: true,
         direction: "OUT",
-        status: "sent",
+        status: "sending",
         isBot: false,
         source: "manual",
-        timestamp: Date.now(), // stable for orderBy + immediate render
+        timestamp: Date.now(),
         createdAt: serverTimestamp(),
         timestampServer: serverTimestamp(),
-      });
+      }, { merge: true });
 
       setInputText('');
+
+      const sendFn = httpsCallable(functions, "sendMessageProxy");
+      await sendFn({ channelId, to: jid, text, clientMessageId });
+
+      // Actualizar a sent tras éxito
+      await setDoc(msgDocRef, {
+        status: "sent",
+        sentAt: serverTimestamp(),
+      }, { merge: true });
+
     } catch (err: any) { 
       console.error('[CHAT_SEND] error', err);
-      const msg = err.details?.reason === 'TRIAL_EXPIRED' 
-        ? 'Prueba expirada. No puedes enviar mensajes.' 
-        : (err.message || String(err));
-      
-      toast({ 
-        variant: 'destructive', 
-        title: 'No se pudo enviar', 
-        description: msg 
-      }); 
+      toast({ variant: 'destructive', title: 'No se pudo enviar', description: err.message }); 
+      await setDoc(msgDocRef, { status: 'error' }, { merge: true }).catch(() => {});
     } finally { 
       setIsSending(false); 
     }
@@ -1055,7 +1080,7 @@ function MessageThread({ channelId, jid, conversation, blocked }: { channelId: s
         <ScrollArea className="h-full p-4">
           {isLoading ? <div className="space-y-4"><Skeleton className="h-10 w-2/3" /><Skeleton className="h-10 w-1/2 ml-auto" /></div> : (
             <div className="flex flex-col gap-2">
-              {messages?.map((msg) => (
+              {dedupedMessages.map((msg) => (
                 <div key={msg.id} className={cn("max-w-[80%] rounded-lg p-3 text-sm shadow-sm", msg.fromMe ? "bg-primary text-primary-foreground ml-auto rounded-tr-none" : "bg-card mr-auto rounded-tl-none")}>
                   <p className="whitespace-pre-wrap">{msg.text}</p>
                   <div className="text-[10px] mt-1 opacity-70 flex justify-end gap-1">

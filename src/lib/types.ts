@@ -142,10 +142,12 @@ export type Message = {
   fromMe: boolean;
   direction: 'IN' | 'OUT';
   text: string | null;
-  status: 'received' | 'sent' | 'delivered' | 'read' | null;
-  timestamp: number;
+  status: 'received' | 'sent' | 'delivered' | 'read' | 'sending' | 'error' | null;
+  timestamp: number | any;
   createdAt: Timestamp | FieldValue;
   isBot?: boolean;
+  clientMessageId?: string;
+  source?: string;
 };
 
 export type BotConfig = {

@@ -97,11 +97,11 @@ async function getChannelAccess(channelId) {
   }
 
   const now = admin.firestore.Timestamp.now();
-  const isExpired = now.toMillis() > trial.endsAt.toMillis();
-  const isBlockedStatus = trial.status !== "ACTIVE";
+  const endsAtTs = trial.endsAt;
+  const isExpired = now.toMillis() > (endsAtTs ? endsAtTs.toMillis() : 0);
   
-  if (isExpired || isBlockedStatus) {
-    return { blocked: true, reason: isExpired ? "TRIAL_EXPIRED" : "BLOCKED", endsAt: trial.endsAt };
+  if (isExpired) {
+    return { blocked: true, reason: "TRIAL_EXPIRED", endsAt: trial.endsAt };
   }
   
   return { blocked: false, endsAt: trial.endsAt };
@@ -199,7 +199,7 @@ async function getWorkerUrl() {
   const workerUrl = data?.workerUrl;
 
   if (!workerUrl) {
-    throw new Error("Falta runtime/config.workerUrl en Firestore.");
+    throw new Error("Falta la configuración de workerUrl en Firestore (colección runtime, documento config).");
   }
   return String(workerUrl).replace(/\/+$/, "");
 }
@@ -210,7 +210,7 @@ async function getBotConfig(channelId) {
   const d = snap.exists ? snap.data() : {};
 
   return {
-    enabled: d?.enabled !== undefined ? !!d.enabled : true,
+    enabled: d?.enabled !== undefined ? !!d.enabled : true, // ON por defecto
     model: GEMINI_MODEL_LOCKED,
     productDetails: safeText(d?.productDetails),
     salesStrategy: safeText(d?.salesStrategy),
@@ -218,12 +218,14 @@ async function getBotConfig(channelId) {
 }
 
 async function markProcessed(channelId, messageId, payload) {
-  const ref = db.doc(`channels/${channelId}/runtime/bot/bot_processed/${messageId}`);
+  // Sincronizado con el worker: channels/{id}/runtime/bot_processed/ids/{msgId}
+  const ref = db.collection('channels').doc(channelId).collection('runtime').doc('bot_processed').collection('ids').doc(messageId);
   const snap = await ref.get();
   if (snap.exists) return false;
 
   await ref.set({
     processedAt: admin.firestore.FieldValue.serverTimestamp(),
+    status: 'completed',
     ...payload,
   });
   return true;
@@ -350,7 +352,7 @@ exports.extendChannelTrial = functions.region("us-central1").https.onCall(async 
 exports.sendMessageProxy = functions.region("us-central1").https.onCall(async (data, context) => {
   if (!context.auth) throw new functions.https.HttpsError("unauthenticated", "Auth required");
   
-  const { channelId, to, text } = data;
+  const { channelId, to, text, clientMessageId } = data;
   const access = await getChannelAccess(channelId);
   
   if (access.blocked) {
@@ -363,7 +365,11 @@ exports.sendMessageProxy = functions.region("us-central1").https.onCall(async (d
     channelId, 
     toJid: to, 
     text,
-    meta: { source: "proxy", senderUid: context.auth.uid }
+    meta: { 
+      source: "proxy", 
+      senderUid: context.auth.uid,
+      clientMessageId: clientMessageId || null
+    }
   });
 
   return { success: true, result };
@@ -452,13 +458,11 @@ exports.autoReplyOnIncomingMessage = functions
     const fromMe = extractFromMe(data);
     const isBot = !!data.isBot;
 
-    if (!text) return null;
-
-    if (fromMe || isBot) return null;
+    if (!text || fromMe || isBot) return null;
 
     const access = await getChannelAccess(channelId);
     if (access.blocked) {
-      logger.info("[ACCESS] Canal bloqueado. Skip autoReply", { channelId, reason: access.reason });
+      logger.info("[BOT] Canal bloqueado. Skip autoReply", { channelId, reason: access.reason });
       return null;
     }
 
@@ -467,7 +471,10 @@ exports.autoReplyOnIncomingMessage = functions
 
     try {
       const bot = await getBotConfig(channelId);
-      if (!bot.enabled) return null;
+      if (!bot.enabled) {
+        logger.info("[BOT] IA desactivada globalmente para este canal", { channelId });
+        return null;
+      }
 
       const workerUrl = await getWorkerUrl();
       const projectId = process.env.GOOGLE_CLOUD_PROJECT || admin.app().options.projectId;
@@ -490,16 +497,17 @@ exports.autoReplyOnIncomingMessage = functions
         channelId, 
         toJid: jid, 
         text: reply,
-        meta: { triggerMessageId: messageId }
+        meta: { triggerMessageId: messageId, source: "bot_auto" }
       });
 
+      // Auditoría simple en el bot
       await db.doc(`channels/${channelId}/runtime/bot`).set({
         lastAutoReplyAt: admin.firestore.FieldValue.serverTimestamp(),
         lastError: null,
       }, { merge: true });
 
     } catch (err) {
-      logger.error("[BOT] Error", { channelId, error: err.message });
+      logger.error("[BOT] Error fatal", { channelId, error: err.message });
       await db.doc(`channels/${channelId}/runtime/bot`).set({
         lastError: err.message,
         lastErrorAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -527,10 +535,18 @@ exports.onIncomingMessageUpdateFollowupState = functions
 
     if (!fromMe) {
       const isOptOut = detectOptOut(text);
+      
+      const convSnap = await convRef.get();
+      const convData = convSnap.exists ? convSnap.data() : {};
+      
+      // AUTO-ACTIVACIÓN para chats nuevos
+      const shouldAutoEnable = convData.followupEnabled === undefined;
+
       if (isOptOut) {
         await convRef.set({
           followupStopped: true,
           followupEnabled: false,
+          followupNextAt: null,
           followupStopReason: "OPTOUT",
           followupStopAt: now,
           updatedAt: now
@@ -545,6 +561,7 @@ exports.onIncomingMessageUpdateFollowupState = functions
         const nextAtDate = new Date(Date.now() + (cadence[0] || 1) * 3600000);
 
         await convRef.set({
+          followupEnabled: shouldAutoEnable ? true : (convData.followupEnabled ?? false),
           followupStage: 0,
           followupStopped: false,
           followupLastCustomerAt: now,
@@ -595,7 +612,7 @@ exports.followupTickHourly = functions
         continue;
       }
 
-      // Query conversations with follow-up enabled and not stopped
+      // Query conversaciones elegibles
       const convsSnap = await db.collection(`channels/${channelId}/conversations`)
         .where("followupEnabled", "==", true)
         .where("followupStopped", "==", false)
@@ -615,7 +632,7 @@ exports.followupTickHourly = functions
 
         metrics.eligible++;
 
-        // Idempotency lock
+        // Idempotency lock horaria
         const lockId = nowInTz.toFormat("yyyyMMddHH");
         const lockRef = convDoc.ref.collection("followup_locks").doc(lockId);
         const lockSnap = await lockRef.get();
@@ -639,7 +656,7 @@ exports.followupTickHourly = functions
 
           await sendViaWorker({ 
             workerUrl, channelId, toJid: jid, text: reply, 
-            meta: { type: "followup", step: step + 1 } 
+            meta: { type: "followup", step: step + 1, source: "scheduler" } 
           });
 
           // Calculate next step
