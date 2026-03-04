@@ -4,7 +4,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { Loader2, ScanQrCode, LogOut, RotateCcw, MessageSquare, Link as LinkIcon, Send, Bot, FileText, Save, History, Brain, Info, AlertCircle, CheckCircle2, Clock, PlusCircle, Trash2, Settings2, MoreVertical, User, CalendarClock } from 'lucide-react';
 import { useFirestore, useDoc, useMemoFirebase, useCollection, useUser, setDocumentNonBlocking, useFirebase } from '@/firebase';
-import { doc, collection, query, orderBy, limit, Timestamp, serverTimestamp, setDoc, updateDoc, deleteDoc, where, getDoc } from 'firebase/firestore';
+import { doc, collection, query, orderBy, limit, Timestamp, serverTimestamp, setDoc, updateDoc, deleteDoc, where, getDoc, addDoc } from 'firebase/firestore';
 import { httpsCallable } from 'firebase/functions';
 import { PageHeader } from '@/components/app/page-header';
 import { Button } from '@/components/ui/button';
@@ -87,7 +87,6 @@ export function ChannelDetailPage({ channelId }: { channelId: string }) {
     if (!firestore || !user || isExtending) return;
     setIsExtending(true);
     try {
-      console.log(`[TRIAL] Extending channel ${channelId} for ${days} days`);
       const channelRef = doc(firestore, 'channels', channelId);
       const channelSnap = await getDoc(channelRef);
       
@@ -939,17 +938,59 @@ function MessageThread({ channelId, jid, conversation, blocked }: { channelId: s
 
   const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!inputText.trim() || isSending || !functions || blocked) return;
+    const text = inputText.trim();
+    if (!text || isSending || !functions || blocked) return;
+
     setIsSending(true);
+    console.log('[CHAT_SEND] payload', { channelId, jid, textLen: text.length });
+
     try {
       const sendFn = httpsCallable(functions, 'sendMessageProxy');
-      await sendFn({ channelId, to: jid, text: inputText.trim() });
+      const result = await sendFn({ channelId, to: jid, text });
+      console.log('[CHAT_SEND] success', result.data);
+
+      // Optimistic/Manual save to Firestore so it appears immediately
+      const messagesRef = collection(firestore, 'channels', channelId, 'conversations', jid, 'messages');
+      await addDoc(messagesRef, {
+        jid,
+        text,
+        fromMe: true,
+        direction: 'OUT',
+        status: 'sent',
+        isBot: false,
+        source: 'manual',
+        timestamp: Date.now(),
+        createdAt: serverTimestamp()
+      });
+
       setInputText('');
-    } catch (e: any) { 
-      const msg = e.details?.reason === 'TRIAL_EXPIRED' ? 'Prueba expirada. No puedes enviar mensajes.' : String(e);
-      toast({ variant: 'destructive', title: 'Error', description: msg }); 
+    } catch (err: any) { 
+      console.error('[CHAT_SEND] error', err);
+      const msg = err.details?.reason === 'TRIAL_EXPIRED' 
+        ? 'Prueba expirada. No puedes enviar mensajes.' 
+        : (err.message || String(err));
+      
+      toast({ 
+        variant: 'destructive', 
+        title: 'No se pudo enviar', 
+        description: msg 
+      }); 
     } finally { 
       setIsSending(false); 
+    }
+  };
+
+  const handleManualIA = async () => {
+    if (isSending || blocked || !functions) return;
+    setIsSending(true);
+    try {
+      const triggerFn = httpsCallable(functions, 'triggerManualFollowup');
+      await triggerFn({ channelId, jid });
+      toast({ title: "Respuesta de IA enviada" });
+    } catch (err: any) {
+      toast({ variant: 'destructive', title: "Error IA", description: err.message });
+    } finally {
+      setIsSending(false);
     }
   };
 
@@ -995,6 +1036,9 @@ function MessageThread({ channelId, jid, conversation, blocked }: { channelId: s
           <DropdownMenu>
             <DropdownMenuTrigger asChild><Button variant="ghost" size="icon" className="h-8 w-8"><MoreVertical className="h-4 w-4" /></Button></DropdownMenuTrigger>
             <DropdownMenuContent align="end">
+              <DropdownMenuItem onClick={handleManualIA} disabled={blocked}>
+                Responder ahora (IA)
+              </DropdownMenuItem>
               <DropdownMenuItem onClick={handleToggleFollowup} disabled={blocked}>
                 {conversation.followupEnabled ? 'Desactivar Seguimiento' : 'Activar Seguimiento'}
               </DropdownMenuItem>
@@ -1042,6 +1086,18 @@ function MessageThread({ channelId, jid, conversation, blocked }: { channelId: s
                     
                     <span className="text-muted-foreground">Último del Cliente:</span>
                     <span>{conversation.followupLastCustomerAt ? format((conversation.followupLastCustomerAt as Timestamp).toDate(), 'PPpp') : '---'}</span>
+                  </div>
+                  <div className="pt-2">
+                    <Button 
+                      variant="outline" 
+                      size="sm" 
+                      className="w-full text-[10px] h-7"
+                      onClick={handleManualIA}
+                      disabled={isSending || blocked}
+                    >
+                      {isSending ? <Loader2 className="h-3 w-3 animate-spin mr-1" /> : <Bot className="h-3 w-3 mr-1" />}
+                      Responder ahora (IA)
+                    </Button>
                   </div>
                 </div>
               </div>
