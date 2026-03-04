@@ -5,7 +5,7 @@ import { useState, useEffect, useRef } from 'react';
 import { Loader2, ScanQrCode, LogOut, RotateCcw, MessageSquare, Link as LinkIcon, Send, Bot, FileText, Save, History, Brain, Info, AlertCircle, CheckCircle2, Clock, PlusCircle, Trash2, Settings2, MoreVertical, User, CalendarClock } from 'lucide-react';
 import { useFirestore, useDoc, useMemoFirebase, useCollection, useUser, setDocumentNonBlocking, useFirebase } from '@/firebase';
 import { doc, collection, query, orderBy, limit, Timestamp, serverTimestamp, setDoc, updateDoc, deleteDoc, where, getDoc, addDoc } from 'firebase/firestore';
-import { httpsCallable } from 'firebase/functions';
+import { getFunctions, httpsCallable } from 'firebase/functions';
 import { PageHeader } from '@/components/app/page-header';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -46,7 +46,7 @@ function getTrialState(channel: WhatsappChannel | null | undefined) {
 
 export function ChannelDetailPage({ channelId }: { channelId: string }) {
   const { t } = useLanguage();
-  const { firestore, user, functions } = useFirebase();
+  const { firestore, user, firebaseApp } = useFirebase();
   const { toast } = useToast();
   
   const channelRef = useMemoFirebase(() => {
@@ -920,7 +920,8 @@ function CustomerProfileDialog({ channelId, conversation, isOpen, onOpenChange }
 }
 
 function MessageThread({ channelId, jid, conversation, blocked }: { channelId: string, jid: string, conversation: Conversation, blocked: boolean }) {
-  const { firestore, functions } = useFirebase();
+  const { firestore, firebaseApp } = useFirebase();
+  const functions = firebaseApp ? getFunctions(firebaseApp, "us-central1") : null;
   const [inputText, setInputText] = useState('');
   const [isSending, setIsSending] = useState(false);
   const [isProfileOpen, setIsProfileOpen] = useState(false);
@@ -937,17 +938,33 @@ function MessageThread({ channelId, jid, conversation, blocked }: { channelId: s
   useEffect(() => { scrollRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages]);
 
   const handleSendMessage = async (e: React.FormEvent) => {
-    e.preventDefault();
+    if (e) e.preventDefault();
     const text = inputText.trim();
-    if (!text || isSending || !functions || blocked) return;
+    
+    if (!text) return;
+    if (blocked) {
+      toast({ variant: 'destructive', title: 'Canal bloqueado', description: 'Trial expirado.' });
+      return;
+    }
+    if (isSending) return;
+
+    if (!firebaseApp || !functions) {
+      console.error('[CHAT_SEND] Missing firebaseApp/functions');
+      toast({ variant: 'destructive', title: 'Config Firebase incompleta', description: 'No se pudo inicializar Functions (firebaseApp/functions).' });
+      return;
+    }
+    if (!firestore) {
+      console.error('[CHAT_SEND] Missing firestore');
+      toast({ variant: 'destructive', title: 'Config Firebase incompleta', description: 'No se pudo inicializar Firestore.' });
+      return;
+    }
 
     setIsSending(true);
     console.log('[CHAT_SEND] try', { channelId, jid, len: text.length });
 
     try {
-      const sendFn = httpsCallable(functions, 'sendMessageProxy');
-      const result = await sendFn({ channelId, to: jid, text });
-      console.log('[CHAT_SEND] success', result.data);
+      const sendFn = httpsCallable(functions, "sendMessageProxy");
+      await sendFn({ channelId, to: jid, text });
 
       // Optimistic/Manual save to Firestore so it appears immediately
       const messagesRef = collection(firestore, 'channels', channelId, 'conversations', jid, 'messages');
@@ -955,12 +972,12 @@ function MessageThread({ channelId, jid, conversation, blocked }: { channelId: s
         jid,
         text,
         fromMe: true,
-        direction: 'OUT',
-        status: 'sent',
+        direction: "OUT",
+        status: "sent",
         isBot: false,
-        source: 'manual',
-        timestamp: Date.now(),
-        createdAt: serverTimestamp()
+        source: "manual",
+        timestamp: serverTimestamp(),
+        createdAt: serverTimestamp(),
       });
 
       setInputText('');
@@ -1041,7 +1058,10 @@ function MessageThread({ channelId, jid, conversation, blocked }: { channelId: s
                 <div key={msg.id} className={cn("max-w-[80%] rounded-lg p-3 text-sm shadow-sm", msg.fromMe ? "bg-primary text-primary-foreground ml-auto rounded-tr-none" : "bg-card mr-auto rounded-tl-none")}>
                   <p className="whitespace-pre-wrap">{msg.text}</p>
                   <div className="text-[10px] mt-1 opacity-70 flex justify-end gap-1">
-                    {format(new Date(msg.timestamp), 'HH:mm')}
+                    {format(
+                      msg.timestamp?.toDate ? msg.timestamp.toDate() : new Date(msg.timestamp),
+                      'HH:mm'
+                    )}
                     {msg.fromMe && <span>{msg.status || 'sent'}</span>}
                     {msg.isBot && <Bot className="h-3 w-3" />}
                   </div>
@@ -1088,6 +1108,12 @@ function MessageThread({ channelId, jid, conversation, blocked }: { channelId: s
             placeholder={blocked ? "Canal expirado..." : "Escribe un mensaje..."}
             value={inputText} 
             onChange={(e) => setInputText(e.target.value)} 
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                handleSendMessage(e as any);
+              }
+            }}
             disabled={isSending || blocked} 
           />
           <Button type="submit" size="icon" disabled={isSending || !inputText.trim() || blocked}>
