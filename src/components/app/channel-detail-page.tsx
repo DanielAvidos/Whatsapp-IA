@@ -976,8 +976,9 @@ function MessageThread({ channelId, jid, conversation, blocked }: { channelId: s
         status: "sent",
         isBot: false,
         source: "manual",
-        timestamp: serverTimestamp(),
+        timestamp: Date.now(), // stable for orderBy + immediate render
         createdAt: serverTimestamp(),
+        timestampServer: serverTimestamp(),
       });
 
       setInputText('');
@@ -1058,10 +1059,10 @@ function MessageThread({ channelId, jid, conversation, blocked }: { channelId: s
                 <div key={msg.id} className={cn("max-w-[80%] rounded-lg p-3 text-sm shadow-sm", msg.fromMe ? "bg-primary text-primary-foreground ml-auto rounded-tr-none" : "bg-card mr-auto rounded-tl-none")}>
                   <p className="whitespace-pre-wrap">{msg.text}</p>
                   <div className="text-[10px] mt-1 opacity-70 flex justify-end gap-1">
-                    {format(
-                      msg.timestamp?.toDate ? msg.timestamp.toDate() : new Date(msg.timestamp),
-                      'HH:mm'
-                    )}
+                    {(() => {
+                      const d = msg.timestamp?.toDate ? msg.timestamp.toDate() : new Date(msg.timestamp);
+                      return format(d, 'HH:mm');
+                    })()}
                     {msg.fromMe && <span>{msg.status || 'sent'}</span>}
                     {msg.isBot && <Bot className="h-3 w-3" />}
                   </div>
