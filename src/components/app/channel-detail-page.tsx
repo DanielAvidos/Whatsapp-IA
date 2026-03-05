@@ -420,6 +420,43 @@ function FollowupConfigTab({ channelId, blocked }: { channelId: string, blocked:
   }, [channelId]);
 
   useEffect(() => {
+    async function checkAndInit() {
+      if (!firestore || !user || !channelId || hasInitialLoad || isLoading) return;
+      
+      const ref = doc(firestore, 'channels', channelId, 'runtime', 'followup');
+      const snap = await getDoc(ref);
+
+      if (!snap.exists()) {
+        const defaults: Partial<FollowupConfig> = {
+          enabled: false,
+          businessHours: { startHour: 8, endHour: 22, timezone: "America/Mexico_City" },
+          maxTouches: 9,
+          cadenceHours: [1, 3, 5, 8, 13, 21, 34, 55, 89],
+          stopKeywords: ["alto", "stop", "no me interesa", "deja de escribir", "cancelar", "baja"],
+          resumeKeywords: ["info", "información", "precio", "cotizar", "quiero"],
+          toneProfile: "Profesional, cercano, breve. 1 pregunta por mensaje.",
+          goal: "Convertir a cita/llamada o solicitar datos de contacto.",
+        };
+        
+        await setDoc(ref, { 
+          ...defaults, 
+          updatedAt: serverTimestamp(), 
+          updatedByUid: user.uid, 
+          updatedByEmail: user.email 
+        }, { merge: true });
+        
+        setFormData(defaults);
+        setCadenceText(defaults.cadenceHours!.join(', '));
+      } else {
+        // ya existe: cargarlo a formData
+        const d = snap.data();
+        const loaded = { ...d } as any;
+        setFormData(loaded);
+        setCadenceText((loaded.cadenceHours ?? [1,3,5,8,13,21,34,55,89]).join(', '));
+      }
+      setHasInitialLoad(true);
+    }
+
     if (config) {
       setFormData(config);
       if (config.cadenceHours) {
@@ -427,41 +464,22 @@ function FollowupConfigTab({ channelId, blocked }: { channelId: string, blocked:
       }
       setHasInitialLoad(true);
     } else if (!isLoading && firestore && user && !hasInitialLoad) {
-      const defaults: Partial<FollowupConfig> = {
-        enabled: false,
-        businessHours: { startHour: 8, endHour: 22, timezone: "America/Mexico_City" },
-        maxTouches: 9,
-        cadenceHours: [1, 3, 5, 8, 13, 21, 34, 55, 89],
-        stopKeywords: ["alto", "stop", "no me interesa", "deja de escribir", "cancelar", "baja"],
-        resumeKeywords: ["info", "información", "precio", "cotizar", "quiero"],
-        toneProfile: "Profesional, cercano, breve. 1 pregunta por mensaje.",
-        goal: "Convertir a cita/llamada o solicitar datos de contacto.",
-      };
-      
-      const ref = doc(firestore, 'channels', channelId, 'runtime', 'followup');
-      setDoc(ref, { 
-        ...defaults, 
-        updatedAt: serverTimestamp(), 
-        updatedByUid: user.uid, 
-        updatedByEmail: user.email 
-      }, { merge: true });
-      
-      setFormData(defaults);
-      setCadenceText(defaults.cadenceHours!.join(", "));
-      setHasInitialLoad(true);
+      checkAndInit();
     }
   }, [config, isLoading, firestore, user, channelId, hasInitialLoad]);
+
+  const parseCadenceText = (text: string) => {
+    const arr = text
+      .split(',')
+      .map(v => Number(v.trim()))
+      .filter(n => Number.isFinite(n) && n > 0);
+    return arr.length > 0 ? arr : [1, 3, 5, 8, 13, 21, 34, 55, 89];
+  };
 
   const handleSave = async () => {
     if (!followupRef || !user || blocked) return;
     
-    // Parse cadenceText
-    const parsedCadence = cadenceText
-      .split(',')
-      .map(v => parseInt(v.trim()))
-      .filter(v => !isNaN(v) && v > 0);
-    
-    const finalCadence = parsedCadence.length > 0 ? parsedCadence : [1, 3, 5, 8, 13, 21, 34, 55, 89];
+    const parsedCadence = parseCadenceText(cadenceText);
 
     const payload = {
       enabled: formData.enabled === true,
@@ -470,8 +488,8 @@ function FollowupConfigTab({ channelId, blocked }: { channelId: string, blocked:
         endHour: Number(formData.businessHours?.endHour ?? 22),
         timezone: formData.businessHours?.timezone ?? "America/Mexico_City"
       },
-      maxTouches: finalCadence.length,
-      cadenceHours: finalCadence,
+      cadenceHours: parsedCadence,
+      maxTouches: parsedCadence.length,
       stopKeywords: formData.stopKeywords ?? [],
       resumeKeywords: formData.resumeKeywords ?? [],
       toneProfile: formData.toneProfile ?? "",
@@ -481,9 +499,22 @@ function FollowupConfigTab({ channelId, blocked }: { channelId: string, blocked:
       updatedByEmail: user.email || '',
     };
 
+    console.log("FOLLOWUP SAVE payload", payload);
+
     try {
       await setDoc(followupRef, payload, { merge: true });
-      setCadenceText(finalCadence.join(", ")); // Normalize field
+      
+      // Update local state to avoid jumping back to old values
+      setFormData(prev => ({
+        ...prev,
+        cadenceHours: parsedCadence,
+        maxTouches: parsedCadence.length,
+      }));
+      setCadenceText(parsedCadence.join(', '));
+
+      const verify = await getDoc(followupRef);
+      console.log("FOLLOWUP AFTER SAVE", verify.data());
+
       toast({ title: 'Configuración de seguimiento guardada' });
     } catch (e) {
       console.error(e);
@@ -540,8 +571,8 @@ function FollowupConfigTab({ channelId, blocked }: { channelId: string, blocked:
                 value={cadenceText} 
                 onChange={(e) => setCadenceText(e.target.value)} 
                 onBlur={() => {
-                  const parsed = cadenceText.split(',').map(v => parseInt(v.trim())).filter(v => !isNaN(v) && v > 0);
-                  if (parsed.length > 0) setCadenceText(parsed.join(", "));
+                  const parsed = parseCadenceText(cadenceText);
+                  setCadenceText(parsed.join(", "));
                 }}
                 disabled={blocked}
               />
