@@ -4,7 +4,7 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
 import { Loader2, ScanQrCode, LogOut, RotateCcw, MessageSquare, Link as LinkIcon, Send, Bot, FileText, Save, History, Brain, Info, AlertCircle, CheckCircle2, Clock, PlusCircle, Trash2, Settings2, MoreVertical, User, CalendarClock } from 'lucide-react';
 import { useFirestore, useDoc, useMemoFirebase, useCollection, useUser, setDocumentNonBlocking, useFirebase } from '@/firebase';
-import { doc, collection, query, orderBy, limit, Timestamp, serverTimestamp, setDoc, updateDoc, deleteDoc, where, getDoc, addDoc } from 'firebase/firestore';
+import { doc, collection, query, orderBy, limit, Timestamp, serverTimestamp, setDoc, updateDoc, deleteDoc, where, getDoc, addDoc, writeBatch, getDocs } from 'firebase/firestore';
 import { getFunctions, httpsCallable } from 'firebase/functions';
 import { PageHeader } from '@/components/app/page-header';
 import { Button } from '@/components/ui/button';
@@ -28,8 +28,18 @@ import { useToast } from '@/hooks/use-toast';
 import { Badge } from '@/components/ui/badge';
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion';
 import { Progress } from '@/components/ui/progress';
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, DropdownMenuSeparator } from '@/components/ui/dropdown-menu';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from '@/components/ui/dialog';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { getIsSuperAdmin } from '@/lib/auth-helpers';
 
 const GEMINI_MODEL_LOCKED = "gemini-2.5-flash";
@@ -920,13 +930,17 @@ function CustomerProfileDialog({ channelId, conversation, isOpen, onOpenChange }
 }
 
 function MessageThread({ channelId, jid, conversation, blocked }: { channelId: string, jid: string, conversation: Conversation, blocked: boolean }) {
-  const { firestore, firebaseApp } = useFirebase();
+  const { user, firestore, firebaseApp } = useFirebase();
   const functions = firebaseApp ? getFunctions(firebaseApp, "us-central1") : null;
   const [inputText, setInputText] = useState('');
   const [isSending, setIsSending] = useState(false);
   const [isProfileOpen, setIsProfileOpen] = useState(false);
+  const [isClearOpen, setIsClearOpen] = useState(false);
+  const [isClearing, setIsClearing] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const { toast } = useToast();
+
+  const isSuperAdmin = getIsSuperAdmin(user);
 
   const messagesQuery = useMemoFirebase(() => {
     if (!firestore) return null;
@@ -1039,6 +1053,39 @@ function MessageThread({ channelId, jid, conversation, blocked }: { channelId: s
     toast({ title: 'Seguimiento reiniciado' });
   };
 
+  const clearChatMessages = async () => {
+    if (!firestore || !channelId || !jid) return;
+    setIsClearing(true);
+    try {
+      const messagesRef = collection(firestore, 'channels', channelId, 'conversations', jid, 'messages');
+      let deletedCount = 0;
+      
+      while (true) {
+        // Query by batches of 400
+        const q = query(messagesRef, limit(400));
+        const snapshot = await getDocs(q);
+        if (snapshot.empty) break;
+
+        const batch = writeBatch(firestore);
+        snapshot.docs.forEach((doc) => {
+          batch.delete(doc.ref);
+        });
+        
+        await batch.commit();
+        deletedCount += snapshot.size;
+        console.log(`[CLEAR_CHAT] Deleted ${deletedCount} messages from ${jid}`);
+      }
+
+      toast({ title: 'Chat limpiado', description: 'Todos los mensajes han sido eliminados correctamente.' });
+      setIsClearOpen(false);
+    } catch (error: any) {
+      console.error('[CLEAR_CHAT] error', error);
+      toast({ variant: 'destructive', title: 'Error al limpiar chat', description: error.message || String(error) });
+    } finally {
+      setIsClearing(false);
+    }
+  };
+
   return (
     <>
       <CardHeader className="border-b py-3 px-4 flex-row justify-between items-center bg-card">
@@ -1066,6 +1113,18 @@ function MessageThread({ channelId, jid, conversation, blocked }: { channelId: s
               <DropdownMenuItem onClick={handleResetFollowup} disabled={blocked}>
                 Reiniciar Seguimiento
               </DropdownMenuItem>
+              {isSuperAdmin && (
+                <>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem 
+                    className="text-destructive focus:text-destructive" 
+                    onClick={() => setIsClearOpen(true)}
+                    disabled={isClearing}
+                  >
+                    <Trash2 className="mr-2 h-4 w-4" /> Limpiar chat
+                  </DropdownMenuItem>
+                </>
+              )}
             </DropdownMenuContent>
           </DropdownMenu>
         </div>
@@ -1149,6 +1208,31 @@ function MessageThread({ channelId, jid, conversation, blocked }: { channelId: s
         isOpen={isProfileOpen} 
         onOpenChange={setIsProfileOpen} 
       />
+
+      <AlertDialog open={isClearOpen} onOpenChange={setIsClearOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Limpiar chat</AlertDialogTitle>
+            <AlertDialogDescription>
+              Esta acción eliminará todos los mensajes de esta conversación. No se puede deshacer.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={isClearing}>Cancelar</AlertDialogCancel>
+            <AlertDialogAction 
+              onClick={(e) => {
+                e.preventDefault();
+                clearChatMessages();
+              }}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              disabled={isClearing}
+            >
+              {isClearing ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Trash2 className="mr-2 h-4 w-4" />}
+              Eliminar mensajes
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </>
   );
 }
