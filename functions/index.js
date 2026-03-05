@@ -557,8 +557,8 @@ exports.onIncomingMessageUpdateFollowupState = functions
         const config = followupConfigSnap.exists ? followupConfigSnap.data() : {};
         const cadence = config.cadenceHours || [1, 3, 5, 8, 13, 21, 34, 55, 89];
         
-        // Next follow-up timestamp (step 0 cadence)
-        const nextAtDate = new Date(Date.now() + (cadence[0] || 1) * 3600000);
+        // Next follow-up timestamp (step 0 cadence) rounded to minute
+        const nextAtDate = DateTime.now().plus({ hours: cadence[0] || 1 }).set({ second: 0, millisecond: 0 }).toJSDate();
 
         await convRef.set({
           followupEnabled: shouldAutoEnable ? true : (convData.followupEnabled ?? false),
@@ -580,15 +580,18 @@ exports.onIncomingMessageUpdateFollowupState = functions
   });
 
 /**
- * Scheduler: Ejecuta el seguimiento horario.
+ * Scheduler: Ejecuta el seguimiento minuto a minuto.
  */
-exports.followupTickHourly = functions
+exports.followupTickEveryMinute = functions
   .region("us-central1")
   .pubsub
-  .schedule("every 60 minutes")
+  .schedule("every 1 minutes")
   .onRun(async (context) => {
-    const nowTs = admin.firestore.Timestamp.now();
-    logger.info("[FOLLOWUP] Tick start", { now: nowTs.toDate().toISOString() });
+    const now = DateTime.now();
+    const nowFloorDate = now.set({ second: 0, millisecond: 0 }).toJSDate();
+    const nowFloorTs = admin.firestore.Timestamp.fromDate(nowFloorDate);
+    
+    logger.info("[FOLLOWUP] Minute Tick start", { nowFloor: nowFloorDate.toISOString() });
 
     const channelsSnap = await db.collection("channels").get();
     
@@ -601,22 +604,18 @@ exports.followupTickHourly = functions
       const followupConfigSnap = await db.doc(`channels/${channelId}/runtime/followup`).get();
       const config = followupConfigSnap.exists ? followupConfigSnap.data() : { enabled: false };
 
-      if (!config.enabled) {
-        logger.info("[FOLLOWUP] Channel disabled", { channelId });
-        continue;
-      }
+      if (!config.enabled) continue;
 
-      const nowInTz = DateTime.now().setZone(config.businessHours?.timezone || "America/Mexico_City");
+      const nowInTz = now.setZone(config.businessHours?.timezone || "America/Mexico_City");
       if (nowInTz.hour < (config.businessHours?.startHour || 8) || nowInTz.hour >= (config.businessHours?.endHour || 22)) {
-        logger.info("[FOLLOWUP] Outside business hours", { channelId, hour: nowInTz.hour });
         continue;
       }
 
-      // Query conversaciones elegibles
+      // Query conversaciones elegibles (vencidas al minuto actual)
       const convsSnap = await db.collection(`channels/${channelId}/conversations`)
         .where("followupEnabled", "==", true)
         .where("followupStopped", "==", false)
-        .where("followupNextAt", "<=", nowTs)
+        .where("followupNextAt", "<=", nowFloorTs)
         .get();
 
       const workerUrl = await getWorkerUrl();
@@ -632,10 +631,18 @@ exports.followupTickHourly = functions
 
         metrics.eligible++;
 
-        // Idempotency lock horaria
-        const lockId = nowInTz.toFormat("yyyyMMddHH");
+        // Idempotency lock granular por el "minuto debido" de la conversación
+        const nextAtRaw = state.followupNextAt?.toDate ? state.followupNextAt.toDate() : null;
+        const nextAtKey = nextAtRaw
+          ? DateTime.fromJSDate(nextAtRaw).setZone(config.businessHours?.timezone || "America/Mexico_City")
+              .set({ second: 0, millisecond: 0 })
+              .toFormat("yyyyMMddHHmm")
+          : nowInTz.set({ second: 0, millisecond: 0 }).toFormat("yyyyMMddHHmm");
+
+        const lockId = `due_${nextAtKey}`;
         const lockRef = convDoc.ref.collection("followup_locks").doc(lockId);
         const lockSnap = await lockRef.get();
+        
         if (lockSnap.exists) {
           metrics.skippedLock++;
           continue;
@@ -659,7 +666,7 @@ exports.followupTickHourly = functions
             meta: { type: "followup", step: step + 1, source: "scheduler" } 
           });
 
-          // Calculate next step
+          // Calculate next step with minute rounding
           const nextStep = step + 1;
           let nextAt = null;
           let followupEnabled = true;
@@ -667,7 +674,8 @@ exports.followupTickHourly = functions
 
           if (nextStep < (config.maxTouches || cadence.length)) {
             const nextInterval = cadence[nextStep] || 24;
-            nextAt = admin.firestore.Timestamp.fromDate(new Date(Date.now() + nextInterval * 3600000));
+            const nextRounded = DateTime.now().plus({ hours: nextInterval }).set({ second: 0, millisecond: 0 }).toJSDate();
+            nextAt = admin.firestore.Timestamp.fromDate(nextRounded);
           } else {
             followupEnabled = false;
             stopReason = "COMPLETED";
@@ -689,7 +697,9 @@ exports.followupTickHourly = functions
         }
       }
 
-      logger.info("[FOLLOWUP] Channel metrics", { channelId, metrics });
+      if (metrics.eligible > 0) {
+        logger.info("[FOLLOWUP] Channel metrics", { channelId, metrics });
+      }
     }
   });
 
