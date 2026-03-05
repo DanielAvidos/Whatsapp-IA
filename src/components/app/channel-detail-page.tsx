@@ -1104,7 +1104,7 @@ function MessageThread({ channelId, jid, conversation, blocked }: { channelId: s
           ) : (
             <Badge variant="outline" className="text-[10px]">FU INACTIVO</Badge>
           )}
-          <DropdownMenu>
+          <DropdownMenu modal={false}>
             <DropdownMenuTrigger asChild><Button variant="ghost" size="icon" className="h-8 w-8"><MoreVertical className="h-4 w-4" /></Button></DropdownMenuTrigger>
             <DropdownMenuContent align="end">
               <DropdownMenuItem onClick={handleToggleFollowup} disabled={blocked}>
@@ -1118,7 +1118,10 @@ function MessageThread({ channelId, jid, conversation, blocked }: { channelId: s
                   <DropdownMenuSeparator />
                   <DropdownMenuItem 
                     className="text-destructive focus:text-destructive" 
-                    onClick={() => setIsClearOpen(true)}
+                    onSelect={(e) => {
+                      e.preventDefault();
+                      setIsClearOpen(true);
+                    }}
                     disabled={isClearing}
                   >
                     <Trash2 className="mr-2 h-4 w-4" /> Limpiar chat
