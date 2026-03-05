@@ -62,7 +62,8 @@ export function ChannelDetailPage({ channelId }: { channelId: string }) {
   const [activeTab, setActiveTab] = useState('connection');
   const [isExtending, setIsExtending] = useState(false);
 
-  const workerUrl = process.env.NEXT_PUBLIC_BAILEYS_WORKER_URL || process.env.NEXT_PUBLIC_WORKER_URL;
+  // Unified environment variable for Worker URL
+  const workerUrl = process.env.NEXT_PUBLIC_BAILEYS_WORKER_URL;
   const isSuperAdmin = getIsSuperAdmin(user);
 
   const trial = getTrialState(channel);
@@ -75,6 +76,7 @@ export function ChannelDetailPage({ channelId }: { channelId: string }) {
     }
     toast({ title: successMessage });
     try {
+      // Correct pattern: /v1/channels/{channelId}/endpoint
       await fetch(`${workerUrl}/v1/channels/${channelId}${endpoint}`, { method: 'POST', mode: 'cors' });
     } catch (error) {
       toast({ variant: 'destructive', title: errorMessage, description: String(error) });

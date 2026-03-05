@@ -1,3 +1,4 @@
+
 'use client';
 
 import { useEffect, useState } from 'react';
@@ -17,7 +18,8 @@ export function DevIndicator() {
   const { toast } = useToast();
 
   const projectId = process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID || 'NOT SET';
-  const workerUrl = process.env.NEXT_PUBLIC_BAILEYS_WORKER_URL || process.env.NEXT_PUBLIC_WORKER_URL || 'NOT SET';
+  // Standardized to NEXT_PUBLIC_BAILEYS_WORKER_URL
+  const workerUrl = process.env.NEXT_PUBLIC_BAILEYS_WORKER_URL || 'NOT SET';
 
   useEffect(() => {
     setIsDev(process.env.NODE_ENV === 'development');

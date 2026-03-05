@@ -1,3 +1,4 @@
+
 'use client';
 
 /**
@@ -25,7 +26,8 @@ export type WorkerResponse = {
 };
 
 function getWorkerBaseUrl() {
-  const base = process.env.NEXT_PUBLIC_BAILEYS_WORKER_URL || process.env.NEXT_PUBLIC_WORKER_URL;
+  // Use exclusively NEXT_PUBLIC_BAILEYS_WORKER_URL
+  const base = process.env.NEXT_PUBLIC_BAILEYS_WORKER_URL;
   if (!base) {
     throw new Error('Falta la URL del worker (NEXT_PUBLIC_BAILEYS_WORKER_URL).');
   }
