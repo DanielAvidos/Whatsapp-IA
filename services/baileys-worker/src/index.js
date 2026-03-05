@@ -45,19 +45,6 @@ const db = getFirestore();
 
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
 
-// --- AI INITIALIZATION ---
-let aiInstance = null;
-async function getAI() {
-  if (aiInstance) return aiInstance;
-  const { genkit } = await import('genkit');
-  const { googleAI } = await import('@genkit-ai/google-genai');
-  aiInstance = genkit({
-    plugins: [googleAI()],
-    model: 'googleai/gemini-2.5-flash',
-  });
-  return aiInstance;
-}
-
 // --- GLOBAL STATE ---
 const activeSockets = new Map();
 const startingChannels = new Set();
@@ -65,6 +52,9 @@ const retryCounts = new Map();
 const startPromises = new Map();
 const channelConnState = new Map();
 const lockRenewals = new Map();
+
+// IDEMPOTENCY MAPPING (waMessageId -> clientMessageId)
+const waToClientMap = new Map();
 
 // --- LOCKING SYSTEM ---
 const REVISION = process.env.K_REVISION || 'local';
@@ -145,14 +135,6 @@ async function upsertChannelStatus(channelId, patch) {
 
 function emptyQrObject() {
   return { raw: null, public: null };
-}
-
-function safeJson(obj) {
-  try {
-    return JSON.parse(JSON.stringify(obj));
-  } catch (e) {
-    return null;
-  }
 }
 
 function extractText(message) {
@@ -262,109 +244,59 @@ async function resetFirestoreAuthState(channelId) {
 }
 
 // --- MESSAGES PERSISTENCE ---
-async function saveMessageToFirestore(channelId, jid, messageId, doc) {
+async function saveMessageToFirestore(channelId, jid, originalId, docData) {
   const convRef = db.collection('channels').doc(channelId).collection('conversations').doc(jid);
-  const msgRef = convRef.collection('messages').doc(messageId);
+  const messagesCol = convRef.collection('messages');
+  
+  let targetDocId = originalId;
+  const isFromMe = !!docData.fromMe;
+
+  // Resolve Idempotency for OUT messages
+  if (isFromMe) {
+    if (docData.clientMessageId) {
+      targetDocId = docData.clientMessageId;
+    } else if (waToClientMap.has(originalId)) {
+      targetDocId = waToClientMap.get(originalId);
+    } else {
+      // Search Fallback: look for recent "sending" message with same text
+      try {
+        const recentSnap = await messagesCol
+          .where('fromMe', '==', true)
+          .where('text', '==', docData.text)
+          .where('timestamp', '>=', Date.now() - 120000) // 2 min window
+          .limit(1)
+          .get();
+        
+        if (!recentSnap.empty) {
+          targetDocId = recentSnap.docs[0].id;
+          logger.info({ originalId, targetDocId }, 'Deduplicated via search fallback');
+        }
+      } catch (e) {
+        logger.error({ error: e.message }, 'Deduplication search failed');
+      }
+    }
+  }
+
+  const msgRef = messagesCol.doc(targetDocId);
 
   await msgRef.set({
-    ...doc,
-    createdAt: FieldValue.serverTimestamp(),
+    ...docData,
+    id: targetDocId,
+    updatedAt: FieldValue.serverTimestamp(),
+    timestampServer: FieldValue.serverTimestamp(),
   }, { merge: true });
 
-  const isIn = doc.direction === 'IN';
+  // Update conversation summary
+  const isIn = docData.direction === 'IN';
   await convRef.set({
     jid,
     type: jid.endsWith('@g.us') ? 'group' : 'user',
-    lastMessageText: doc.text || '[media]',
+    lastMessageText: docData.text || '[media]',
     lastMessageAt: FieldValue.serverTimestamp(),
-    lastMessageId: messageId,
+    lastMessageId: targetDocId,
     unreadCount: isIn ? FieldValue.increment(1) : FieldValue.increment(0),
     updatedAt: FieldValue.serverTimestamp(),
   }, { merge: true });
-}
-
-// --- CHATBOT LOGIC ---
-async function handleChatbotReply(channelId, jid, messageId, text, sock) {
-  try {
-    const botRef = db.collection('channels').doc(channelId).collection('runtime').doc('bot');
-    
-    // 1. Get Settings (from consolidate Firestore doc)
-    const botSnap = await botRef.get();
-    if (!botSnap.exists) return;
-    const botConfig = botSnap.data();
-    if (!botConfig.enabled) return;
-
-    // 2. Idempotency Check
-    const processedRef = db.collection('channels').doc(channelId).collection('runtime').doc('bot_processed').collection('ids').doc(messageId);
-    const processedSnap = await processedRef.get();
-    if (processedSnap.exists) return;
-
-    // Mark as processing
-    await processedRef.set({
-      jid,
-      processedAt: FieldValue.serverTimestamp(),
-      status: 'processing'
-    });
-
-    const productDetails = botConfig.productDetails || "";
-    const salesStrategy = botConfig.salesStrategy || "Responde como asistente profesional. Haz 1 pregunta para avanzar.";
-
-    // 4. Generate Response
-    const ai = await getAI();
-    const prompt = `
-Eres un asistente experto para WhatsApp. 
-REGLAS GLOBALES:
-- Responde de forma clara, breve y útil.
-- Usa emojis de forma moderada para ser cercano pero profesional.
-- Si falta información para ayudar al usuario, haz 1 o 2 preguntas clave.
-- NO inventes datos que no estén en el contexto.
-- Responde siempre en el mismo idioma que el usuario.
-
-ESTRATEGIA DE VENTAS Y PERSONALIDAD:
-${salesStrategy}
-
-DETALLES DEL PRODUCTO / BASE DE CONOCIMIENTO:
-${productDetails}
-
-MENSAJE DEL USUARIO:
-${text}
-    `;
-
-    const { text: responseText } = await ai.generate({ prompt });
-    if (!responseText) throw new Error('AI returned empty response');
-
-    // 5. Send & Persist
-    await new Promise(r => setTimeout(r, 2000));
-    const r = await sock.sendMessage(jid, { text: responseText });
-
-    const outMsgId = r?.key?.id || `bot-${Date.now()}`;
-    await saveMessageToFirestore(channelId, jid, outMsgId, {
-      messageId: outMsgId,
-      jid,
-      fromMe: true,
-      direction: 'OUT',
-      text: responseText,
-      status: 'sent',
-      timestamp: Date.now(),
-      isBot: true,
-    });
-
-    // Update stats in Firestore
-    await botRef.update({
-      lastAutoReplyAt: FieldValue.serverTimestamp(),
-      lastError: null
-    });
-
-    await processedRef.update({ status: 'completed' });
-
-  } catch (e) {
-    logger.error({ channelId, jid, error: e.message }, 'Chatbot execution failed');
-    const botRef = db.collection('channels').doc(channelId).collection('runtime').doc('bot');
-    await botRef.set({
-      lastError: e.message,
-      lastErrorAt: FieldValue.serverTimestamp()
-    }, { merge: true });
-  }
 }
 
 // --- BAILEYS CORE ---
@@ -485,16 +417,16 @@ async function startOrRestartBaileys(channelId, reason = 'manual') {
         const msgs = m?.messages || [];
         for (const msg of msgs) {
           const jid = msg?.key?.remoteJid;
-          const messageId = msg?.key?.id;
-          if (!jid || !messageId) continue;
+          const waMessageId = msg?.key?.id;
+          if (!jid || !waMessageId) continue;
 
           const fromMe = !!msg?.key?.fromMe;
           const text = extractText(msg?.message);
           const tsSec = typeof msg?.messageTimestamp === 'number' ? msg.messageTimestamp : null;
           const timestampMs = tsSec ? tsSec * 1000 : Date.now();
 
-          await saveMessageToFirestore(channelId, jid, messageId, {
-            messageId,
+          await saveMessageToFirestore(channelId, jid, waMessageId, {
+            waMessageId,
             jid,
             fromMe,
             direction: fromMe ? 'OUT' : 'IN',
@@ -502,11 +434,6 @@ async function startOrRestartBaileys(channelId, reason = 'manual') {
             status: fromMe ? 'sent' : 'received',
             timestamp: timestampMs,
           });
-
-          // Chatbot Trigger (Direct Firestore State Check)
-          if (!fromMe && text) {
-            handleChatbotReply(channelId, jid, messageId, text, sock).catch(() => {});
-          }
         }
       } catch (e) {}
     });
@@ -638,14 +565,38 @@ app.get('/v1/channels/:channelId/conversations/:jid/messages', async (req, res) 
 
 app.post('/v1/channels/:channelId/messages/send', async (req, res) => {
   try {
-    const { to, text } = req.body;
-    const sock = await ensureSocketReady(req.params.channelId);
+    const { to, text, meta } = req.body;
+    const { channelId } = req.params;
+    const clientMessageId = meta?.clientMessageId;
+
+    const sock = await ensureSocketReady(channelId);
     if (!sock) return res.status(409).json({ error: 'Socket not ready' });
+    
     const jid = to.includes('@') ? to : `${to}@s.whatsapp.net`;
     const r = await sock.sendMessage(jid, { text });
-    await saveMessageToFirestore(req.params.channelId, jid, r.key.id, { messageId: r.key.id, jid, fromMe: true, direction: 'OUT', text, status: 'sent', timestamp: Date.now() });
-    res.json({ ok: true, messageId: r.key.id });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+    const waMessageId = r?.key?.id;
+
+    if (waMessageId && clientMessageId) {
+      waToClientMap.set(waMessageId, clientMessageId);
+    }
+
+    await saveMessageToFirestore(channelId, jid, waMessageId || `proxy-${Date.now()}`, {
+      waMessageId,
+      clientMessageId: clientMessageId || null,
+      jid,
+      fromMe: true,
+      direction: 'OUT',
+      text,
+      status: 'sent',
+      timestamp: Date.now(),
+      source: meta?.source || 'proxy'
+    });
+
+    res.json({ ok: true, messageId: waMessageId || clientMessageId });
+  } catch (e) { 
+    logger.error({ error: e.message }, 'Worker send error');
+    res.status(500).json({ error: e.message }); 
+  }
 });
 
 app.post('/v1/channels/:channelId/conversations/:jid/markRead', async (req, res) => {

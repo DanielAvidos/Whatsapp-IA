@@ -933,12 +933,11 @@ function MessageThread({ channelId, jid, conversation, blocked }: { channelId: s
 
   const { data: messages, isLoading } = useCollection<Message>(messagesQuery);
 
-  // DEDUPLICACIÓN EN UI
+  // IDEMPOTENT UI DEDUPLICATION
   const dedupedMessages = useMemo(() => {
     const seen = new Set<string>();
     const out: Message[] = [];
     
-    // Ordenar por timestamp para procesar en secuencia
     const sorted = [...(messages ?? [])].sort((a, b) => {
       const ta = a.timestamp?.toDate ? a.timestamp.toDate().getTime() : Number(a.timestamp || 0);
       const tb = b.timestamp?.toDate ? b.timestamp.toDate().getTime() : Number(b.timestamp || 0);
@@ -946,14 +945,8 @@ function MessageThread({ channelId, jid, conversation, blocked }: { channelId: s
     });
 
     for (const m of sorted) {
-      const ts = m.timestamp?.toDate ? m.timestamp.toDate().getTime() : Number(m.timestamp || 0);
-      const bucket = Math.floor(ts / 60000); // Ventana de 1 minuto
-      
-      // La clave colapsa mensajes idénticos enviados en el mismo minuto
-      // Si tiene clientMessageId, es la referencia maestra
-      const key = m.clientMessageId
-        ? `cid:${m.clientMessageId}`
-        : `${m.fromMe ? "me" : "them"}|${m.text}|${bucket}`;
+      // Rule: primary dedupe by clientMessageId, secondary by waMessageId
+      const key = m.clientMessageId ? `cid:${m.clientMessageId}` : `waid:${m.waMessageId || m.id}`;
       
       if (seen.has(key)) continue;
       seen.add(key);
@@ -982,12 +975,11 @@ function MessageThread({ channelId, jid, conversation, blocked }: { channelId: s
 
     setIsSending(true);
     
-    // Generación de ID de cliente para deduplicación
     const clientMessageId = (globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`);
     const msgDocRef = doc(firestore, 'channels', channelId, 'conversations', jid, 'messages', clientMessageId);
 
     try {
-      // ESCRITURA OPTIMISTA con ID fijo
+      // OPTIMISTIC WRITE
       await setDoc(msgDocRef, {
         id: clientMessageId,
         clientMessageId,
@@ -1006,13 +998,14 @@ function MessageThread({ channelId, jid, conversation, blocked }: { channelId: s
       setInputText('');
 
       const sendFn = httpsCallable(functions, "sendMessageProxy");
-      await sendFn({ channelId, to: jid, text, clientMessageId });
-
-      // Actualizar a sent tras éxito
-      await setDoc(msgDocRef, {
-        status: "sent",
-        sentAt: serverTimestamp(),
-      }, { merge: true });
+      console.log('[CHAT_SEND] try', { channelId, jid, clientMessageId });
+      
+      await sendFn({ 
+        channelId, 
+        to: jid, 
+        text, 
+        clientMessageId 
+      });
 
     } catch (err: any) { 
       console.error('[CHAT_SEND] error', err);
