@@ -413,6 +413,7 @@ function FollowupConfigTab({ channelId, blocked }: { channelId: string, blocked:
 
   const [formData, setFormData] = useState<Partial<FollowupConfig>>({});
   const [hasInitialLoad, setHasInitialLoad] = useState(false);
+  const [cadenceText, setCadenceText] = useState<string>("");
 
   useEffect(() => {
     setHasInitialLoad(false);
@@ -421,6 +422,9 @@ function FollowupConfigTab({ channelId, blocked }: { channelId: string, blocked:
   useEffect(() => {
     if (config) {
       setFormData(config);
+      if (config.cadenceHours) {
+        setCadenceText(config.cadenceHours.join(", "));
+      }
       setHasInitialLoad(true);
     } else if (!isLoading && firestore && user && !hasInitialLoad) {
       const defaults: Partial<FollowupConfig> = {
@@ -443,6 +447,7 @@ function FollowupConfigTab({ channelId, blocked }: { channelId: string, blocked:
       }, { merge: true });
       
       setFormData(defaults);
+      setCadenceText(defaults.cadenceHours!.join(", "));
       setHasInitialLoad(true);
     }
   }, [config, isLoading, firestore, user, channelId, hasInitialLoad]);
@@ -450,6 +455,14 @@ function FollowupConfigTab({ channelId, blocked }: { channelId: string, blocked:
   const handleSave = async () => {
     if (!followupRef || !user || blocked) return;
     
+    // Parse cadenceText
+    const parsedCadence = cadenceText
+      .split(',')
+      .map(v => parseInt(v.trim()))
+      .filter(v => !isNaN(v) && v > 0);
+    
+    const finalCadence = parsedCadence.length > 0 ? parsedCadence : [1, 3, 5, 8, 13, 21, 34, 55, 89];
+
     const payload = {
       enabled: formData.enabled === true,
       businessHours: {
@@ -457,8 +470,8 @@ function FollowupConfigTab({ channelId, blocked }: { channelId: string, blocked:
         endHour: Number(formData.businessHours?.endHour ?? 22),
         timezone: formData.businessHours?.timezone ?? "America/Mexico_City"
       },
-      maxTouches: Number(formData.maxTouches ?? 9),
-      cadenceHours: formData.cadenceHours ?? [1, 3, 5, 8, 13, 21, 34, 55, 89],
+      maxTouches: finalCadence.length,
+      cadenceHours: finalCadence,
       stopKeywords: formData.stopKeywords ?? [],
       resumeKeywords: formData.resumeKeywords ?? [],
       toneProfile: formData.toneProfile ?? "",
@@ -470,8 +483,10 @@ function FollowupConfigTab({ channelId, blocked }: { channelId: string, blocked:
 
     try {
       await setDoc(followupRef, payload, { merge: true });
+      setCadenceText(finalCadence.join(", ")); // Normalize field
       toast({ title: 'Configuración de seguimiento guardada' });
     } catch (e) {
+      console.error(e);
       toast({ variant: 'destructive', title: 'Error al guardar configuración' });
     }
   };
@@ -522,11 +537,12 @@ function FollowupConfigTab({ channelId, blocked }: { channelId: string, blocked:
             <div className="space-y-2">
               <Label>Cadencia (Horas separadas por coma)</Label>
               <Input 
-                value={formData.cadenceHours?.join(', ') ?? ''} 
-                onChange={(e) => {
-                  const arr = e.target.value.split(',').map(v => parseInt(v.trim())).filter(v => !isNaN(v));
-                  setFormData(prev => ({ ...prev, cadenceHours: arr, maxTouches: arr.length }));
-                }} 
+                value={cadenceText} 
+                onChange={(e) => setCadenceText(e.target.value)} 
+                onBlur={() => {
+                  const parsed = cadenceText.split(',').map(v => parseInt(v.trim())).filter(v => !isNaN(v) && v > 0);
+                  if (parsed.length > 0) setCadenceText(parsed.join(", "));
+                }}
                 disabled={blocked}
               />
               <p className="text-[10px] text-muted-foreground">Ejemplo: 1, 3, 5, 24, 48... (horas desde el último mensaje del cliente)</p>
