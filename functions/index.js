@@ -342,7 +342,7 @@ exports.extendChannelTrial = functions.region("us-central1").https.onCall(async 
       endsAt: admin.firestore.Timestamp.fromDate(newEndsAt),
       extendedByUid: context.auth.uid,
       extendedByEmail: userEmail,
-      extendedAt: admin.firestore.FieldValue.serverTimestamp(),
+      extendedByAt: admin.firestore.FieldValue.serverTimestamp(),
       reason: reason || "Extension manual"
     };
 
@@ -635,11 +635,11 @@ exports.followupTickEveryMinute = functions
         continue;
       }
 
-      // Query broad to find potential candidates, then filter exactly in memory
+      // SIMPLE QUERY TO AVOID INDEX ERROR (FAILED_PRECONDITION)
+      // We only query by nextAt and filter status in memory
       const convsSnap = await db.collection(`channels/${channelId}/conversations`)
-        .where("followupEnabled", "==", true)
-        .where("followupStopped", "==", false)
         .where("followupNextAt", "<=", nowMinuteStartTs)
+        .limit(100)
         .get();
 
       if (convsSnap.empty) continue;
@@ -647,12 +647,18 @@ exports.followupTickEveryMinute = functions
       const workerUrl = await getWorkerUrl();
       const projectId = process.env.GOOGLE_CLOUD_PROJECT || admin.app().options.projectId;
 
-      let metrics = { totalFound: convsSnap.size, sent: 0, errors: 0, skippedTime: 0, skippedLock: 0 };
+      let metrics = { totalFound: convsSnap.size, sent: 0, errors: 0, skippedTime: 0, skippedLock: 0, skippedState: 0 };
 
       for (const convDoc of convsSnap.docs) {
         const jid = convDoc.id;
         const state = convDoc.data();
         
+        // MEMORY FILTERS
+        if (!state.followupEnabled || state.followupStopped) {
+          metrics.skippedState++;
+          continue;
+        }
+
         const nextAtTs = state.followupNextAt;
         if (!nextAtTs) continue;
 
@@ -661,24 +667,17 @@ exports.followupTickEveryMinute = functions
           .setZone(timezone)
           .set({ second: 0, millisecond: 0 });
 
-        // Mandatory Debug Log
-        logger.info("[FOLLOWUP DEBUG]", {
-          jid,
-          nextAt: nextAtDate.toISOString(),
-          nextAtRounded: nextAtRounded.toISO(),
-          nowMinuteStart: now.toISO()
-        });
+        // EXACT MINUTE MATCHING (STRING BASED FOR ROBUSTNESS)
+        const nextMinute = nextAtRounded.toFormat("yyyyMMddHHmm");
+        const nowMinute = now.toFormat("yyyyMMddHHmm");
 
-        // Exact minute matching
-        if (nextAtRounded.toMillis() !== now.toMillis()) {
+        if (nextMinute !== nowMinute) {
           metrics.skippedTime++;
           continue;
         }
 
         const step = state.followupStage || 0;
-        const nextAtKey = nextAtRounded.toFormat("yyyyMMddHHmm");
-
-        const lockId = `due_${nextAtKey}`;
+        const lockId = `due_${nextMinute}`;
         const lockRef = convDoc.ref.collection("followup_locks").doc(lockId);
         const lockSnap = await lockRef.get();
         
@@ -699,6 +698,13 @@ exports.followupTickEveryMinute = functions
           const reply = await generateWithGemini({ systemPrompt, messages, projectId, location: "us-central1" });
           
           if (!reply) throw new Error("Gemini no generó follow-up.");
+
+          logger.info("[FOLLOWUP SEND]", {
+            channelId,
+            jid,
+            step,
+            nextAt: nextAtRounded.toISO()
+          });
 
           await sendViaWorker({ 
             workerUrl, channelId, toJid: jid, text: reply, 
