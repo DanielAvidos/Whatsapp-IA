@@ -373,7 +373,7 @@ exports.sendMessageProxy = functions.region("us-central1").https.onCall(async (d
   const result = await sendViaWorker({ 
     workerUrl, 
     channelId, 
-    toJid: jid, 
+    toJid: to, 
     text,
     meta: { 
       source: "proxy", 
@@ -566,21 +566,29 @@ exports.onIncomingMessageUpdateFollowupState = functions
         // Sanitize cadence dynamic (supports decimals)
         const cadence = normalizeCadenceHours(config.cadenceHours);
         
-        // Next follow-up timestamp (step 0) rounded to minute exact
-        const firstIntervalHours = cadence[0];
+        // --- NEW LOGIC: PRESERVE STAGE ---
+        // Determine current stage or default to 0
+        const currentStage = typeof convData.followupStage === "number" && convData.followupStage >= 0 
+          ? convData.followupStage 
+          : 0;
+        
+        // Use the interval for the CURRENT stage (instead of resetting to 0)
+        // If the stage is out of bounds, fallback to cadence[0]
+        const stageIntervalHours = cadence[currentStage] !== undefined ? cadence[currentStage] : (cadence[0] || 1);
+
         const nextAtDate = DateTime.now()
           .setZone(timezone)
-          .plus({ minutes: Math.round(firstIntervalHours * 60) })
+          .plus({ minutes: Math.round(stageIntervalHours * 60) })
           .set({ second: 0, millisecond: 0 })
           .toJSDate();
 
-        logger.info("[FOLLOWUP] First step scheduled", { 
-          channelId, jid, cadenceValue: firstIntervalHours, nextAt: nextAtDate.toISOString() 
+        logger.info("[FOLLOWUP] Customer replied rescheduled", { 
+          channelId, jid, currentStage, stageIntervalHours, nextAt: nextAtDate.toISOString() 
         });
 
         await convRef.set({
           followupEnabled: shouldAutoEnable ? true : (convData.followupEnabled ?? false),
-          followupStage: 0,
+          followupStage: currentStage, // Preserve the stage
           followupStopped: false,
           followupLastCustomerAt: now,
           followupStopReason: "CUSTOMER_REPLIED",
