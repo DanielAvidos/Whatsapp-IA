@@ -218,7 +218,6 @@ async function getBotConfig(channelId) {
 }
 
 async function markProcessed(channelId, messageId, payload) {
-  // Sincronizado con el worker: channels/{id}/runtime/bot_processed/ids/{msgId}
   const ref = db.collection('channels').doc(channelId).collection('runtime').doc('bot_processed').collection('ids').doc(messageId);
   const snap = await ref.get();
   if (snap.exists) return false;
@@ -318,7 +317,6 @@ exports.extendChannelTrial = functions.region("us-central1").https.onCall(async 
     const currentData = snap.data();
     let currentEndsAt = currentData.trial?.endsAt?.toDate() || new Date();
     
-    // New endsAt
     let newEndsAt;
     if (endsAt) {
       newEndsAt = new Date(endsAt);
@@ -393,7 +391,6 @@ exports.onIncomingMessageCaptureCustomerProfile = functions
     const text = extractText(data);
     if (!text) return null;
 
-    // Idempotencia
     const lockRef = db.doc(`channels/${channelId}/conversations/${jid}/profile_processed/${messageId}`);
     const lockSnap = await lockRef.get();
     if (lockSnap.exists) return null;
@@ -500,7 +497,6 @@ exports.autoReplyOnIncomingMessage = functions
         meta: { triggerMessageId: messageId, source: "bot_auto" }
       });
 
-      // Auditoría simple en el bot
       await db.doc(`channels/${channelId}/runtime/bot`).set({
         lastAutoReplyAt: admin.firestore.FieldValue.serverTimestamp(),
         lastError: null,
@@ -539,7 +535,6 @@ exports.onIncomingMessageUpdateFollowupState = functions
       const convSnap = await convRef.get();
       const convData = convSnap.exists ? convSnap.data() : {};
       
-      // AUTO-ACTIVACIÓN para chats nuevos
       const shouldAutoEnable = convData.followupEnabled === undefined;
 
       if (isOptOut) {
@@ -552,13 +547,21 @@ exports.onIncomingMessageUpdateFollowupState = functions
           updatedAt: now
         }, { merge: true });
       } else {
-        // Reset follow-up state when customer replies
         const followupConfigSnap = await db.doc(`channels/${channelId}/runtime/followup`).get();
         const config = followupConfigSnap.exists ? followupConfigSnap.data() : {};
-        const cadence = config.cadenceHours || [1, 3, 5, 8, 13, 21, 34, 55, 89];
         
-        // Next follow-up timestamp (step 0 cadence) rounded to minute
-        const nextAtDate = DateTime.now().plus({ hours: cadence[0] || 1 }).set({ second: 0, millisecond: 0 }).toJSDate();
+        // Sanitize cadence dynamic
+        let cadence = [1, 3, 5, 8, 13, 21, 34, 55, 89];
+        if (config.cadenceHours && Array.isArray(config.cadenceHours)) {
+          const sanitized = config.cadenceHours
+            .map(v => parseInt(v))
+            .filter(v => !isNaN(v) && v > 0);
+          if (sanitized.length > 0) cadence = sanitized;
+        }
+        
+        // Next follow-up timestamp (step 0) rounded to minute exact
+        const firstInterval = cadence[0] || 1;
+        const nextAtDate = DateTime.now().plus({ hours: firstInterval }).set({ second: 0, millisecond: 0 }).toJSDate();
 
         await convRef.set({
           followupEnabled: shouldAutoEnable ? true : (convData.followupEnabled ?? false),
@@ -587,11 +590,14 @@ exports.followupTickEveryMinute = functions
   .pubsub
   .schedule("every 1 minutes")
   .onRun(async (context) => {
-    const now = DateTime.now();
-    const nowFloorDate = now.set({ second: 0, millisecond: 0 }).toJSDate();
-    const nowFloorTs = admin.firestore.Timestamp.fromDate(nowFloorDate);
+    const now = DateTime.now().set({ second: 0, millisecond: 0 });
+    const nowMinuteStartTs = admin.firestore.Timestamp.fromDate(now.toJSDate());
+    const nowMinuteEndTs = admin.firestore.Timestamp.fromDate(now.plus({ minutes: 1 }).toJSDate());
     
-    logger.info("[FOLLOWUP] Minute Tick start", { nowFloor: nowFloorDate.toISOString() });
+    logger.info("[FOLLOWUP] Tick window start", { 
+      start: now.toISO(), 
+      end: now.plus({ minutes: 1 }).toISO() 
+    });
 
     const channelsSnap = await db.collection("channels").get();
     
@@ -606,38 +612,53 @@ exports.followupTickEveryMinute = functions
 
       if (!config.enabled) continue;
 
-      const nowInTz = now.setZone(config.businessHours?.timezone || "America/Mexico_City");
-      if (nowInTz.hour < (config.businessHours?.startHour || 8) || nowInTz.hour >= (config.businessHours?.endHour || 22)) {
+      // Sanitize cadence dynamic
+      let cadence = [1, 3, 5, 8, 13, 21, 34, 55, 89];
+      if (config.cadenceHours && Array.isArray(config.cadenceHours)) {
+        const sanitized = config.cadenceHours
+          .map(v => parseInt(v))
+          .filter(v => !isNaN(v) && v > 0);
+        if (sanitized.length > 0) cadence = sanitized;
+      }
+
+      const timezone = config.businessHours?.timezone || "America/Mexico_City";
+      const nowInTz = now.setZone(timezone);
+      const startHour = parseInt(config.businessHours?.startHour ?? 8);
+      const endHour = parseInt(config.businessHours?.endHour ?? 22);
+
+      if (nowInTz.hour < startHour || nowInTz.hour >= endHour) {
         continue;
       }
 
-      // Query conversaciones elegibles (vencidas al minuto actual)
+      // Query conversations EXACTLY in this minute window
       const convsSnap = await db.collection(`channels/${channelId}/conversations`)
         .where("followupEnabled", "==", true)
         .where("followupStopped", "==", false)
-        .where("followupNextAt", "<=", nowFloorTs)
+        .where("followupNextAt", ">=", nowMinuteStartTs)
+        .where("followupNextAt", "<", nowMinuteEndTs)
         .get();
+
+      if (convsSnap.empty) continue;
+
+      logger.info(`[FOLLOWUP] Found ${convsSnap.size} eligible conversations for channel ${channelId}`);
 
       const workerUrl = await getWorkerUrl();
       const projectId = process.env.GOOGLE_CLOUD_PROJECT || admin.app().options.projectId;
 
-      let metrics = { total: convsSnap.size, eligible: 0, sent: 0, errors: 0, skippedLock: 0 };
+      let metrics = { total: convsSnap.size, sent: 0, errors: 0, skippedLock: 0 };
 
       for (const convDoc of convsSnap.docs) {
         const jid = convDoc.id;
         const state = convDoc.data();
         const step = state.followupStage || 0;
-        const cadence = config.cadenceHours || [1, 3, 5, 8, 13, 21, 34, 55, 89];
 
-        metrics.eligible++;
-
-        // Idempotency lock granular por el "minuto debido" de la conversación
+        // Idempotency lock determinista por el minuto programado
         const nextAtRaw = state.followupNextAt?.toDate ? state.followupNextAt.toDate() : null;
         const nextAtKey = nextAtRaw
-          ? DateTime.fromJSDate(nextAtRaw).setZone(config.businessHours?.timezone || "America/Mexico_City")
+          ? DateTime.fromJSDate(nextAtRaw).setZone(timezone)
               .set({ second: 0, millisecond: 0 })
               .toFormat("yyyyMMddHHmm")
-          : nowInTz.set({ second: 0, millisecond: 0 }).toFormat("yyyyMMddHHmm");
+          : nowInTz.toFormat("yyyyMMddHHmm");
 
         const lockId = `due_${nextAtKey}`;
         const lockRef = convDoc.ref.collection("followup_locks").doc(lockId);
@@ -666,13 +687,15 @@ exports.followupTickEveryMinute = functions
             meta: { type: "followup", step: step + 1, source: "scheduler" } 
           });
 
-          // Calculate next step with minute rounding
+          // Calc next step rounded to minute
           const nextStep = step + 1;
           let nextAt = null;
           let followupEnabled = true;
           let stopReason = state.followupStopReason || null;
 
-          if (nextStep < (config.maxTouches || cadence.length)) {
+          const maxTouches = parseInt(config.maxTouches ?? cadence.length);
+
+          if (nextStep < maxTouches) {
             const nextInterval = cadence[nextStep] || 24;
             const nextRounded = DateTime.now().plus({ hours: nextInterval }).set({ second: 0, millisecond: 0 }).toJSDate();
             nextAt = admin.firestore.Timestamp.fromDate(nextRounded);
@@ -691,15 +714,14 @@ exports.followupTickEveryMinute = functions
           });
 
           metrics.sent++;
+          logger.info(`[FOLLOWUP] Sent to ${jid}`, { channelId, step: nextStep, nextAt: nextAt?.toDate()?.toISOString() });
         } catch (e) {
           metrics.errors++;
-          logger.error(`[FOLLOWUP] Error en ${jid}`, e.message);
+          logger.error(`[FOLLOWUP] Error en ${jid}`, { channelId, error: e.message });
         }
       }
 
-      if (metrics.eligible > 0) {
-        logger.info("[FOLLOWUP] Channel metrics", { channelId, metrics });
-      }
+      logger.info("[FOLLOWUP] Channel metrics finish", { channelId, metrics, cadenceSane: cadence });
     }
   });
 
