@@ -605,11 +605,9 @@ exports.followupTickEveryMinute = functions
   .onRun(async (context) => {
     const now = DateTime.now().set({ second: 0, millisecond: 0 });
     const nowMinuteStartTs = admin.firestore.Timestamp.fromDate(now.toJSDate());
-    const nowMinuteEndTs = admin.firestore.Timestamp.fromDate(now.plus({ minutes: 1 }).toJSDate());
     
     logger.info("[FOLLOWUP] Tick window start", { 
-      start: now.toISO(), 
-      end: now.plus({ minutes: 1 }).toISO() 
+      now: now.toISO() 
     });
 
     const channelsSnap = await db.collection("channels").get();
@@ -637,35 +635,48 @@ exports.followupTickEveryMinute = functions
         continue;
       }
 
-      // Query conversations EXACTLY in this minute window
+      // Query broad to find potential candidates, then filter exactly in memory
       const convsSnap = await db.collection(`channels/${channelId}/conversations`)
         .where("followupEnabled", "==", true)
         .where("followupStopped", "==", false)
-        .where("followupNextAt", ">=", nowMinuteStartTs)
-        .where("followupNextAt", "<", nowMinuteEndTs)
+        .where("followupNextAt", "<=", nowMinuteStartTs)
         .get();
 
       if (convsSnap.empty) continue;
 
-      logger.info(`[FOLLOWUP] Found ${convsSnap.size} eligible conversations for channel ${channelId}`);
-
       const workerUrl = await getWorkerUrl();
       const projectId = process.env.GOOGLE_CLOUD_PROJECT || admin.app().options.projectId;
 
-      let metrics = { total: convsSnap.size, sent: 0, errors: 0, skippedLock: 0 };
+      let metrics = { totalFound: convsSnap.size, sent: 0, errors: 0, skippedTime: 0, skippedLock: 0 };
 
       for (const convDoc of convsSnap.docs) {
         const jid = convDoc.id;
         const state = convDoc.data();
-        const step = state.followupStage || 0;
+        
+        const nextAtTs = state.followupNextAt;
+        if (!nextAtTs) continue;
 
-        // Idempotency lock determinista por el minuto programado
-        const nextAtRaw = state.followupNextAt?.toDate ? state.followupNextAt.toDate() : null;
-        const nextAtKey = nextAtRaw
-          ? DateTime.fromJSDate(nextAtRaw).setZone(timezone)
-              .set({ second: 0, millisecond: 0 })
-              .toFormat("yyyyMMddHHmm")
-          : nowInTz.toFormat("yyyyMMddHHmm");
+        const nextAtDate = nextAtTs.toDate();
+        const nextAtRounded = DateTime.fromJSDate(nextAtDate)
+          .setZone(timezone)
+          .set({ second: 0, millisecond: 0 });
+
+        // Mandatory Debug Log
+        logger.info("[FOLLOWUP DEBUG]", {
+          jid,
+          nextAt: nextAtDate.toISOString(),
+          nextAtRounded: nextAtRounded.toISO(),
+          nowMinuteStart: now.toISO()
+        });
+
+        // Exact minute matching
+        if (nextAtRounded.toMillis() !== now.toMillis()) {
+          metrics.skippedTime++;
+          continue;
+        }
+
+        const step = state.followupStage || 0;
+        const nextAtKey = nextAtRounded.toFormat("yyyyMMddHHmm");
 
         const lockId = `due_${nextAtKey}`;
         const lockRef = convDoc.ref.collection("followup_locks").doc(lockId);
@@ -724,14 +735,13 @@ exports.followupTickEveryMinute = functions
           });
 
           metrics.sent++;
-          logger.info(`[FOLLOWUP] Sent to ${jid}`, { channelId, step: nextStep, nextAt: nextAt?.toDate()?.toISOString() });
         } catch (e) {
           metrics.errors++;
           logger.error(`[FOLLOWUP] Error en ${jid}`, { channelId, error: e.message });
         }
       }
 
-      logger.info("[FOLLOWUP] Channel metrics finish", { channelId, metrics, cadenceSane: cadence });
+      logger.info("[FOLLOWUP] Channel metrics finish", { channelId, metrics });
     }
   });
 
