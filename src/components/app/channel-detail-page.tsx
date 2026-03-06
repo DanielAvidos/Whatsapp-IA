@@ -576,7 +576,7 @@ function FollowupConfigTab({ channelId, blocked }: { channelId: string, blocked:
                 }}
                 disabled={blocked}
               />
-              <p className="text-[10px] text-muted-foreground">Ejemplo: 1, 3, 5, 24, 48... (horas desde el último mensaje del cliente)</p>
+              <p className="text-[10px] text-muted-foreground">Ejemplo: 0.1, 0.5, 1, 24... (horas decimales permitidas desde el último mensaje del cliente)</p>
             </div>
 
             <div className="space-y-2">

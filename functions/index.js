@@ -41,6 +41,18 @@ function extractFromMe(data) {
 }
 
 /**
+ * Normaliza el arreglo de cadencia soportando decimales.
+ */
+function normalizeCadenceHours(raw) {
+  const def = [1, 3, 5, 8, 13, 21, 34, 55, 89];
+  if (!raw || !Array.isArray(raw)) return def;
+  const sanitized = raw
+    .map(v => parseFloat(v))
+    .filter(v => !isNaN(v) && v > 0);
+  return sanitized.length > 0 ? sanitized : def;
+}
+
+/**
  * Extraction Helpers
  */
 function extractEmail(text) {
@@ -550,18 +562,19 @@ exports.onIncomingMessageUpdateFollowupState = functions
         const followupConfigSnap = await db.doc(`channels/${channelId}/runtime/followup`).get();
         const config = followupConfigSnap.exists ? followupConfigSnap.data() : {};
         
-        // Sanitize cadence dynamic
-        let cadence = [1, 3, 5, 8, 13, 21, 34, 55, 89];
-        if (config.cadenceHours && Array.isArray(config.cadenceHours)) {
-          const sanitized = config.cadenceHours
-            .map(v => parseInt(v))
-            .filter(v => !isNaN(v) && v > 0);
-          if (sanitized.length > 0) cadence = sanitized;
-        }
+        // Sanitize cadence dynamic (supports decimals)
+        const cadence = normalizeCadenceHours(config.cadenceHours);
         
         // Next follow-up timestamp (step 0) rounded to minute exact
-        const firstInterval = cadence[0] || 1;
-        const nextAtDate = DateTime.now().plus({ hours: firstInterval }).set({ second: 0, millisecond: 0 }).toJSDate();
+        const firstIntervalHours = cadence[0];
+        const nextAtDate = DateTime.now()
+          .plus({ minutes: Math.round(firstIntervalHours * 60) })
+          .set({ second: 0, millisecond: 0 })
+          .toJSDate();
+
+        logger.info("[FOLLOWUP] First step scheduled", { 
+          channelId, jid, cadenceValue: firstIntervalHours, nextAt: nextAtDate.toISOString() 
+        });
 
         await convRef.set({
           followupEnabled: shouldAutoEnable ? true : (convData.followupEnabled ?? false),
@@ -612,14 +625,8 @@ exports.followupTickEveryMinute = functions
 
       if (!config.enabled) continue;
 
-      // Sanitize cadence dynamic
-      let cadence = [1, 3, 5, 8, 13, 21, 34, 55, 89];
-      if (config.cadenceHours && Array.isArray(config.cadenceHours)) {
-        const sanitized = config.cadenceHours
-          .map(v => parseInt(v))
-          .filter(v => !isNaN(v) && v > 0);
-        if (sanitized.length > 0) cadence = sanitized;
-      }
+      // Sanitize cadence dynamic (supports decimals)
+      const cadence = normalizeCadenceHours(config.cadenceHours);
 
       const timezone = config.businessHours?.timezone || "America/Mexico_City";
       const nowInTz = now.setZone(timezone);
@@ -696,8 +703,11 @@ exports.followupTickEveryMinute = functions
           const maxTouches = parseInt(config.maxTouches ?? cadence.length);
 
           if (nextStep < maxTouches) {
-            const nextInterval = cadence[nextStep] || 24;
-            const nextRounded = DateTime.now().plus({ hours: nextInterval }).set({ second: 0, millisecond: 0 }).toJSDate();
+            const nextIntervalHours = cadence[nextStep] || 24;
+            const nextRounded = DateTime.now()
+              .plus({ minutes: Math.round(nextIntervalHours * 60) })
+              .set({ second: 0, millisecond: 0 })
+              .toJSDate();
             nextAt = admin.firestore.Timestamp.fromDate(nextRounded);
           } else {
             followupEnabled = false;
