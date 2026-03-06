@@ -373,7 +373,7 @@ exports.sendMessageProxy = functions.region("us-central1").https.onCall(async (d
   const result = await sendViaWorker({ 
     workerUrl, 
     channelId, 
-    toJid: to, 
+    toJid: jid, 
     text,
     meta: { 
       source: "proxy", 
@@ -561,6 +561,7 @@ exports.onIncomingMessageUpdateFollowupState = functions
       } else {
         const followupConfigSnap = await db.doc(`channels/${channelId}/runtime/followup`).get();
         const config = followupConfigSnap.exists ? followupConfigSnap.data() : {};
+        const timezone = config.businessHours?.timezone || "America/Mexico_City";
         
         // Sanitize cadence dynamic (supports decimals)
         const cadence = normalizeCadenceHours(config.cadenceHours);
@@ -568,6 +569,7 @@ exports.onIncomingMessageUpdateFollowupState = functions
         // Next follow-up timestamp (step 0) rounded to minute exact
         const firstIntervalHours = cadence[0];
         const nextAtDate = DateTime.now()
+          .setZone(timezone)
           .plus({ minutes: Math.round(firstIntervalHours * 60) })
           .set({ second: 0, millisecond: 0 })
           .toJSDate();
@@ -603,12 +605,7 @@ exports.followupTickEveryMinute = functions
   .pubsub
   .schedule("every 1 minutes")
   .onRun(async (context) => {
-    const now = DateTime.now().set({ second: 0, millisecond: 0 });
-    const nowMinuteStartTs = admin.firestore.Timestamp.fromDate(now.toJSDate());
-    
-    logger.info("[FOLLOWUP] Tick window start", { 
-      now: now.toISO() 
-    });
+    logger.info("[FOLLOWUP] Tick window start");
 
     const channelsSnap = await db.collection("channels").get();
     
@@ -623,11 +620,15 @@ exports.followupTickEveryMinute = functions
 
       if (!config.enabled) continue;
 
+      // --- TIMEZONE HANDLING ---
+      const timezone = config.businessHours?.timezone || "America/Mexico_City";
+      const now = DateTime.now().setZone(timezone).set({ second: 0, millisecond: 0 });
+      const nowTs = admin.firestore.Timestamp.fromDate(now.toJSDate());
+
       // Sanitize cadence dynamic (supports decimals)
       const cadence = normalizeCadenceHours(config.cadenceHours);
 
-      const timezone = config.businessHours?.timezone || "America/Mexico_City";
-      const nowInTz = now.setZone(timezone);
+      const nowInTz = now;
       const startHour = parseInt(config.businessHours?.startHour ?? 8);
       const endHour = parseInt(config.businessHours?.endHour ?? 22);
 
@@ -638,7 +639,7 @@ exports.followupTickEveryMinute = functions
       // SIMPLE QUERY TO AVOID INDEX ERROR (FAILED_PRECONDITION)
       // We only query by nextAt and filter status in memory
       const convsSnap = await db.collection(`channels/${channelId}/conversations`)
-        .where("followupNextAt", "<=", nowMinuteStartTs)
+        .where("followupNextAt", "<=", nowTs)
         .limit(100)
         .get();
 
@@ -703,7 +704,8 @@ exports.followupTickEveryMinute = functions
             channelId,
             jid,
             step,
-            nextAt: nextAtRounded.toISO()
+            nextAt: nextAtRounded.toISO(),
+            now: now.toISO()
           });
 
           await sendViaWorker({ 
@@ -722,6 +724,7 @@ exports.followupTickEveryMinute = functions
           if (nextStep < maxTouches) {
             const nextIntervalHours = cadence[nextStep] || 24;
             const nextRounded = DateTime.now()
+              .setZone(timezone)
               .plus({ minutes: Math.round(nextIntervalHours * 60) })
               .set({ second: 0, millisecond: 0 })
               .toJSDate();
