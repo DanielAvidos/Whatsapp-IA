@@ -53,6 +53,51 @@ function normalizeCadenceHours(raw) {
 }
 
 /**
+ * Suma minutos respetando únicamente la ventana horaria de negocio.
+ * El tiempo fuera de esta ventana se salta.
+ */
+function addBusinessMinutes(startDate, minutesToAdd, businessHours = {}, timezone = "America/Mexico_City") {
+  const startHour = Number(businessHours?.startHour ?? 8);
+  const endHour = Number(businessHours?.endHour ?? 22);
+
+  let cursor = DateTime.fromJSDate(startDate, { zone: timezone }).set({ second: 0, millisecond: 0 });
+  let remaining = Math.max(0, Math.round(minutesToAdd));
+
+  const moveToBusinessWindow = (dt) => {
+    if (dt.hour < startHour) {
+      return dt.set({ hour: startHour, minute: 0, second: 0, millisecond: 0 });
+    }
+    if (dt.hour >= endHour || (dt.hour === endHour && dt.minute > 0)) {
+      return dt.plus({ days: 1 }).set({ hour: startHour, minute: 0, second: 0, millisecond: 0 });
+    }
+    return dt;
+  };
+
+  cursor = moveToBusinessWindow(cursor);
+
+  while (remaining > 0) {
+    const endOfWindow = cursor.set({ hour: endHour, minute: 0, second: 0, millisecond: 0 });
+    const available = Math.max(0, Math.floor(endOfWindow.diff(cursor, "minutes").minutes));
+
+    if (available === 0) {
+      cursor = cursor.plus({ days: 1 }).set({ hour: startHour, minute: 0, second: 0, millisecond: 0 });
+      continue;
+    }
+
+    if (remaining <= available) {
+      cursor = cursor.plus({ minutes: remaining }).set({ second: 0, millisecond: 0 });
+      remaining = 0;
+      break;
+    }
+
+    remaining -= available;
+    cursor = cursor.plus({ days: 1 }).set({ hour: startHour, minute: 0, second: 0, millisecond: 0 });
+  }
+
+  return cursor.set({ second: 0, millisecond: 0 }).toJSDate();
+}
+
+/**
  * Extraction Helpers
  */
 function extractEmail(text) {
@@ -567,20 +612,19 @@ exports.onIncomingMessageUpdateFollowupState = functions
         const cadence = normalizeCadenceHours(config.cadenceHours);
         
         // --- NEW LOGIC: PRESERVE STAGE ---
-        // Determine current stage or default to 0
         const currentStage = typeof convData.followupStage === "number" && convData.followupStage >= 0 
           ? convData.followupStage 
           : 0;
         
-        // Use the interval for the CURRENT stage (instead of resetting to 0)
-        // If the stage is out of bounds, fallback to cadence[0]
         const stageIntervalHours = cadence[currentStage] !== undefined ? cadence[currentStage] : (cadence[0] || 1);
 
-        const nextAtDate = DateTime.now()
-          .setZone(timezone)
-          .plus({ minutes: Math.round(stageIntervalHours * 60) })
-          .set({ second: 0, millisecond: 0 })
-          .toJSDate();
+        // NEW BUSINESS MINUTES CALC
+        const nextAtDate = addBusinessMinutes(
+          new Date(),
+          Math.round(stageIntervalHours * 60),
+          config.businessHours,
+          timezone
+        );
 
         logger.info("[FOLLOWUP] Customer replied rescheduled", { 
           channelId, jid, currentStage, stageIntervalHours, nextAt: nextAtDate.toISOString() 
@@ -645,7 +689,6 @@ exports.followupTickEveryMinute = functions
       }
 
       // SIMPLE QUERY TO AVOID INDEX ERROR (FAILED_PRECONDITION)
-      // We only query by nextAt and filter status in memory
       const convsSnap = await db.collection(`channels/${channelId}/conversations`)
         .where("followupNextAt", "<=", nowTs)
         .limit(100)
@@ -676,7 +719,7 @@ exports.followupTickEveryMinute = functions
           .setZone(timezone)
           .set({ second: 0, millisecond: 0 });
 
-        // EXACT MINUTE MATCHING (STRING BASED FOR ROBUSTNESS)
+        // EXACT MINUTE MATCHING
         const nextMinute = nextAtRounded.toFormat("yyyyMMddHHmm");
         const nowMinute = now.toFormat("yyyyMMddHHmm");
 
@@ -731,12 +774,17 @@ exports.followupTickEveryMinute = functions
 
           if (nextStep < maxTouches) {
             const nextIntervalHours = cadence[nextStep] || 24;
-            const nextRounded = DateTime.now()
-              .setZone(timezone)
-              .plus({ minutes: Math.round(nextIntervalHours * 60) })
-              .set({ second: 0, millisecond: 0 })
-              .toJSDate();
-            nextAt = admin.firestore.Timestamp.fromDate(nextRounded);
+            const nextBusinessDate = addBusinessMinutes(
+              new Date(),
+              Math.round(nextIntervalHours * 60),
+              config.businessHours,
+              timezone
+            );
+            nextAt = admin.firestore.Timestamp.fromDate(nextBusinessDate);
+
+            logger.info("[FOLLOWUP] Business nextAt calculated", {
+              channelId, jid, stage: nextStep, intervalHours: nextIntervalHours, nextAt: nextBusinessDate.toISOString()
+            });
           } else {
             followupEnabled = false;
             stopReason = "COMPLETED";
