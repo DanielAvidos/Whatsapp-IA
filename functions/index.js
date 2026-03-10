@@ -287,11 +287,55 @@ async function markProcessed(channelId, messageId, payload) {
   return true;
 }
 
+// --- TEXT COMPLETION & SANITIZATION HELPERS ---
+
+function isTextLikelyTruncated(text) {
+  const t = String(text || "").trim();
+  if (!t) return true;
+
+  const badEndings = [
+    "para", "porque", "y", "o", "que", "de", "con", "en", "por",
+    "entiendo", "claro", "perfecto", "además", "también"
+  ];
+
+  const lower = t.toLowerCase();
+  const endsWell = /[.!?…\"]$/.test(t);
+  if (!endsWell) return true;
+  if (/[,:;(]$/.test(t)) return true;
+
+  const words = lower.split(/\s+/);
+  const lastWord = words[words.length - 1];
+  if (badEndings.includes(lastWord)) return true;
+  
+  return false;
+}
+
+function trimToLastCompleteSentence(text) {
+  const t = String(text || "").replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+  if (!t) return null;
+
+  // Busca el último cierre natural (. ! ? ...)
+  const matches = [...t.matchAll(/([\s\S]*?[.!?…\"])(?=\s|$)/g)];
+  if (matches.length > 0) {
+    const last = matches[matches.length - 1][0]?.trim();
+    if (last && last.length >= 20) return last;
+  }
+
+  return isTextLikelyTruncated(t) ? null : t;
+}
+
+function sanitizeWhatsAppReply(text) {
+  return String(text || "")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 async function generateWithGemini({ systemPrompt, messages, projectId, location }) {
   const vertexAI = new VertexAI({ project: projectId, location });
   const genModel = vertexAI.getGenerativeModel({
     model: GEMINI_MODEL_LOCKED,
-    generationConfig: { maxOutputTokens: 512, temperature: 0.6 },
+    generationConfig: { maxOutputTokens: 900, temperature: 0.6 },
   });
 
   const historyString = messages
@@ -308,6 +352,49 @@ async function generateWithGemini({ systemPrompt, messages, projectId, location 
   const text = resp?.candidates?.[0]?.content?.parts?.map((p) => p.text).join("") || "";
 
   return String(text || "").trim();
+}
+
+/**
+ * Wrapper robusto para generar mensajes completos y bien cerrados.
+ */
+async function generateCompleteMessage({ systemPrompt, messages, projectId, location }) {
+  let reply = await generateWithGemini({ systemPrompt, messages, projectId, location });
+  
+  if (isTextLikelyTruncated(reply)) {
+    logger.info("[BOT] Respuesta truncada detectada, reintentando completar...", { originalLength: reply.length });
+    
+    const completionPrompt = `Completa el siguiente mensaje de WhatsApp sin repetir desde el inicio. Devuélvelo completo y bien cerrado, en un solo mensaje breve y natural.
+MENSAJE PARCIAL: ${reply}`;
+
+    const vertexAI = new VertexAI({ project: projectId, location });
+    const genModel = vertexAI.getGenerativeModel({
+      model: GEMINI_MODEL_LOCKED,
+      generationConfig: { maxOutputTokens: 400, temperature: 0.5 },
+    });
+
+    const result = await genModel.generateContent({
+      contents: [{ role: "user", parts: [{ text: completionPrompt }] }],
+    });
+    
+    const secondPart = result?.response?.candidates?.[0]?.content?.parts?.map((p) => p.text).join("") || "";
+    
+    if (secondPart) {
+      if (secondPart.length < reply.length) {
+        reply = reply + " " + secondPart.trim();
+      } else {
+        reply = secondPart.trim();
+      }
+    }
+  }
+
+  const sanitized = sanitizeWhatsAppReply(reply);
+  const final = trimToLastCompleteSentence(sanitized);
+
+  if (!final || final.length < 5) {
+    throw new Error("El mensaje generado quedó incompleto o vacío tras el saneamiento.");
+  }
+
+  return final;
 }
 
 async function sendViaWorker({ workerUrl, channelId, toJid, text, meta }) {
@@ -542,9 +629,11 @@ exports.autoReplyOnIncomingMessage = functions
       });
 
       const messages = await loadConversationContext(channelId, jid, 12);
-      const reply = await generateWithGemini({ systemPrompt, messages, projectId, location });
+      const reply = await generateCompleteMessage({ systemPrompt, messages, projectId, location });
 
       if (!reply) throw new Error("Gemini no generó respuesta.");
+
+      logger.info("[BOT] Generated reply sanitized", { channelId, jid, length: reply.length });
 
       await sendViaWorker({ 
         workerUrl, 
@@ -608,17 +697,14 @@ exports.onIncomingMessageUpdateFollowupState = functions
         const config = followupConfigSnap.exists ? followupConfigSnap.data() : {};
         const timezone = config.businessHours?.timezone || "America/Mexico_City";
         
-        // Sanitize cadence dynamic (supports decimals)
         const cadence = normalizeCadenceHours(config.cadenceHours);
         
-        // --- NEW LOGIC: PRESERVE STAGE ---
         const currentStage = typeof convData.followupStage === "number" && convData.followupStage >= 0 
           ? convData.followupStage 
           : 0;
         
         const stageIntervalHours = cadence[currentStage] !== undefined ? cadence[currentStage] : (cadence[0] || 1);
 
-        // NEW BUSINESS MINUTES CALC
         const nextAtDate = addBusinessMinutes(
           new Date(),
           Math.round(stageIntervalHours * 60),
@@ -632,7 +718,7 @@ exports.onIncomingMessageUpdateFollowupState = functions
 
         await convRef.set({
           followupEnabled: shouldAutoEnable ? true : (convData.followupEnabled ?? false),
-          followupStage: currentStage, // Preserve the stage
+          followupStage: currentStage,
           followupStopped: false,
           followupLastCustomerAt: now,
           followupStopReason: "CUSTOMER_REPLIED",
@@ -672,23 +758,19 @@ exports.followupTickEveryMinute = functions
 
       if (!config.enabled) continue;
 
-      // --- TIMEZONE HANDLING ---
       const timezone = config.businessHours?.timezone || "America/Mexico_City";
       const now = DateTime.now().setZone(timezone).set({ second: 0, millisecond: 0 });
       const nowTs = admin.firestore.Timestamp.fromDate(now.toJSDate());
 
-      // Sanitize cadence dynamic (supports decimals)
       const cadence = normalizeCadenceHours(config.cadenceHours);
 
-      const nowInTz = now;
       const startHour = parseInt(config.businessHours?.startHour ?? 8);
       const endHour = parseInt(config.businessHours?.endHour ?? 22);
 
-      if (nowInTz.hour < startHour || nowInTz.hour >= endHour) {
+      if (now.hour < startHour || now.hour >= endHour) {
         continue;
       }
 
-      // SIMPLE QUERY TO AVOID INDEX ERROR (FAILED_PRECONDITION)
       const convsSnap = await db.collection(`channels/${channelId}/conversations`)
         .where("followupNextAt", "<=", nowTs)
         .limit(100)
@@ -705,7 +787,6 @@ exports.followupTickEveryMinute = functions
         const jid = convDoc.id;
         const state = convDoc.data();
         
-        // MEMORY FILTERS
         if (!state.followupEnabled || state.followupStopped) {
           metrics.skippedState++;
           continue;
@@ -719,7 +800,6 @@ exports.followupTickEveryMinute = functions
           .setZone(timezone)
           .set({ second: 0, millisecond: 0 });
 
-        // EXACT MINUTE MATCHING
         const nextMinute = nextAtRounded.toFormat("yyyyMMddHHmm");
         const nowMinute = now.toFormat("yyyyMMddHHmm");
 
@@ -747,7 +827,7 @@ exports.followupTickEveryMinute = functions
             kbDocs, isFollowup: true, step 
           });
           const messages = await loadConversationContext(channelId, jid, 6);
-          const reply = await generateWithGemini({ systemPrompt, messages, projectId, location: "us-central1" });
+          const reply = await generateCompleteMessage({ systemPrompt, messages, projectId, location: "us-central1" });
           
           if (!reply) throw new Error("Gemini no generó follow-up.");
 
@@ -756,7 +836,7 @@ exports.followupTickEveryMinute = functions
             jid,
             step,
             nextAt: nextAtRounded.toISO(),
-            now: now.toISO()
+            length: reply.length
           });
 
           await sendViaWorker({ 
@@ -764,7 +844,6 @@ exports.followupTickEveryMinute = functions
             meta: { type: "followup", step: step + 1, source: "scheduler" } 
           });
 
-          // Calc next step rounded to minute
           const nextStep = step + 1;
           let nextAt = null;
           let followupEnabled = true;
