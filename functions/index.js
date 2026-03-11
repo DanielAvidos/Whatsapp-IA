@@ -216,11 +216,17 @@ async function loadKnowledgeBaseDocs(channelId) {
 function buildSystemPrompt({ salesStrategy, productDetails, kbDocs, isFollowup = false, step = 0 }) {
   const hardRules = `
 Eres un asistente automático experto en WhatsApp.
-REGLAS GLOBALES:
-- Responde claro, breve y útil.
+REGLAS GLOBALES DE ESCRITURA:
+- Escribe mensajes COMPLETOS, NATURALES y COHERENTES.
+- Nunca mezcles frases incompletas con saludos o nombres.
+- Nunca reutilices literalmente fragmentos raros del historial.
+- Nunca respondas con texto cortado, híbrido o mal unido.
+- No repitas saludos innecesarios en todos los mensajes.
+- Usa máximo 2 párrafos cortos.
+- Cierra con una sola idea clara o una sola pregunta clara.
+- No uses listas salvo que sea estrictamente necesario.
+- Si el contexto está confuso, responde con una frase breve y una pregunta simple.
 - Usa emojis moderados.
-- Si falta info, haz 1-2 preguntas.
-- No inventes datos fuera del contexto.
 - Responde en el idioma del usuario.
 `.trim();
 
@@ -287,7 +293,7 @@ async function markProcessed(channelId, messageId, payload) {
   return true;
 }
 
-// --- TEXT COMPLETION & SANITIZATION HELPERS ---
+// --- TEXT COMPLETION, SANITIZATION & COHERENCE HELPERS ---
 
 function isTextLikelyTruncated(text) {
   const t = String(text || "").trim();
@@ -307,6 +313,34 @@ function isTextLikelyTruncated(text) {
   const lastWord = words[words.length - 1];
   if (badEndings.includes(lastWord)) return true;
   
+  return false;
+}
+
+function isTextLikelyIncoherent(text) {
+  const t = String(text || "").trim();
+  if (t.length < 12) return true;
+
+  // Detección de "collage" o fragmentos mal unidos
+  const incoherentPatterns = [
+    /un\s+[¡!¿?]/i,
+    /de\s+que\s+[¡!¿?]/i,
+    /para\s+que\s+[¡!¿?]/i,
+    /si\s+buscas\s+un\s+[¡!¿?]/i,
+    /ya\s+que\s+buscas\s+un\s+[¡!¿?]/i,
+    /entiendo[,!]\s+\w+\s*[!?,]\s*\w+/i, // "Entiendo, Daniel!" incrustado raro
+    /[¡!¿?]\s+[a-z]/, // Signo seguido de minúscula sin espacio (a veces indica salto mal procesado)
+  ];
+
+  if (incoherentPatterns.some(p => p.test(t))) return true;
+
+  // Múltiples saludos encadenados sin sentido
+  const greetings = ["hola", "buen día", "buenos días", "buenas tardes", "entiendo", "perfecto", "claro"];
+  const lower = t.toLowerCase();
+  const starts = lower.slice(0, 50);
+  let greetingCount = 0;
+  greetings.forEach(g => { if (starts.includes(g)) greetingCount++; });
+  if (greetingCount >= 4) return true;
+
   return false;
 }
 
@@ -331,7 +365,25 @@ function sanitizeWhatsAppReply(text) {
     .trim();
 }
 
-async function generateWithGemini({ systemPrompt, messages, projectId, location }) {
+function normalizeWhatsAppStyle(text) {
+  let t = String(text || "").trim();
+  t = t.replace(/\s{2,}/g, ' '); // Quitar espacios duplicados
+  
+  const paragraphs = t.split('\n').filter(p => p.trim());
+  if (paragraphs.length > 3) {
+    t = paragraphs.slice(0, 3).join('\n\n');
+  }
+
+  // Asegurar máximo una pregunta final
+  const questions = t.match(/\?+/g);
+  if (questions && questions.length > 2) {
+    // Si hay demasiadas preguntas, probablemente sea incoherente
+  }
+
+  return t;
+}
+
+async function generateWithGemini({ systemPrompt, messages, projectId, location, customPrompt = null }) {
   const vertexAI = new VertexAI({ project: projectId, location });
   const genModel = vertexAI.getGenerativeModel({
     model: GEMINI_MODEL_LOCKED,
@@ -342,7 +394,7 @@ async function generateWithGemini({ systemPrompt, messages, projectId, location 
     .map(m => `${m.role.toUpperCase()}: ${m.text}`)
     .join("\n");
 
-  const fullPrompt = `${systemPrompt}\n\n=== HISTORIAL DE CONVERSACIÓN ===\n${historyString}\n\nASSISTANT:`;
+  const fullPrompt = customPrompt || `${systemPrompt}\n\n=== HISTORIAL DE CONVERSACIÓN ===\n${historyString}\n\nASSISTANT:`;
 
   const result = await genModel.generateContent({
     contents: [{ role: "user", parts: [{ text: fullPrompt }] }],
@@ -355,43 +407,44 @@ async function generateWithGemini({ systemPrompt, messages, projectId, location 
 }
 
 /**
- * Wrapper robusto para generar mensajes completos y bien cerrados.
+ * Generador robusto con validación de coherencia y reescritura estricta.
  */
-async function generateCompleteMessage({ systemPrompt, messages, projectId, location }) {
+async function generateSafeWhatsAppReply({ systemPrompt, messages, projectId, location, mode = "auto" }) {
+  const logPrefix = `[${mode.toUpperCase()}]`;
   let reply = await generateWithGemini({ systemPrompt, messages, projectId, location });
   
-  if (isTextLikelyTruncated(reply)) {
-    logger.info("[BOT] Respuesta truncada detectada, reintentando completar...", { originalLength: reply.length });
-    
-    const completionPrompt = `Completa el siguiente mensaje de WhatsApp sin repetir desde el inicio. Devuélvelo completo y bien cerrado, en un solo mensaje breve y natural.
-MENSAJE PARCIAL: ${reply}`;
+  let sanitized = normalizeWhatsAppStyle(sanitizeWhatsAppReply(reply));
+  let isTruncated = isTextLikelyTruncated(sanitized);
+  let isIncoherent = isTextLikelyIncoherent(sanitized);
 
-    const vertexAI = new VertexAI({ project: projectId, location });
-    const genModel = vertexAI.getGenerativeModel({
-      model: GEMINI_MODEL_LOCKED,
-      generationConfig: { maxOutputTokens: 400, temperature: 0.5 },
-    });
+  if (isTruncated || isIncoherent) {
+    logger.info(`${logPrefix} Reply failed validation (trunc=${isTruncated}, incon=${isIncoherent}). Retrying with strict rewrite...`);
+    
+    const rewritePrompt = `
+Reescribe desde cero el siguiente mensaje para WhatsApp basándote en la conversación.
+Debe ser breve, natural, coherente, completo y SIN mezclar fragmentos inconexos.
+No repitas saludos si no hacen falta.
+Máximo 2 párrafos y una sola idea final clara.
+Devuelve únicamente el mensaje final listo para enviar.
 
-    const result = await genModel.generateContent({
-      contents: [{ role: "user", parts: [{ text: completionPrompt }] }],
-    });
+MENSAJE DEFECTUOSO ANTERIOR: ${sanitized}
+`.trim();
+
+    reply = await generateWithGemini({ systemPrompt, messages, projectId, location, customPrompt: rewritePrompt });
+    sanitized = normalizeWhatsAppStyle(sanitizeWhatsAppReply(reply));
     
-    const secondPart = result?.response?.candidates?.[0]?.content?.parts?.map((p) => p.text).join("") || "";
-    
-    if (secondPart) {
-      if (secondPart.length < reply.length) {
-        reply = reply + " " + secondPart.trim();
-      } else {
-        reply = secondPart.trim();
-      }
+    // Segunda validación
+    if (isTextLikelyTruncated(sanitized) || isTextLikelyIncoherent(sanitized)) {
+      throw new Error("Generated message failed coherence validation after retry.");
     }
+    logger.info(`${logPrefix} Safe reply generated after strict rewrite.`);
+  } else {
+    logger.info(`${logPrefix} Safe reply generated on first attempt.`);
   }
 
-  const sanitized = sanitizeWhatsAppReply(reply);
   const final = trimToLastCompleteSentence(sanitized);
-
   if (!final || final.length < 5) {
-    throw new Error("El mensaje generado quedó incompleto o vacío tras el saneamiento.");
+    throw new Error("Final sanitized message is too short or empty.");
   }
 
   return final;
@@ -629,11 +682,9 @@ exports.autoReplyOnIncomingMessage = functions
       });
 
       const messages = await loadConversationContext(channelId, jid, 12);
-      const reply = await generateCompleteMessage({ systemPrompt, messages, projectId, location });
+      const reply = await generateSafeWhatsAppReply({ systemPrompt, messages, projectId, location, mode: "bot" });
 
-      if (!reply) throw new Error("Gemini no generó respuesta.");
-
-      logger.info("[BOT] Generated reply sanitized", { channelId, jid, length: reply.length });
+      if (!reply) throw new Error("Gemini no generó respuesta válida.");
 
       await sendViaWorker({ 
         workerUrl, 
@@ -827,9 +878,9 @@ exports.followupTickEveryMinute = functions
             kbDocs, isFollowup: true, step 
           });
           const messages = await loadConversationContext(channelId, jid, 6);
-          const reply = await generateCompleteMessage({ systemPrompt, messages, projectId, location: "us-central1" });
+          const reply = await generateSafeWhatsAppReply({ systemPrompt, messages, projectId, location: "us-central1", mode: "followup" });
           
-          if (!reply) throw new Error("Gemini no generó follow-up.");
+          if (!reply) throw new Error("Gemini no generó follow-up válido.");
 
           logger.info("[FOLLOWUP SEND]", {
             channelId,
