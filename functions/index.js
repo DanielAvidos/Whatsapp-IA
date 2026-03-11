@@ -40,9 +40,6 @@ function extractFromMe(data) {
   return !!key.fromMe;
 }
 
-/**
- * Normaliza el arreglo de cadencia soportando decimales.
- */
 function normalizeCadenceHours(raw) {
   const def = [1, 3, 5, 8, 13, 21, 34, 55, 89];
   if (!raw || !Array.isArray(raw)) return def;
@@ -52,10 +49,6 @@ function normalizeCadenceHours(raw) {
   return sanitized.length > 0 ? sanitized : def;
 }
 
-/**
- * Suma minutos respetando únicamente la ventana horaria de negocio.
- * El tiempo fuera de esta ventana se salta.
- */
 function addBusinessMinutes(startDate, minutesToAdd, businessHours = {}, timezone = "America/Mexico_City") {
   const startHour = Number(businessHours?.startHour ?? 8);
   const endHour = Number(businessHours?.endHour ?? 22);
@@ -97,9 +90,6 @@ function addBusinessMinutes(startDate, minutesToAdd, businessHours = {}, timezon
   return cursor.set({ second: 0, millisecond: 0 }).toJSDate();
 }
 
-/**
- * Extraction Helpers
- */
 function extractEmail(text) {
   const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
   const match = text.match(emailRegex);
@@ -131,9 +121,6 @@ function extractName(text) {
   return null;
 }
 
-/**
- * Trial & Access Control
- */
 async function getChannelAccess(channelId) {
   const docRef = db.doc(`channels/${channelId}`);
   const snap = await docRef.get();
@@ -141,7 +128,6 @@ async function getChannelAccess(channelId) {
   const data = snap.data();
   
   let trial = data.trial;
-  // Lazy init if missing
   if (!trial) {
     const created = data.createdAt ? data.createdAt.toDate() : new Date();
     const endsAt = new Date(created.getTime() + 30 * 24 * 60 * 60 * 1000);
@@ -164,9 +150,6 @@ async function getChannelAccess(channelId) {
   return { blocked: false, endsAt: trial.endsAt };
 }
 
-/**
- * Carga los últimos N mensajes de una conversación para dar contexto a la IA.
- */
 async function loadConversationContext(channelId, jid, limitCount = 12) {
   try {
     const snap = await db
@@ -190,9 +173,6 @@ async function loadConversationContext(channelId, jid, limitCount = 12) {
   }
 }
 
-/**
- * Carga los documentos de conocimiento listos del canal.
- */
 async function loadKnowledgeBaseDocs(channelId) {
   try {
     const snap = await db
@@ -215,31 +195,29 @@ async function loadKnowledgeBaseDocs(channelId) {
 
 function buildSystemPrompt({ salesStrategy, productDetails, kbDocs, isFollowup = false, step = 0 }) {
   const hardRules = `
-Eres un asistente automático experto en WhatsApp.
+Eres un asesor comercial experto en WhatsApp.
 REGLAS GLOBALES DE ESCRITURA:
+- Responde únicamente con información alineada al entrenamiento del canal.
+- Prioriza los Detalles del Producto y la Estrategia de Venta proporcionada.
 - Escribe mensajes COMPLETOS, NATURALES y COHERENTES.
-- Nunca mezcles frases incompletas con saludos o nombres.
-- Nunca reutilices literalmente fragmentos raros del historial.
-- Nunca respondas con texto cortado, híbrido o mal unido.
-- No repitas saludos innecesarios en todos los mensajes.
+- No improvises datos ni inventes información fuera de contexto.
 - Usa máximo 2 párrafos cortos.
-- Cierra con una sola idea clara o una sola pregunta clara.
+- Cierra con una sola idea clara o una sola pregunta comercial para avanzar.
 - No uses listas salvo que sea estrictamente necesario.
-- Si el contexto está confuso, responde con una frase breve y una pregunta simple.
-- Usa emojis moderados.
-- Responde en el idioma del usuario.
+- Usa emojis de forma muy moderada.
+- Responde siempre en el mismo idioma que el cliente.
 `.trim();
 
   let followupInstruction = "";
   if (isFollowup) {
-    followupInstruction = `\n=== INSTRUCCIÓN DE SEGUIMIENTO (Paso ${step + 1}) ===\nEste es un mensaje de seguimiento proactivo porque el cliente no ha respondido. No seas insistente, varía el tono según el paso. Si es el primer paso, solo recuerda amablemente. Si es avanzado, ofrece un valor adicional o pregunta si prefiere que no le escribamos.`;
+    followupInstruction = `\n=== INSTRUCCIÓN DE SEGUIMIENTO (Paso ${step + 1}) ===\nEste es un mensaje de seguimiento proactivo porque el cliente no ha respondido. Sé amable, breve y varía el tono según el paso.`;
   }
 
   let kbSection = "";
   if (kbDocs && kbDocs.length > 0) {
-    kbSection = "\n=== CONOCIMIENTO POR DOCUMENTOS ===\n";
+    kbSection = "\n=== CONOCIMIENTO ADICIONAL (DOCUMENTOS) ===\n";
     kbDocs.forEach(doc => {
-      kbSection += `Documento: ${doc.fileName}\nResumen: ${doc.summary}\nContenido Relevante: ${doc.extractedText.slice(0, 2000)}\n---\n`;
+      kbSection += `Resumen de ${doc.fileName}: ${doc.summary}\nContenido Relevante: ${doc.extractedText.slice(0, 1500)}\n---\n`;
     });
   }
 
@@ -247,11 +225,11 @@ REGLAS GLOBALES DE ESCRITURA:
 ${hardRules}
 ${followupInstruction}
 
-=== ESTRATEGIA Y PERSONALIDAD ===
-${salesStrategy || "Responde como asistente profesional. Si falta info, haz 1 pregunta para avanzar."}
+=== DETALLES DEL PRODUCTO/SERVICIO ===
+${productDetails || "Atención al cliente general."}
 
-=== BASE DE CONOCIMIENTO (PRODUCTO/SERVICIO) ===
-${productDetails || ""}
+=== ESTRATEGIA DE VENTA Y PERSONALIDAD ===
+${salesStrategy || "Asistente profesional y servicial."}
 ${kbSection}
 `.trim();
 }
@@ -273,7 +251,7 @@ async function getBotConfig(channelId) {
   const d = snap.exists ? snap.data() : {};
 
   return {
-    enabled: d?.enabled !== undefined ? !!d.enabled : true, // ON por defecto
+    enabled: d?.enabled !== undefined ? !!d.enabled : true,
     model: GEMINI_MODEL_LOCKED,
     productDetails: safeText(d?.productDetails),
     salesStrategy: safeText(d?.salesStrategy),
@@ -293,53 +271,40 @@ async function markProcessed(channelId, messageId, payload) {
   return true;
 }
 
-// --- TEXT COMPLETION, SANITIZATION & COHERENCE HELPERS ---
+// --- TEXT SANITIZATION & VALIDATION ---
 
 function isTextLikelyTruncated(text) {
   const t = String(text || "").trim();
   if (!t) return true;
 
   const badEndings = [
-    "para", "porque", "y", "o", "que", "de", "con", "en", "por",
+    "para", "porque", "ya que", "y", "o", "que", "de", "con", "en", "por",
     "entiendo", "claro", "perfecto", "además", "también"
   ];
 
   const lower = t.toLowerCase();
-  const endsWell = /[.!?…\"]$/.test(t);
-  if (!endsWell) return true;
-  if (/[,:;(]$/.test(t)) return true;
-
   const words = lower.split(/\s+/);
   const lastWord = words[words.length - 1];
+  
   if (badEndings.includes(lastWord)) return true;
+  if (/[,:;(]$/.test(t)) return true;
   
   return false;
 }
 
 function isTextLikelyIncoherent(text) {
   const t = String(text || "").trim();
-  if (t.length < 12) return true;
+  if (t.length < 15) return false;
 
-  // Detección de "collage" o fragmentos mal unidos
-  const incoherentPatterns = [
+  const corruptionPatterns = [
     /un\s+[¡!¿?]/i,
     /de\s+que\s+[¡!¿?]/i,
     /para\s+que\s+[¡!¿?]/i,
-    /si\s+buscas\s+un\s+[¡!¿?]/i,
     /ya\s+que\s+buscas\s+un\s+[¡!¿?]/i,
-    /entiendo[,!]\s+\w+\s*[!?,]\s*\w+/i, // "Entiendo, Daniel!" incrustado raro
-    /[¡!¿?]\s+[a-z]/, // Signo seguido de minúscula sin espacio (a veces indica salto mal procesado)
+    /entiendo[,!]\s+\w+\s*[!?,]\s*\w+/i, 
   ];
 
-  if (incoherentPatterns.some(p => p.test(t))) return true;
-
-  // Múltiples saludos encadenados sin sentido
-  const greetings = ["hola", "buen día", "buenos días", "buenas tardes", "entiendo", "perfecto", "claro"];
-  const lower = t.toLowerCase();
-  const starts = lower.slice(0, 50);
-  let greetingCount = 0;
-  greetings.forEach(g => { if (starts.includes(g)) greetingCount++; });
-  if (greetingCount >= 4) return true;
+  if (corruptionPatterns.some(p => p.test(t))) return true;
 
   return false;
 }
@@ -348,7 +313,6 @@ function trimToLastCompleteSentence(text) {
   const t = String(text || "").replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
   if (!t) return null;
 
-  // Busca el último cierre natural (. ! ? ...)
   const matches = [...t.matchAll(/([\s\S]*?[.!?…\"])(?=\s|$)/g)];
   if (matches.length > 0) {
     const last = matches[matches.length - 1][0]?.trim();
@@ -359,28 +323,49 @@ function trimToLastCompleteSentence(text) {
 }
 
 function sanitizeWhatsAppReply(text) {
-  return String(text || "")
+  let t = String(text || "")
     .replace(/[ \t]+\n/g, "\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
+  
+  const paragraphs = t.split('\n\n');
+  if (paragraphs.length > 2) {
+    t = paragraphs.slice(0, 2).join('\n\n');
+  }
+  
+  return t;
 }
 
 function normalizeWhatsAppStyle(text) {
   let t = String(text || "").trim();
-  t = t.replace(/\s{2,}/g, ' '); // Quitar espacios duplicados
+  t = t.replace(/\s{2,}/g, ' '); 
   
-  const paragraphs = t.split('\n').filter(p => p.trim());
-  if (paragraphs.length > 3) {
-    t = paragraphs.slice(0, 3).join('\n\n');
-  }
-
-  // Asegurar máximo una pregunta final
-  const questions = t.match(/\?+/g);
-  if (questions && questions.length > 2) {
-    // Si hay demasiadas preguntas, probablemente sea incoherente
+  const lines = t.split('\n').filter(l => l.trim());
+  if (lines.length > 4) {
+    t = lines.slice(0, 4).join('\n\n'); 
   }
 
   return t;
+}
+
+/**
+ * Constuye una respuesta segura de respaldo (LOCAL) usando el entrenamiento.
+ */
+function buildFallbackReply({ botConfig, kbDocs, isFollowup, step }) {
+  const details = botConfig.productDetails || "";
+  const strategy = botConfig.salesStrategy || "";
+  
+  const detailParts = details.split(/[.\n]/).filter(p => p.trim().length > 10);
+  const baseInfo = detailParts[0]?.trim() || "Estamos a tus órdenes para brindarte la mejor atención.";
+
+  const questionMatch = strategy.match(/¿[^?]+\?/);
+  const closing = questionMatch ? questionMatch[0] : "¿Cómo podemos apoyarte hoy?";
+
+  if (isFollowup) {
+    return `Seguimos atentos a tus dudas sobre nuestro servicio.\n\n${closing}`;
+  }
+
+  return `${baseInfo}\n\n${closing}`;
 }
 
 async function generateWithGemini({ systemPrompt, messages, projectId, location, customPrompt = null }) {
@@ -407,47 +392,66 @@ async function generateWithGemini({ systemPrompt, messages, projectId, location,
 }
 
 /**
- * Generador robusto con validación de coherencia y reescritura estricta.
+ * Generador robusto con estrategia de 3 niveles: IA -> Reescritura -> Fallback.
  */
-async function generateSafeWhatsAppReply({ systemPrompt, messages, projectId, location, mode = "auto" }) {
-  const logPrefix = `[${mode.toUpperCase()}]`;
-  let reply = await generateWithGemini({ systemPrompt, messages, projectId, location });
-  
+async function generateSafeWhatsAppReply({ 
+  systemPrompt, 
+  messages, 
+  projectId, 
+  location, 
+  botConfig, 
+  kbDocs, 
+  isFollowup = false, 
+  step = 0 
+}) {
+  const logPrefix = isFollowup ? `[FOLLOWUP]` : `[BOT]`;
+  let reply = "";
+
+  // NIVEL 1: Intento normal con Gemini
+  try {
+    reply = await generateWithGemini({ systemPrompt, messages, projectId, location });
+  } catch (err) {
+    logger.error(`${logPrefix} Gemini attempt 1 failed`, { error: err.message });
+  }
+
   let sanitized = normalizeWhatsAppStyle(sanitizeWhatsAppReply(reply));
   let isTruncated = isTextLikelyTruncated(sanitized);
   let isIncoherent = isTextLikelyIncoherent(sanitized);
 
-  if (isTruncated || isIncoherent) {
+  // NIVEL 2: Reintento con reescritura estricta si el primero falló o es inválido
+  if (!sanitized || isTruncated || isIncoherent) {
     logger.info(`${logPrefix} Reply failed validation (trunc=${isTruncated}, incon=${isIncoherent}). Retrying with strict rewrite...`);
     
     const rewritePrompt = `
-Reescribe desde cero el siguiente mensaje para WhatsApp basándote en la conversación.
+Reescribe desde cero el siguiente mensaje para WhatsApp basándote en la conversación y entrenamiento.
 Debe ser breve, natural, coherente, completo y SIN mezclar fragmentos inconexos.
 No repitas saludos si no hacen falta.
 Máximo 2 párrafos y una sola idea final clara.
 Devuelve únicamente el mensaje final listo para enviar.
 
-MENSAJE DEFECTUOSO ANTERIOR: ${sanitized}
+MENSAJE DEFECTUOSO: ${sanitized || "Vacío"}
 `.trim();
 
-    reply = await generateWithGemini({ systemPrompt, messages, projectId, location, customPrompt: rewritePrompt });
-    sanitized = normalizeWhatsAppStyle(sanitizeWhatsAppReply(reply));
-    
-    // Segunda validación
-    if (isTextLikelyTruncated(sanitized) || isTextLikelyIncoherent(sanitized)) {
-      throw new Error("Generated message failed coherence validation after retry.");
+    try {
+      const secondReply = await generateWithGemini({ systemPrompt, messages, projectId, location, customPrompt: rewritePrompt });
+      sanitized = normalizeWhatsAppStyle(sanitizeWhatsAppReply(secondReply));
+      
+      if (sanitized && !isTextLikelyTruncated(sanitized)) {
+        logger.info(`${logPrefix} Safe reply generated after strict rewrite.`);
+        return trimToLastCompleteSentence(sanitized) || sanitized;
+      }
+    } catch (err) {
+      logger.error(`${logPrefix} Gemini attempt 2 failed`, { error: err.message });
     }
-    logger.info(`${logPrefix} Safe reply generated after strict rewrite.`);
   } else {
-    logger.info(`${logPrefix} Safe reply generated on first attempt.`);
+    logger.info(`${logPrefix} Safe reply generated by Gemini.`);
+    return trimToLastCompleteSentence(sanitized) || sanitized;
   }
 
-  const final = trimToLastCompleteSentence(sanitized);
-  if (!final || final.length < 5) {
-    throw new Error("Final sanitized message is too short or empty.");
-  }
-
-  return final;
+  // NIVEL 3: Fallback seguro si Gemini falla repetidamente o genera basura
+  logger.warn(`${logPrefix} All Gemini attempts failed or invalid. Using fallback reply.`);
+  const fallback = buildFallbackReply({ botConfig, kbDocs, isFollowup, step });
+  return normalizeWhatsAppStyle(sanitizeWhatsAppReply(fallback));
 }
 
 async function sendViaWorker({ workerUrl, channelId, toJid, text, meta }) {
@@ -473,7 +477,6 @@ async function sendViaWorker({ workerUrl, channelId, toJid, text, meta }) {
   return body;
 }
 
-// --- OPT-OUT DETECTION ---
 const OPT_OUT_KEYWORDS = ["stop", "alto", "cancelar", "no me escribas", "deja de escribir", "no me interesa", "no estoy interesado", "ya no", "baja", "unsubscribe", "quitar", "no gracias", "no quiero"];
 
 function detectOptOut(text) {
@@ -484,9 +487,6 @@ function detectOptOut(text) {
 
 // --- CLOUD FUNCTIONS ---
 
-/**
- * Admin: Extender Trial (Callable)
- */
 exports.extendChannelTrial = functions.region("us-central1").https.onCall(async (data, context) => {
   if (!context.auth) {
     logger.warn("[TRIAL] Unauthenticated request");
@@ -541,9 +541,6 @@ exports.extendChannelTrial = functions.region("us-central1").https.onCall(async 
   }
 });
 
-/**
- * Proxy: Send Message with Trial Check
- */
 exports.sendMessageProxy = functions.region("us-central1").https.onCall(async (data, context) => {
   if (!context.auth) throw new functions.https.HttpsError("unauthenticated", "Auth required");
   
@@ -570,9 +567,6 @@ exports.sendMessageProxy = functions.region("us-central1").https.onCall(async (d
   return { success: true, result };
 });
 
-/**
- * Trigger: Captura el perfil del cliente.
- */
 exports.onIncomingMessageCaptureCustomerProfile = functions
   .region("us-central1")
   .firestore
@@ -637,9 +631,6 @@ exports.onIncomingMessageCaptureCustomerProfile = functions
     return null;
   });
 
-/**
- * Trigger: Responde mensajes entrantes.
- */
 exports.autoReplyOnIncomingMessage = functions
   .region("us-central1")
   .firestore
@@ -682,9 +673,17 @@ exports.autoReplyOnIncomingMessage = functions
       });
 
       const messages = await loadConversationContext(channelId, jid, 12);
-      const reply = await generateSafeWhatsAppReply({ systemPrompt, messages, projectId, location, mode: "bot" });
+      const reply = await generateSafeWhatsAppReply({ 
+        systemPrompt, 
+        messages, 
+        projectId, 
+        location,
+        botConfig: bot,
+        kbDocs,
+        isFollowup: false
+      });
 
-      if (!reply) throw new Error("Gemini no generó respuesta válida.");
+      if (!reply) throw new Error("Generación de respuesta falló (IA + Fallback).");
 
       await sendViaWorker({ 
         workerUrl, 
@@ -710,9 +709,6 @@ exports.autoReplyOnIncomingMessage = functions
     return null;
   });
 
-/**
- * Trigger: Actualiza estado de follow-up al llegar mensajes.
- */
 exports.onIncomingMessageUpdateFollowupState = functions
   .region("us-central1")
   .firestore
@@ -786,9 +782,6 @@ exports.onIncomingMessageUpdateFollowupState = functions
     return null;
   });
 
-/**
- * Scheduler: Ejecuta el seguimiento minuto a minuto.
- */
 exports.followupTickEveryMinute = functions
   .region("us-central1")
   .pubsub
@@ -878,16 +871,25 @@ exports.followupTickEveryMinute = functions
             kbDocs, isFollowup: true, step 
           });
           const messages = await loadConversationContext(channelId, jid, 6);
-          const reply = await generateSafeWhatsAppReply({ systemPrompt, messages, projectId, location: "us-central1", mode: "followup" });
           
-          if (!reply) throw new Error("Gemini no generó follow-up válido.");
+          const reply = await generateSafeWhatsAppReply({ 
+            systemPrompt, 
+            messages, 
+            projectId, 
+            location: "us-central1",
+            botConfig: bot,
+            kbDocs,
+            isFollowup: true,
+            step
+          });
+          
+          if (!reply) throw new Error("No se pudo generar seguimiento.");
 
           logger.info("[FOLLOWUP SEND]", {
             channelId,
             jid,
             step,
-            nextAt: nextAtRounded.toISO(),
-            length: reply.length
+            nextAt: nextAtRounded.toISO()
           });
 
           await sendViaWorker({ 
@@ -940,9 +942,6 @@ exports.followupTickEveryMinute = functions
     }
   });
 
-/**
- * Trigger: Procesa archivos subidos a la base de conocimientos.
- */
 exports.onKnowledgeFileFinalize = functions
   .region("us-central1")
   .storage.object()
