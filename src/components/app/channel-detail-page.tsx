@@ -881,6 +881,7 @@ function ChatInterface({ channelId, blocked }: { channelId: string, blocked: boo
             jid={selectedJid} 
             conversation={conversations?.find(c => c.jid === selectedJid)!} 
             blocked={blocked}
+            onDeleteSuccess={() => setSelectedJid(null)}
           />
         ) : (
           <div className="flex flex-col items-center justify-center h-full text-muted-foreground p-8">
@@ -977,7 +978,7 @@ function CustomerProfileDialog({ channelId, conversation, isOpen, onOpenChange }
   );
 }
 
-function MessageThread({ channelId, jid, conversation, blocked }: { channelId: string, jid: string, conversation: Conversation, blocked: boolean }) {
+function MessageThread({ channelId, jid, conversation, blocked, onDeleteSuccess }: { channelId: string, jid: string, conversation: Conversation, blocked: boolean, onDeleteSuccess?: () => void }) {
   const { user, firestore, firebaseApp } = useFirebase();
   const functions = firebaseApp ? getFunctions(firebaseApp, "us-central1") : null;
   const [inputText, setInputText] = useState('');
@@ -985,6 +986,8 @@ function MessageThread({ channelId, jid, conversation, blocked }: { channelId: s
   const [isProfileOpen, setIsProfileOpen] = useState(false);
   const [isClearOpen, setIsClearOpen] = useState(false);
   const [isClearing, setIsClearing] = useState(false);
+  const [isDeleteOpen, setIsDeleteOpen] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const { toast } = useToast();
 
@@ -1142,6 +1145,44 @@ function MessageThread({ channelId, jid, conversation, blocked }: { channelId: s
     }
   };
 
+  const deleteFullConversation = async () => {
+    if (!firestore || !channelId || !jid) return;
+    setIsDeleting(true);
+    try {
+      const convRef = doc(firestore, 'channels', channelId, 'conversations', jid);
+      
+      // Helper to delete a collection in batches
+      const deleteCollection = async (collectionPath: string) => {
+        const colRef = collection(firestore, collectionPath);
+        while (true) {
+          const q = query(colRef, limit(400));
+          const snapshot = await getDocs(q);
+          if (snapshot.empty) break;
+          const batch = writeBatch(firestore);
+          snapshot.docs.forEach((doc) => batch.delete(doc.ref));
+          await batch.commit();
+        }
+      };
+
+      // 1. Delete subcollections (known ones)
+      await deleteCollection(`channels/${channelId}/conversations/${jid}/messages`);
+      await deleteCollection(`channels/${channelId}/conversations/${jid}/followup_locks`);
+      await deleteCollection(`channels/${channelId}/conversations/${jid}/profile_processed`);
+
+      // 2. Delete the conversation document itself
+      await deleteDoc(convRef);
+
+      toast({ title: 'Conversación eliminada', description: 'La conversación ha sido borrada completamente.' });
+      setIsDeleteOpen(false);
+      if (onDeleteSuccess) onDeleteSuccess();
+    } catch (error: any) {
+      console.error('[DELETE_CONV] error', error);
+      toast({ variant: 'destructive', title: 'Error al eliminar', description: error.message || String(error) });
+    } finally {
+      setIsDeleting(false);
+    }
+  };
+
   return (
     <>
       <CardHeader className="border-b py-3 px-4 flex-row justify-between items-center bg-card">
@@ -1189,9 +1230,19 @@ function MessageThread({ channelId, jid, conversation, blocked }: { channelId: s
                       e.preventDefault();
                       setIsClearOpen(true);
                     }}
-                    disabled={isClearing}
+                    disabled={isClearing || isDeleting}
                   >
                     <Trash2 className="mr-2 h-4 w-4" /> Limpiar chat
+                  </DropdownMenuItem>
+                  <DropdownMenuItem 
+                    className="text-destructive focus:text-destructive" 
+                    onSelect={(e) => {
+                      e.preventDefault();
+                      setIsDeleteOpen(true);
+                    }}
+                    disabled={isClearing || isDeleting}
+                  >
+                    <XCircle className="mr-2 h-4 w-4" /> Eliminar conversación
                   </DropdownMenuItem>
                 </>
               )}
@@ -1284,7 +1335,7 @@ function MessageThread({ channelId, jid, conversation, blocked }: { channelId: s
           <AlertDialogHeader>
             <AlertDialogTitle>Limpiar chat</AlertDialogTitle>
             <AlertDialogDescription>
-              Esta acción eliminará todos los mensajes de esta conversación. No se puede deshacer.
+              Esta acción eliminará todos los mensajes de esta conversación. El chat seguirá apareciendo en la lista. No se puede deshacer.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -1299,6 +1350,31 @@ function MessageThread({ channelId, jid, conversation, blocked }: { channelId: s
             >
               {isClearing ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Trash2 className="mr-2 h-4 w-4" />}
               Eliminar mensajes
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={isDeleteOpen} onOpenChange={setIsDeleteOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>¿Eliminar conversación completa?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Esta acción eliminará la conversación completa y todos sus mensajes de forma permanente. <strong>Ya no aparecerá en la lista izquierda.</strong>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={isDeleting}>Cancelar</AlertDialogCancel>
+            <AlertDialogAction 
+              onClick={(e) => {
+                e.preventDefault();
+                deleteFullConversation();
+              }}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              disabled={isDeleting}
+            >
+              {isDeleting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Trash2 className="mr-2 h-4 w-4" />}
+              Borrar definitivamente
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
