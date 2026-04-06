@@ -14,6 +14,7 @@ import {
   SidebarMenuButton,
   SidebarGroup,
   SidebarGroupLabel,
+  useSidebar,
 } from "@/components/ui/sidebar";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Building2, KeyRound, MessageSquare, Users, LogOut, CheckCircle2, XCircle, Loader2 } from "lucide-react";
@@ -25,7 +26,6 @@ import { TranslationKey } from "@/lib/locales";
 import { getIsSuperAdmin, getMyCompany } from "@/lib/auth-helpers";
 import { collection, query, where } from "firebase/firestore";
 import type { WhatsappChannel } from "@/lib/types";
-import { Badge } from "../ui/badge";
 
 const navItems: { href: string; icon: React.ElementType; labelKey: TranslationKey; adminOnly: boolean }[] = [
   { href: "/dashboard", icon: Building2, labelKey: "nav.tenants", adminOnly: true },
@@ -40,6 +40,7 @@ export function AppSidebar() {
   const auth = useAuth();
   const firestore = useFirestore();
   const { t } = useLanguage();
+  const { setOpenMobile } = useSidebar();
 
   const isSuperAdmin = getIsSuperAdmin(user);
   const [myCompanyId, setMyCompanyId] = useState<string | null>(null);
@@ -83,7 +84,7 @@ export function AppSidebar() {
                   isActive={pathname.startsWith(item.href)}
                   tooltip={{ children: t(item.labelKey) }}
                 >
-                  <Link href={item.href}>
+                  <Link href={item.href} onClick={() => setOpenMobile(false)}>
                     <item.icon />
                     <span>{t(item.labelKey)}</span>
                   </Link>
@@ -111,7 +112,11 @@ export function AppSidebar() {
                       tooltip={{ children: channel.displayName }}
                       className="h-auto py-2"
                     >
-                      <Link href={`/channels/${channel.id}`} className="flex flex-col items-start gap-0">
+                      <Link 
+                        href={`/channels/${channel.id}`} 
+                        onClick={() => setOpenMobile(false)}
+                        className="flex flex-col items-start gap-0"
+                      >
                         <div className="flex items-center gap-2 w-full">
                           {channel.status === 'CONNECTED' ? (
                             <CheckCircle2 className="size-3 text-green-500" />

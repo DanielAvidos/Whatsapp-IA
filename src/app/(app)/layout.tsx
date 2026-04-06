@@ -2,12 +2,13 @@
 "use client";
 
 import { AppSidebar } from "@/components/app/sidebar";
-import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
+import { SidebarInset, SidebarProvider, SidebarTrigger } from "@/components/ui/sidebar";
 import { useUser } from "@/firebase";
 import { useRouter, usePathname } from "next/navigation";
 import { useEffect } from "react";
 import { Skeleton } from "@/components/ui/skeleton";
 import { getIsSuperAdmin } from "@/lib/auth-helpers";
+import { Logo } from "@/components/icons/logo";
 
 export default function AppLayout({
   children,
@@ -51,6 +52,13 @@ export default function AppLayout({
     <SidebarProvider>
       <AppSidebar />
       <SidebarInset>
+        <header className="flex h-14 items-center gap-4 border-b bg-background px-4 md:hidden sticky top-0 z-30">
+          <SidebarTrigger />
+          <div className="flex items-center gap-2">
+            <Logo className="size-6 text-primary" />
+            <span className="font-semibold text-sm">Whatsapp IA</span>
+          </div>
+        </header>
         {children}
       </SidebarInset>
     </SidebarProvider>
