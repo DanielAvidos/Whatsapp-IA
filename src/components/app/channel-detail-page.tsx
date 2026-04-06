@@ -836,6 +836,10 @@ function ChatInterface({ channelId, blocked }: { channelId: string, blocked: boo
 
   const { data: conversations, isLoading: isLoadingConversations } = useCollection<Conversation>(conversationsQuery);
 
+  const activeConversation = useMemo(() => {
+    return conversations?.find(c => c.jid === selectedJid);
+  }, [conversations, selectedJid]);
+
   return (
     <div className="grid grid-cols-1 md:grid-cols-3 gap-6 h-[650px]">
       <Card className="md:col-span-1 flex flex-col overflow-hidden">
@@ -875,14 +879,19 @@ function ChatInterface({ channelId, blocked }: { channelId: string, blocked: boo
         </CardContent>
       </Card>
       <Card className="md:col-span-2 flex flex-col overflow-hidden">
-        {selectedJid ? (
+        {selectedJid && activeConversation ? (
           <MessageThread 
             channelId={channelId} 
             jid={selectedJid} 
-            conversation={conversations?.find(c => c.jid === selectedJid)!} 
+            conversation={activeConversation} 
             blocked={blocked}
             onDeleteSuccess={() => setSelectedJid(null)}
           />
+        ) : selectedJid ? (
+          <div className="flex flex-col items-center justify-center h-full text-muted-foreground p-8">
+            <Loader2 className="size-8 mb-4 animate-spin" />
+            <p>Cargando detalles del chat...</p>
+          </div>
         ) : (
           <div className="flex flex-col items-center justify-center h-full text-muted-foreground p-8">
             <MessageSquare className="size-12 mb-4 opacity-20" />
@@ -1084,14 +1093,14 @@ function MessageThread({ channelId, jid, conversation, blocked, onDeleteSuccess 
   };
 
   const handleToggleFollowup = async () => {
-    if (!firestore || blocked) return;
+    if (!firestore || blocked || !conversation) return;
     const convRef = doc(firestore, 'channels', channelId, 'conversations', jid);
     await updateDoc(convRef, { followupEnabled: !conversation.followupEnabled });
     toast({ title: conversation.followupEnabled ? 'Seguimiento desactivado' : 'Seguimiento activado' });
   };
 
   const handleToggleBot = async () => {
-    if (!firestore || blocked) return;
+    if (!firestore || blocked || !conversation) return;
     const convRef = doc(firestore, 'channels', channelId, 'conversations', jid);
     const newState = conversation.botEnabled === false ? true : false;
     await updateDoc(convRef, { botEnabled: newState });
@@ -1194,14 +1203,14 @@ function MessageThread({ channelId, jid, conversation, blocked, onDeleteSuccess 
           <Button variant="ghost" size="icon" className="h-8 w-8 text-primary" onClick={() => setIsProfileOpen(true)}>
             <User className="h-4 w-4" />
           </Button>
-          {conversation.botEnabled !== false ? (
+          {conversation?.botEnabled !== false ? (
             <Badge variant="outline" className="bg-blue-500/10 text-blue-600 border-blue-500/20 text-[10px]">
               IA ACTIVA
             </Badge>
           ) : (
             <Badge variant="outline" className="bg-amber-500/10 text-amber-600 border-amber-500/20 text-[10px]">IA INACTIVA</Badge>
           )}
-          {conversation.followupEnabled ? (
+          {conversation?.followupEnabled ? (
             <Badge variant="outline" className="bg-green-500/10 text-green-600 border-green-500/20 text-[10px]">
               FU ACTIVO
             </Badge>
@@ -1212,11 +1221,11 @@ function MessageThread({ channelId, jid, conversation, blocked, onDeleteSuccess 
             <DropdownMenuTrigger asChild><Button variant="ghost" size="icon" className="h-8 w-8"><MoreVertical className="h-4 w-4" /></Button></DropdownMenuTrigger>
             <DropdownMenuContent align="end">
               <DropdownMenuItem onClick={handleToggleBot} disabled={blocked}>
-                {conversation.botEnabled === false ? 'Activar IA' : 'Desactivar IA'}
+                {conversation?.botEnabled === false ? 'Activar IA' : 'Desactivar IA'}
               </DropdownMenuItem>
               <DropdownMenuSeparator />
               <DropdownMenuItem onClick={handleToggleFollowup} disabled={blocked}>
-                {conversation.followupEnabled ? 'Desactivar Seguimiento' : 'Activar Seguimiento'}
+                {conversation?.followupEnabled ? 'Desactivar Seguimiento' : 'Activar Seguimiento'}
               </DropdownMenuItem>
               <DropdownMenuItem onClick={handleResetFollowup} disabled={blocked}>
                 Reiniciar Seguimiento
@@ -1277,19 +1286,19 @@ function MessageThread({ channelId, jid, conversation, blocked, onDeleteSuccess 
                   </p>
                   <div className="grid grid-cols-2 gap-x-4 gap-y-1">
                     <span className="text-muted-foreground">Habilitado:</span>
-                    <span className={conversation.followupEnabled ? 'text-green-600 font-bold' : ''}>{conversation.followupEnabled ? 'SÍ' : 'NO'}</span>
+                    <span className={conversation?.followupEnabled ? 'text-green-600 font-bold' : ''}>{conversation?.followupEnabled ? 'SÍ' : 'NO'}</span>
                     
                     <span className="text-muted-foreground">Etapa Actual:</span>
-                    <span>{conversation.followupStage ?? 0}</span>
+                    <span>{conversation?.followupStage ?? 0}</span>
                     
                     <span className="text-muted-foreground">Próximo Envío:</span>
-                    <span>{conversation.followupNextAt ? format((conversation.followupNextAt as Timestamp).toDate(), 'PPpp') : '---'}</span>
+                    <span>{conversation?.followupNextAt ? format((conversation.followupNextAt as Timestamp).toDate(), 'PPpp') : '---'}</span>
                     
                     <span className="text-muted-foreground">Detección STOP:</span>
-                    <span>{conversation.followupStopped ? `SÍ (${conversation.followupStopReason})` : 'NO'}</span>
+                    <span>{conversation?.followupStopped ? `SÍ (${conversation.followupStopReason})` : 'NO'}</span>
                     
                     <span className="text-muted-foreground">Último del Cliente:</span>
-                    <span>{conversation.followupLastCustomerAt ? format((conversation.followupLastCustomerAt as Timestamp).toDate(), 'PPpp') : '---'}</span>
+                    <span>{conversation?.followupLastCustomerAt ? format((conversation.followupLastCustomerAt as Timestamp).toDate(), 'PPpp') : '---'}</span>
                   </div>
                 </div>
               </div>
