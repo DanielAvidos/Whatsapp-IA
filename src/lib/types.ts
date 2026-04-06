@@ -125,6 +125,7 @@ export type Conversation = {
   updatedAt: Timestamp | FieldValue;
   displayName?: string;
   customer?: CustomerProfile;
+  botEnabled?: boolean;
   // Follow-up fields
   followupEnabled?: boolean;
   followupStage?: number;

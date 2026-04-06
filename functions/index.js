@@ -661,6 +661,13 @@ exports.autoReplyOnIncomingMessage = functions
         return null;
       }
 
+      // Validar toggle por conversación
+      const convSnap = await db.doc(`channels/${channelId}/conversations/${jid}`).get();
+      if (convSnap.exists && convSnap.data().botEnabled === false) {
+        logger.info("[BOT] IA desactivada para esta conversación", { channelId, jid });
+        return null;
+      }
+
       const workerUrl = await getWorkerUrl();
       const projectId = process.env.GOOGLE_CLOUD_PROJECT || admin.app().options.projectId;
       const location = "us-central1";

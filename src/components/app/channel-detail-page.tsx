@@ -2,7 +2,7 @@
 "use client";
 
 import { useState, useEffect, useRef, useMemo } from 'react';
-import { Loader2, ScanQrCode, LogOut, RotateCcw, MessageSquare, Link as LinkIcon, Send, Bot, FileText, Save, History, Brain, Info, AlertCircle, CheckCircle2, Clock, PlusCircle, Trash2, Settings2, MoreVertical, User, CalendarClock } from 'lucide-react';
+import { Loader2, ScanQrCode, LogOut, RotateCcw, MessageSquare, Link as LinkIcon, Send, Bot, FileText, Save, History, Brain, Info, AlertCircle, CheckCircle2, Clock, PlusCircle, Trash2, Settings2, MoreVertical, User, CalendarClock, XCircle } from 'lucide-react';
 import { useFirestore, useDoc, useMemoFirebase, useCollection, useUser, setDocumentNonBlocking, useFirebase } from '@/firebase';
 import { doc, collection, query, orderBy, limit, Timestamp, serverTimestamp, setDoc, updateDoc, deleteDoc, where, getDoc, addDoc, writeBatch, getDocs } from 'firebase/firestore';
 import { getFunctions, httpsCallable } from 'firebase/functions';
@@ -853,6 +853,7 @@ function ChatInterface({ channelId, blocked }: { channelId: string, blocked: boo
                     <div className="flex justify-between w-full font-semibold text-sm truncate">
                       <span className="truncate flex-1">{conv.displayName || conv.name || conv.jid}</span>
                       <div className="flex items-center gap-1 shrink-0">
+                        {conv.botEnabled === false && <Badge variant="outline" className="text-[8px] h-4 px-1 border-amber-500/20 text-amber-600">IA OFF</Badge>}
                         {conv.followupStopped && <Badge variant="destructive" className="text-[8px] h-4 px-1">STOP</Badge>}
                         {conv.followupEnabled && !conv.followupStopped && (
                           <Badge variant="outline" className="text-[8px] h-4 px-1 bg-green-500/10 text-green-600 border-green-500/20">
@@ -1086,6 +1087,14 @@ function MessageThread({ channelId, jid, conversation, blocked }: { channelId: s
     toast({ title: conversation.followupEnabled ? 'Seguimiento desactivado' : 'Seguimiento activado' });
   };
 
+  const handleToggleBot = async () => {
+    if (!firestore || blocked) return;
+    const convRef = doc(firestore, 'channels', channelId, 'conversations', jid);
+    const newState = conversation.botEnabled === false ? true : false;
+    await updateDoc(convRef, { botEnabled: newState });
+    toast({ title: newState ? 'IA activada para este chat' : 'IA desactivada para este chat' });
+  };
+
   const handleResetFollowup = async () => {
     if (!firestore || blocked) return;
     const convRef = doc(firestore, 'channels', channelId, 'conversations', jid);
@@ -1144,6 +1153,13 @@ function MessageThread({ channelId, jid, conversation, blocked }: { channelId: s
           <Button variant="ghost" size="icon" className="h-8 w-8 text-primary" onClick={() => setIsProfileOpen(true)}>
             <User className="h-4 w-4" />
           </Button>
+          {conversation.botEnabled !== false ? (
+            <Badge variant="outline" className="bg-blue-500/10 text-blue-600 border-blue-500/20 text-[10px]">
+              IA ACTIVA
+            </Badge>
+          ) : (
+            <Badge variant="outline" className="bg-amber-500/10 text-amber-600 border-amber-500/20 text-[10px]">IA INACTIVA</Badge>
+          )}
           {conversation.followupEnabled ? (
             <Badge variant="outline" className="bg-green-500/10 text-green-600 border-green-500/20 text-[10px]">
               FU ACTIVO
@@ -1154,6 +1170,10 @@ function MessageThread({ channelId, jid, conversation, blocked }: { channelId: s
           <DropdownMenu modal={false}>
             <DropdownMenuTrigger asChild><Button variant="ghost" size="icon" className="h-8 w-8"><MoreVertical className="h-4 w-4" /></Button></DropdownMenuTrigger>
             <DropdownMenuContent align="end">
+              <DropdownMenuItem onClick={handleToggleBot} disabled={blocked}>
+                {conversation.botEnabled === false ? 'Activar IA' : 'Desactivar IA'}
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
               <DropdownMenuItem onClick={handleToggleFollowup} disabled={blocked}>
                 {conversation.followupEnabled ? 'Desactivar Seguimiento' : 'Activar Seguimiento'}
               </DropdownMenuItem>
