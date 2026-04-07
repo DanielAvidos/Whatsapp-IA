@@ -143,6 +143,16 @@ export type Message = {
   fromMe: boolean;
   direction: 'IN' | 'OUT';
   text: string | null;
+  type?: 'text' | 'image';
+  media?: {
+    kind: 'image';
+    storagePath: string;
+    downloadUrl: string;
+    mimeType: string;
+    fileSize?: number;
+    width?: number;
+    height?: number;
+  } | null;
   status: 'received' | 'sent' | 'delivered' | 'read' | 'sending' | 'error' | null;
   timestamp: number | any;
   createdAt: Timestamp | FieldValue;

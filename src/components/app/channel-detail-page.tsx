@@ -522,7 +522,7 @@ function FollowupConfigTab({ channelId, blocked }: { channelId: string, blocked:
     }
   };
 
-  if (isLoading && !hasInitialLoad) return <div className="space-y-4"><Skeleton className="h-48 w-full" /><Skeleton className="h-48 w-full" /></div>;
+  if (isLoading && !hasInitialLoad) return <div className="space-y-4"><Skeleton className="h-48 w-full" /></div>;
 
   return (
     <div className="grid gap-6 md:grid-cols-3">
@@ -846,7 +846,7 @@ function ChatInterface({ channelId, blocked }: { channelId: string, blocked: boo
         <CardHeader className="pb-3"><CardTitle className="text-lg">Conversaciones</CardTitle></CardHeader>
         <CardContent className="flex-1 overflow-hidden p-0">
           <ScrollArea className="h-full">
-            {isLoadingConversations ? <div className="p-4 space-y-4"><Skeleton className="h-12 w-full" /><Skeleton className="h-12 w-full" /></div> : conversations?.length === 0 ? <div className="p-8 text-center text-sm">No hay conversaciones.</div> : (
+            {isLoadingConversations ? <div className="p-4 space-y-4"><Skeleton className="h-12 w-full" /></div> : conversations?.length === 0 ? <div className="p-8 text-center text-sm">No hay conversaciones.</div> : (
               <div className="flex flex-col">
                 {conversations?.map((conv) => (
                   <button 
@@ -1262,10 +1262,22 @@ function MessageThread({ channelId, jid, conversation, blocked, onDeleteSuccess 
       
       <CardContent className="flex-1 overflow-hidden p-0 relative bg-muted/20">
         <ScrollArea className="h-full p-4">
-          {isLoading ? <div className="space-y-4"><Skeleton className="h-10 w-2/3" /><Skeleton className="h-10 w-1/2 ml-auto" /></div> : (
+          {isLoading ? <div className="p-4 space-y-4"><Skeleton className="h-10 w-2/3" /><Skeleton className="h-10 w-1/2 ml-auto" /></div> : (
             <div className="flex flex-col gap-2">
               {dedupedMessages.map((msg) => (
                 <div key={msg.id} className={cn("max-w-[80%] rounded-lg p-3 text-sm shadow-sm", msg.fromMe ? "bg-primary text-primary-foreground ml-auto rounded-tr-none" : "bg-card mr-auto rounded-tl-none")}>
+                  {/* PHASE 1: Image Rendering */}
+                  {msg.type === 'image' && msg.media?.downloadUrl && (
+                    <div className="mb-2 rounded overflow-hidden bg-black/5 flex justify-center items-center min-h-[100px]">
+                      <img 
+                        src={msg.media.downloadUrl} 
+                        alt={msg.text || "WhatsApp Image"} 
+                        className="max-w-full h-auto object-contain rounded hover:scale-[1.02] transition-transform cursor-pointer"
+                        onClick={() => window.open(msg.media.downloadUrl, '_blank')}
+                        loading="lazy"
+                      />
+                    </div>
+                  )}
                   <p className="whitespace-pre-wrap">{msg.text}</p>
                   <div className="text-[10px] mt-1 opacity-70 flex justify-end gap-1">
                     {(() => {

@@ -8,10 +8,12 @@ const {
   fetchLatestBaileysVersion,
   initAuthCreds,
   BufferJSON,
+  downloadMediaMessage,
 } = baileys;
 
 const { initializeApp } = require('firebase-admin/app');
 const { getFirestore, FieldValue } = require('firebase-admin/firestore');
+const { getStorage } = require('firebase-admin/storage');
 
 const express = require('express');
 const pino = require('pino');
@@ -42,6 +44,7 @@ console.log('[BOOT] baileys-worker starting...', {
 // --- FIREBASE ADMIN ---
 initializeApp();
 const db = getFirestore();
+const bucket = getStorage().bucket();
 
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
 
@@ -291,7 +294,7 @@ async function saveMessageToFirestore(channelId, jid, originalId, docData) {
   await convRef.set({
     jid,
     type: jid.endsWith('@g.us') ? 'group' : 'user',
-    lastMessageText: docData.text || '[media]',
+    lastMessageText: docData.text || (docData.type === 'image' ? '[Imagen]' : '[media]'),
     lastMessageAt: FieldValue.serverTimestamp(),
     lastMessageId: targetDocId,
     unreadCount: isIn ? FieldValue.increment(1) : FieldValue.increment(0),
@@ -421,7 +424,52 @@ async function startOrRestartBaileys(channelId, reason = 'manual') {
           if (!jid || !waMessageId) continue;
 
           const fromMe = !!msg?.key?.fromMe;
-          const text = extractText(msg?.message);
+          const content = msg?.message;
+          
+          // Identify image (normal or view once)
+          const imageMsg = content?.imageMessage || content?.viewOnceMessageV2?.message?.imageMessage;
+          const isImage = !!imageMsg;
+          
+          let text = extractText(content);
+          let mediaData = null;
+          let messageType = 'text';
+
+          if (isImage) {
+            messageType = 'image';
+            try {
+              const buffer = await downloadMediaMessage(
+                msg,
+                'buffer',
+                {},
+                { logger, reuploadRequest: sock.updateMediaMessage }
+              );
+
+              const mimeType = imageMsg.mimetype || 'image/jpeg';
+              const ext = mimeType.split('/')[1] || 'jpg';
+              const storagePath = `channels/${channelId}/conversations/${jid}/messages/${waMessageId}/original.${ext}`;
+              
+              const file = bucket.file(storagePath);
+              await file.save(buffer, { metadata: { contentType: mimeType } });
+              
+              // Simple Phase 1: make it public for visualization
+              await file.makePublic();
+              
+              mediaData = {
+                kind: 'image',
+                storagePath,
+                downloadUrl: file.publicUrl(),
+                mimeType,
+                fileSize: buffer.length,
+                width: imageMsg.width,
+                height: imageMsg.height
+              };
+              
+              if (imageMsg.caption) text = imageMsg.caption;
+            } catch (err) {
+              logger.error({ waMessageId, error: err.message }, 'Media download/upload failed');
+            }
+          }
+
           const tsSec = typeof msg?.messageTimestamp === 'number' ? msg.messageTimestamp : null;
           const timestampMs = tsSec ? tsSec * 1000 : Date.now();
 
@@ -431,11 +479,15 @@ async function startOrRestartBaileys(channelId, reason = 'manual') {
             fromMe,
             direction: fromMe ? 'OUT' : 'IN',
             text,
+            type: messageType,
+            media: mediaData,
             status: fromMe ? 'sent' : 'received',
             timestamp: timestampMs,
           });
         }
-      } catch (e) {}
+      } catch (e) {
+        logger.error({ error: e.message }, 'Error in messages.upsert');
+      }
     });
 
     return sock;
@@ -587,6 +639,7 @@ app.post('/v1/channels/:channelId/messages/send', async (req, res) => {
       fromMe: true,
       direction: 'OUT',
       text,
+      type: 'text',
       status: 'sent',
       timestamp: Date.now(),
       source: meta?.source || 'proxy'
