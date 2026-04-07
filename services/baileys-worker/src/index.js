@@ -147,14 +147,22 @@ function emptyQrObject() {
   return { raw: null, public: null };
 }
 
-function extractText(message) {
+/**
+ * Unwraps complex message types to get the core message object.
+ */
+function unwrapMessage(message) {
   if (!message) return null;
-
   let msg = message;
   if (msg.ephemeralMessage) msg = msg.ephemeralMessage.message;
   if (msg.viewOnceMessageV2) msg = msg.viewOnceMessageV2.message;
   if (msg.viewOnceMessageV2Extension) msg = msg.viewOnceMessageV2Extension.message;
   if (msg.editedMessage) msg = msg.editedMessage.message;
+  if (msg?.protocolMessage?.editedMessage) msg = msg.protocolMessage.editedMessage;
+  return msg;
+}
+
+function extractText(message) {
+  const msg = unwrapMessage(message);
   if (!msg) return null;
 
   const text = msg.conversation || 
@@ -431,37 +439,44 @@ async function startOrRestartBaileys(channelId, reason = 'manual') {
           if (!jid || !waMessageId) continue;
 
           const fromMe = !!msg?.key?.fromMe;
-          const content = msg?.message;
+          const rawContent = msg?.message;
+          const content = unwrapMessage(rawContent);
           
-          // Identify image (normal or view once)
-          const imageMsg = content?.imageMessage || content?.viewOnceMessageV2?.message?.imageMessage;
+          if (!content) continue;
+
+          // Identify image (including view once types handled by unwrap)
+          const imageMsg = content.imageMessage;
           const isImage = !!imageMsg;
           
-          let text = extractText(content);
+          let text = extractText(rawContent);
           let mediaData = null;
           let messageType = 'text';
 
           if (isImage) {
             messageType = 'image';
-            logger.info({ waMessageId, jid }, '[MEDIA] Image detected');
+            console.log(`[MEDIA_STEP] image_detected | ID: ${waMessageId} | JID: ${jid}`);
             try {
+              console.log(`[MEDIA_STEP] download_start | ID: ${waMessageId}`);
               const buffer = await downloadMediaMessage(
                 msg,
                 'buffer',
                 {},
                 { logger, reuploadRequest: sock.updateMediaMessage }
               );
-              logger.info({ waMessageId }, '[MEDIA] Downloaded');
+              console.log(`[MEDIA_STEP] download_success | ID: ${waMessageId} | Size: ${buffer.length} bytes`);
 
               const mimeType = imageMsg.mimetype || 'image/jpeg';
               const ext = mimeType.split('/')[1] || 'jpg';
               const storagePath = `channels/${channelId}/conversations/${jid}/messages/${waMessageId}/original.${ext}`;
               
+              console.log(`[MEDIA_STEP] upload_start | ID: ${waMessageId} | Path: ${storagePath}`);
               const file = bucket.file(storagePath);
               await file.save(buffer, { metadata: { contentType: mimeType } });
-              
+              console.log(`[MEDIA_STEP] upload_success | ID: ${waMessageId}`);
+
+              console.log(`[MEDIA_STEP] exists_check_start | ID: ${waMessageId}`);
               const [exists] = await file.exists();
-              logger.info({ waMessageId, storagePath, exists }, '[MEDIA] Uploaded');
+              console.log(`[MEDIA_STEP] exists_result | ID: ${waMessageId} | Exists: ${exists}`);
 
               mediaData = {
                 kind: 'image',
@@ -475,13 +490,14 @@ async function startOrRestartBaileys(channelId, reason = 'manual') {
               
               if (imageMsg.caption) text = imageMsg.caption;
             } catch (err) {
-              logger.error({ waMessageId, error: err.message }, '[MEDIA] Processing failed');
+              console.error(`[MEDIA_STEP] failure | ID: ${waMessageId} | Error: ${err.message}`, err);
               mediaData = {
                 kind: 'image',
                 status: 'failed',
                 errorMessage: err.message
               };
             }
+            console.log(`[MEDIA_STEP] firestore_save_ready | ID: ${waMessageId}`);
           }
 
           const tsSec = typeof msg?.messageTimestamp === 'number' ? msg.messageTimestamp : null;
