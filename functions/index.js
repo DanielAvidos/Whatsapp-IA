@@ -200,6 +200,8 @@ REGLAS GLOBALES DE ESCRITURA:
 - Responde únicamente con información alineada al entrenamiento del canal.
 - Prioriza los Detalles del Producto y la Estrategia de Venta proporcionada.
 - Escribe mensajes COMPLETOS, NATURALES y COHERENTES.
+- NUNCA uses corchetes [] ni marcadores como [Nombre] o [Asunto].
+- NUNCA incluyas instrucciones editoriales ni borradores de plantilla.
 - No improvises datos ni inventes información fuera de contexto.
 - Usa máximo 2 párrafos cortos.
 - Cierra con una sola idea clara o una sola pregunta comercial para avanzar.
@@ -210,7 +212,7 @@ REGLAS GLOBALES DE ESCRITURA:
 
   let followupInstruction = "";
   if (isFollowup) {
-    followupInstruction = `\n=== INSTRUCCIÓN DE SEGUIMIENTO (Paso ${step + 1}) ===\nEste es un mensaje de seguimiento proactivo porque el cliente no ha respondido. Sé amable, breve y varía el tono según el paso.`;
+    followupInstruction = `\n=== INSTRUCCIÓN DE SEGUIMIENTO (Paso ${step + 1}) ===\nEste es un mensaje de seguimiento proactivo porque el cliente no ha respondido. Sé amable, breve y varía el tono según el paso. No uses placeholders ni pidas al usuario que rellene información.`;
   }
 
   let kbSection = "";
@@ -309,6 +311,37 @@ function isTextLikelyIncoherent(text) {
   return false;
 }
 
+/**
+ * Detecta marcadores de posición o instrucciones que no deberían enviarse al cliente.
+ */
+function hasInvalidPlaceholders(text) {
+  const t = String(text || "").trim();
+  if (!t) return false;
+
+  // 1. Corchetes con contenido (placeholders típicos como [Nombre], [Asunto])
+  const placeholderRegex = /\[[^\]\s]{2,}[^\]]*\]/; 
+  if (placeholderRegex.test(t)) return true;
+
+  // 2. Instrucciones editoriales que la IA a veces copia
+  const metaInstructions = [
+    "menciona brevemente",
+    "inserta aquí",
+    "completa con",
+    "rellena con",
+    "pon tu nombre",
+    "tu nombre aquí",
+    "asunto aquí",
+    "describre el proyecto",
+    "[asunto]",
+    "[tu nombre]",
+    "[cliente]"
+  ];
+  const lower = t.toLowerCase();
+  if (metaInstructions.some(instruction => lower.includes(instruction))) return true;
+
+  return false;
+}
+
 function trimToLastCompleteSentence(text) {
   const t = String(text || "").replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
   if (!t) return null;
@@ -393,6 +426,7 @@ async function generateWithGemini({ systemPrompt, messages, projectId, location,
 
 /**
  * Generador robusto con estrategia de 3 niveles: IA -> Reescritura -> Fallback.
+ * Ahora incluye validación de marcadores de posición (placeholders).
  */
 async function generateSafeWhatsAppReply({ 
   systemPrompt, 
@@ -417,13 +451,16 @@ async function generateSafeWhatsAppReply({
   let sanitized = normalizeWhatsAppStyle(sanitizeWhatsAppReply(reply));
   let isTruncated = isTextLikelyTruncated(sanitized);
   let isIncoherent = isTextLikelyIncoherent(sanitized);
+  let hasPlaceholders = hasInvalidPlaceholders(sanitized);
 
   // NIVEL 2: Reintento con reescritura estricta si el primero falló o es inválido
-  if (!sanitized || isTruncated || isIncoherent) {
-    logger.info(`${logPrefix} Reply failed validation (trunc=${isTruncated}, incon=${isIncoherent}). Retrying with strict rewrite...`);
+  if (!sanitized || isTruncated || isIncoherent || hasPlaceholders) {
+    if (hasPlaceholders) logger.info(`${logPrefix} Reply contains invalid placeholders. Retrying...`);
+    else logger.info(`${logPrefix} Reply failed validation (trunc=${isTruncated}, incon=${isIncoherent}). Retrying with strict rewrite...`);
     
     const rewritePrompt = `
 Reescribe desde cero el siguiente mensaje para WhatsApp basándote en la conversación y entrenamiento.
+JAMÁS uses corchetes [] ni marcadores como [Nombre].
 Debe ser breve, natural, coherente, completo y SIN mezclar fragmentos inconexos.
 No repitas saludos si no hacen falta.
 Máximo 2 párrafos y una sola idea final clara.
@@ -436,7 +473,10 @@ MENSAJE DEFECTUOSO: ${sanitized || "Vacío"}
       const secondReply = await generateWithGemini({ systemPrompt, messages, projectId, location, customPrompt: rewritePrompt });
       sanitized = normalizeWhatsAppStyle(sanitizeWhatsAppReply(secondReply));
       
-      if (sanitized && !isTextLikelyTruncated(sanitized)) {
+      const secondIsTruncated = isTextLikelyTruncated(sanitized);
+      const secondHasPlaceholders = hasInvalidPlaceholders(sanitized);
+
+      if (sanitized && !secondIsTruncated && !secondHasPlaceholders) {
         logger.info(`${logPrefix} Safe reply generated after strict rewrite.`);
         return trimToLastCompleteSentence(sanitized) || sanitized;
       }
@@ -451,7 +491,15 @@ MENSAJE DEFECTUOSO: ${sanitized || "Vacío"}
   // NIVEL 3: Fallback seguro si Gemini falla repetidamente o genera basura
   logger.warn(`${logPrefix} All Gemini attempts failed or invalid. Using fallback reply.`);
   const fallback = buildFallbackReply({ botConfig, kbDocs, isFollowup, step });
-  return normalizeWhatsAppStyle(sanitizeWhatsAppReply(fallback));
+  const finalFallback = normalizeWhatsAppStyle(sanitizeWhatsAppReply(fallback));
+
+  // Última compuerta de seguridad: Si incluso el fallback es malo (por entrenamiento corrupto), no enviar nada.
+  if (hasInvalidPlaceholders(finalFallback)) {
+    logger.error(`${logPrefix} CRITICAL: Fallback also contains placeholders. Aborting send to protect brand.`);
+    return null;
+  }
+
+  return finalFallback;
 }
 
 async function sendViaWorker({ workerUrl, channelId, toJid, text, meta }) {
@@ -696,7 +744,10 @@ exports.autoReplyOnIncomingMessage = functions
         isFollowup: false
       });
 
-      if (!reply) throw new Error("Generación de respuesta falló (IA + Fallback).");
+      if (!reply) {
+        logger.warn("[BOT] Omitiendo respuesta automática por generación inválida o persistencia de marcadores.");
+        return null;
+      }
 
       await sendViaWorker({ 
         workerUrl, 
@@ -914,7 +965,11 @@ exports.followupTickEveryMinute = functions
             step
           });
           
-          if (!reply) throw new Error("No se pudo generar seguimiento.");
+          if (!reply) {
+            logger.warn(`[FOLLOWUP] Omitiendo envío en ${jid} por generación inválida o persistencia de marcadores.`);
+            metrics.errors++;
+            continue;
+          }
 
           logger.info("[FOLLOWUP SEND]", {
             channelId,
