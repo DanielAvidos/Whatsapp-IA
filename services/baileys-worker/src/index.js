@@ -463,18 +463,25 @@ async function startOrRestartBaileys(channelId, reason = 'manual') {
               await file.save(buffer, { metadata: { contentType: mimeType } });
               logger.info({ waMessageId }, '[MEDIA] Upload success');
               
-              // Simple Phase 1: make it public for visualization
+              // Phase 2 Corregida: Generar URL Firmada (Signed URL) estable
+              logger.info({ waMessageId }, '[MEDIA] Signed URL generation start');
+              let downloadUrl = null;
               try {
-                await file.makePublic();
-                logger.info({ waMessageId }, '[MEDIA] File made public');
-              } catch (pubErr) {
-                logger.warn({ waMessageId, error: pubErr.message }, '[MEDIA] makePublic failed, but continuing');
+                // Generar URL firmada con expiración muy larga para DEV
+                const [signedUrl] = await file.getSignedUrl({
+                  action: 'read',
+                  expires: '01-01-2099'
+                });
+                downloadUrl = signedUrl;
+                logger.info({ waMessageId }, '[MEDIA] Signed URL generation success');
+              } catch (urlErr) {
+                logger.error({ waMessageId, error: urlErr.message }, '[MEDIA] Signed URL generation failure');
               }
               
               mediaData = {
                 kind: 'image',
                 storagePath,
-                downloadUrl: file.publicUrl(),
+                downloadUrl: downloadUrl,
                 mimeType,
                 fileSize: buffer.length,
                 width: imageMsg.width,
