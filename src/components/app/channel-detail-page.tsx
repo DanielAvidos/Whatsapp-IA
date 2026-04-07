@@ -1266,16 +1266,23 @@ function MessageThread({ channelId, jid, conversation, blocked, onDeleteSuccess 
             <div className="flex flex-col gap-2">
               {dedupedMessages.map((msg) => (
                 <div key={msg.id} className={cn("max-w-[80%] rounded-lg p-3 text-sm shadow-sm", msg.fromMe ? "bg-primary text-primary-foreground ml-auto rounded-tr-none" : "bg-card mr-auto rounded-tl-none")}>
-                  {/* PHASE 1: Image Rendering */}
-                  {msg.type === 'image' && msg.media?.downloadUrl && (
-                    <div className="mb-2 rounded overflow-hidden bg-black/5 flex justify-center items-center min-h-[100px]">
-                      <img 
-                        src={msg.media.downloadUrl} 
-                        alt={msg.text || "WhatsApp Image"} 
-                        className="max-w-full h-auto object-contain rounded hover:scale-[1.02] transition-transform cursor-pointer"
-                        onClick={() => window.open(msg.media.downloadUrl, '_blank')}
-                        loading="lazy"
-                      />
+                  {/* Image Rendering with Fallback */}
+                  {msg.type === 'image' && (
+                    <div className="mb-2 rounded overflow-hidden bg-black/5 flex flex-col justify-center items-center min-h-[100px]">
+                      {msg.media?.downloadUrl ? (
+                        <img 
+                          src={msg.media.downloadUrl} 
+                          alt={msg.text || "WhatsApp Image"} 
+                          className="max-w-full h-auto object-contain rounded hover:scale-[1.02] transition-transform cursor-pointer"
+                          onClick={() => window.open(msg.media!.downloadUrl, '_blank')}
+                          loading="lazy"
+                        />
+                      ) : (
+                        <div className="flex flex-col items-center gap-2 p-4 text-muted-foreground italic text-xs">
+                          <AlertCircle className="h-5 w-5 opacity-50" />
+                          <span>[Imagen no disponible]</span>
+                        </div>
+                      )}
                     </div>
                   )}
                   <p className="whitespace-pre-wrap">{msg.text}</p>

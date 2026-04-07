@@ -44,7 +44,14 @@ console.log('[BOOT] baileys-worker starting...', {
 // --- FIREBASE ADMIN ---
 initializeApp();
 const db = getFirestore();
-const bucket = getStorage().bucket();
+
+// Resolve storage bucket name explicitly
+const bucketName = process.env.FIREBASE_STORAGE_BUCKET || 
+                   process.env.STORAGE_BUCKET || 
+                   `${process.env.GOOGLE_CLOUD_PROJECT}.firebasestorage.app`;
+
+console.log(`[BOOT] Resolved Storage Bucket: ${bucketName}`);
+const bucket = getStorage().bucket(bucketName);
 
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
 
@@ -436,23 +443,33 @@ async function startOrRestartBaileys(channelId, reason = 'manual') {
 
           if (isImage) {
             messageType = 'image';
+            logger.info({ waMessageId, jid }, '[MEDIA] Image detected, starting processing...');
             try {
+              logger.info({ waMessageId }, '[MEDIA] Download start');
               const buffer = await downloadMediaMessage(
                 msg,
                 'buffer',
                 {},
                 { logger, reuploadRequest: sock.updateMediaMessage }
               );
+              logger.info({ waMessageId, size: buffer?.length }, '[MEDIA] Download success');
 
               const mimeType = imageMsg.mimetype || 'image/jpeg';
               const ext = mimeType.split('/')[1] || 'jpg';
               const storagePath = `channels/${channelId}/conversations/${jid}/messages/${waMessageId}/original.${ext}`;
               
+              logger.info({ waMessageId, storagePath, bucket: bucketName }, '[MEDIA] Upload start');
               const file = bucket.file(storagePath);
               await file.save(buffer, { metadata: { contentType: mimeType } });
+              logger.info({ waMessageId }, '[MEDIA] Upload success');
               
               // Simple Phase 1: make it public for visualization
-              await file.makePublic();
+              try {
+                await file.makePublic();
+                logger.info({ waMessageId }, '[MEDIA] File made public');
+              } catch (pubErr) {
+                logger.warn({ waMessageId, error: pubErr.message }, '[MEDIA] makePublic failed, but continuing');
+              }
               
               mediaData = {
                 kind: 'image',
@@ -465,8 +482,11 @@ async function startOrRestartBaileys(channelId, reason = 'manual') {
               };
               
               if (imageMsg.caption) text = imageMsg.caption;
+              logger.info({ waMessageId }, '[MEDIA] Processing completed successfully');
             } catch (err) {
-              logger.error({ waMessageId, error: err.message }, 'Media download/upload failed');
+              logger.error({ waMessageId, error: err.message, stack: err.stack }, '[MEDIA] Critical failure in image processing pipeline');
+              // Fallback to avoid empty bubbles in UI
+              if (!text) text = '[Imagen no disponible]';
             }
           }
 
