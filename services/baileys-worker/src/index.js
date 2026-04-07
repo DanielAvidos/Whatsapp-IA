@@ -443,45 +443,30 @@ async function startOrRestartBaileys(channelId, reason = 'manual') {
 
           if (isImage) {
             messageType = 'image';
-            logger.info({ waMessageId, jid }, '[MEDIA] Image detected, starting processing...');
+            logger.info({ waMessageId, jid }, '[MEDIA] Image detected');
             try {
-              logger.info({ waMessageId }, '[MEDIA] Download start');
               const buffer = await downloadMediaMessage(
                 msg,
                 'buffer',
                 {},
                 { logger, reuploadRequest: sock.updateMediaMessage }
               );
-              logger.info({ waMessageId, size: buffer?.length }, '[MEDIA] Download success');
+              logger.info({ waMessageId }, '[MEDIA] Downloaded');
 
               const mimeType = imageMsg.mimetype || 'image/jpeg';
               const ext = mimeType.split('/')[1] || 'jpg';
               const storagePath = `channels/${channelId}/conversations/${jid}/messages/${waMessageId}/original.${ext}`;
               
-              logger.info({ waMessageId, storagePath, bucket: bucketName }, '[MEDIA] Upload start');
               const file = bucket.file(storagePath);
               await file.save(buffer, { metadata: { contentType: mimeType } });
-              logger.info({ waMessageId }, '[MEDIA] Upload success');
               
-              // Phase 2 Corregida: Generar URL Firmada (Signed URL) estable
-              logger.info({ waMessageId }, '[MEDIA] Signed URL generation start');
-              let downloadUrl = null;
-              try {
-                // Generar URL firmada con expiración muy larga para DEV
-                const [signedUrl] = await file.getSignedUrl({
-                  action: 'read',
-                  expires: '01-01-2099'
-                });
-                downloadUrl = signedUrl;
-                logger.info({ waMessageId }, '[MEDIA] Signed URL generation success');
-              } catch (urlErr) {
-                logger.error({ waMessageId, error: urlErr.message }, '[MEDIA] Signed URL generation failure');
-              }
-              
+              const [exists] = await file.exists();
+              logger.info({ waMessageId, storagePath, exists }, '[MEDIA] Uploaded');
+
               mediaData = {
                 kind: 'image',
                 storagePath,
-                downloadUrl: downloadUrl,
+                status: exists ? 'uploaded' : 'failed',
                 mimeType,
                 fileSize: buffer.length,
                 width: imageMsg.width,
@@ -489,11 +474,13 @@ async function startOrRestartBaileys(channelId, reason = 'manual') {
               };
               
               if (imageMsg.caption) text = imageMsg.caption;
-              logger.info({ waMessageId }, '[MEDIA] Processing completed successfully');
             } catch (err) {
-              logger.error({ waMessageId, error: err.message, stack: err.stack }, '[MEDIA] Critical failure in image processing pipeline');
-              // Fallback to avoid empty bubbles in UI
-              if (!text) text = '[Imagen no disponible]';
+              logger.error({ waMessageId, error: err.message }, '[MEDIA] Processing failed');
+              mediaData = {
+                kind: 'image',
+                status: 'failed',
+                errorMessage: err.message
+              };
             }
           }
 

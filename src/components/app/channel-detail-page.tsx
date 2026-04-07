@@ -56,6 +56,69 @@ function getTrialState(channel: WhatsappChannel | null | undefined) {
   return { isActive, endsMs };
 }
 
+/**
+ * Resolves a Storage path to a download URL directly on the client.
+ */
+function ResolvedImage({ storagePath, alt }: { storagePath: string; alt: string }) {
+  const { firebaseApp } = useFirebase();
+  const [url, setUrl] = useState<string | null>(null);
+  const [error, setError] = useState(false);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let active = true;
+    if (!storagePath || !firebaseApp) {
+      setLoading(false);
+      return;
+    }
+
+    const resolve = async () => {
+      try {
+        const { getStorage, ref, getDownloadURL } = await import('firebase/storage');
+        const storage = getStorage(firebaseApp);
+        const pathRef = ref(storage, storagePath);
+        const downloadUrl = await getDownloadURL(pathRef);
+        if (active) setUrl(downloadUrl);
+      } catch (e) {
+        console.error("[ResolvedImage] Failed to resolve URL", e);
+        if (active) setError(true);
+      } finally {
+        if (active) setLoading(false);
+      }
+    };
+
+    resolve();
+    return () => { active = false; };
+  }, [storagePath, firebaseApp]);
+
+  if (error) {
+    return (
+      <div className="flex flex-col items-center gap-2 p-4 text-muted-foreground italic text-xs">
+        <AlertCircle className="h-5 w-5 opacity-50" />
+        <span>[Imagen no disponible]</span>
+      </div>
+    );
+  }
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center p-8 w-full">
+        <Loader2 className="h-6 w-6 animate-spin opacity-20" />
+      </div>
+    );
+  }
+
+  return (
+    <img 
+      src={url!} 
+      alt={alt} 
+      className="max-w-full h-auto object-contain rounded hover:scale-[1.02] transition-transform cursor-pointer"
+      onClick={() => window.open(url!, '_blank')}
+      loading="lazy"
+    />
+  );
+}
+
 export function ChannelDetailPage({ channelId }: { channelId: string }) {
   const { t } = useLanguage();
   const { firestore, user, firebaseApp } = useFirebase();
@@ -1269,13 +1332,10 @@ function MessageThread({ channelId, jid, conversation, blocked, onDeleteSuccess 
                   {/* Image Rendering with Fallback */}
                   {msg.type === 'image' && (
                     <div className="mb-2 rounded overflow-hidden bg-black/5 flex flex-col justify-center items-center min-h-[100px]">
-                      {msg.media?.downloadUrl ? (
-                        <img 
-                          src={msg.media.downloadUrl} 
+                      {msg.media?.storagePath ? (
+                        <ResolvedImage 
+                          storagePath={msg.media.storagePath} 
                           alt={msg.text || "WhatsApp Image"} 
-                          className="max-w-full h-auto object-contain rounded hover:scale-[1.02] transition-transform cursor-pointer"
-                          onClick={() => window.open(msg.media!.downloadUrl, '_blank')}
-                          loading="lazy"
                         />
                       ) : (
                         <div className="flex flex-col items-center gap-2 p-4 text-muted-foreground italic text-xs">

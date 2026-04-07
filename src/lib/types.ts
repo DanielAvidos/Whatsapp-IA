@@ -147,11 +147,13 @@ export type Message = {
   media?: {
     kind: 'image';
     storagePath: string;
-    downloadUrl: string;
+    downloadUrl?: string;
+    status?: 'uploaded' | 'failed';
     mimeType: string;
     fileSize?: number;
     width?: number;
     height?: number;
+    errorMessage?: string;
   } | null;
   status: 'received' | 'sent' | 'delivered' | 'read' | 'sending' | 'error' | null;
   timestamp: number | any;
