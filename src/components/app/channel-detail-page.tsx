@@ -2,7 +2,7 @@
 "use client";
 
 import { useState, useEffect, useRef, useMemo } from 'react';
-import { Loader2, ScanQrCode, LogOut, RotateCcw, MessageSquare, Link as LinkIcon, Send, Bot, FileText, Save, History, Brain, Info, AlertCircle, CheckCircle2, Clock, PlusCircle, Trash2, Settings2, MoreVertical, User, CalendarClock, XCircle } from 'lucide-react';
+import { Loader2, ScanQrCode, LogOut, RotateCcw, MessageSquare, Link as LinkIcon, Send, Bot, FileText, Save, History, Brain, Info, AlertCircle, CheckCircle2, Clock, PlusCircle, Trash2, Settings2, MoreVertical, User, CalendarClock, XCircle, Image as ImageIcon, Paperclip } from 'lucide-react';
 import { useFirestore, useDoc, useMemoFirebase, useCollection, useUser, setDocumentNonBlocking, useFirebase } from '@/firebase';
 import { doc, collection, query, orderBy, limit, Timestamp, serverTimestamp, setDoc, updateDoc, deleteDoc, where, getDoc, addDoc, writeBatch, getDocs } from 'firebase/firestore';
 import { getFunctions, httpsCallable } from 'firebase/functions';
@@ -1061,9 +1061,11 @@ function MessageThread({ channelId, jid, conversation, blocked, onDeleteSuccess 
   const [isDeleteOpen, setIsDeleteOpen] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const { toast } = useToast();
 
   const isSuperAdmin = getIsSuperAdmin(user);
+  const workerUrl = process.env.NEXT_PUBLIC_BAILEYS_WORKER_URL;
 
   const messagesQuery = useMemoFirebase(() => {
     if (!firestore) return null;
@@ -1152,6 +1154,80 @@ function MessageThread({ channelId, jid, conversation, blocked, onDeleteSuccess 
       await setDoc(msgDocRef, { status: 'error' }, { merge: true }).catch(() => {});
     } finally { 
       setIsSending(false); 
+    }
+  };
+
+  const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !firebaseApp || !firestore) return;
+
+    if (!file.type.startsWith('image/')) {
+      toast({ variant: 'destructive', title: 'Archivo no soportado', description: 'Por favor selecciona una imagen.' });
+      return;
+    }
+
+    setIsSending(true);
+    const caption = inputText.trim();
+    setInputText(''); // Clear input early for better UX
+
+    const clientMessageId = (globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`);
+    const ext = file.name.split('.').pop() || 'jpg';
+    const storagePath = `channels/${channelId}/conversations/${jid}/messages/${clientMessageId}/original.${ext}`;
+
+    try {
+      // 1. Upload to Storage
+      const { getStorage, ref, uploadBytes } = await import('firebase/storage');
+      const storage = getStorage(firebaseApp);
+      const fileRef = ref(storage, storagePath);
+      await uploadBytes(fileRef, file);
+
+      // 2. Optimistic Write to Firestore
+      const msgDocRef = doc(firestore, 'channels', channelId, 'conversations', jid, 'messages', clientMessageId);
+      await setDoc(msgDocRef, {
+        id: clientMessageId,
+        clientMessageId,
+        jid,
+        text: caption || null,
+        type: 'image',
+        fromMe: true,
+        direction: "OUT",
+        status: "sending",
+        isBot: false,
+        source: "manual",
+        media: {
+          kind: 'image',
+          storagePath,
+          status: 'uploaded',
+          mimeType: file.type,
+          fileSize: file.size
+        },
+        timestamp: Date.now(),
+        createdAt: serverTimestamp(),
+        timestampServer: serverTimestamp(),
+      }, { merge: true });
+
+      // 3. Call Worker
+      if (!workerUrl) throw new Error("Worker URL not configured");
+      
+      const response = await fetch(`${workerUrl}/v1/channels/${channelId}/messages/send-image`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          to: jid,
+          storagePath,
+          caption,
+          meta: { clientMessageId, source: 'manual' }
+        })
+      });
+
+      if (!response.ok) throw new Error("Worker failed to send image");
+
+    } catch (err: any) {
+      console.error('[IMAGE_SEND] error', err);
+      toast({ variant: 'destructive', title: 'Error al enviar imagen', description: err.message });
+    } finally {
+      setIsSending(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
     }
   };
 
@@ -1392,23 +1468,42 @@ function MessageThread({ channelId, jid, conversation, blocked, onDeleteSuccess 
             <AlertDescription className="text-xs">Trial expirado. Funciones bloqueadas.</AlertDescription>
           </Alert>
         )}
-        <form onSubmit={handleSendMessage} className="flex gap-2">
-          <Input 
-            placeholder={blocked ? "Canal expirado..." : "Escribe un mensaje..."}
-            value={inputText} 
-            onChange={(e) => setInputText(e.target.value)} 
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                handleSendMessage(e as any);
-              }
-            }}
-            disabled={isSending || blocked} 
+        <div className="flex gap-2 items-center">
+          <input 
+            type="file" 
+            className="hidden" 
+            ref={fileInputRef} 
+            accept="image/*" 
+            onChange={handleImageUpload}
           />
-          <Button type="submit" size="icon" disabled={isSending || !inputText.trim() || blocked}>
-            {isSending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+          <Button 
+            type="button" 
+            variant="ghost" 
+            size="icon" 
+            className="shrink-0 text-muted-foreground"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={isSending || blocked}
+          >
+            <ImageIcon className="h-5 w-5" />
           </Button>
-        </form>
+          <form onSubmit={handleSendMessage} className="flex-1 flex gap-2">
+            <Input 
+              placeholder={blocked ? "Canal expirado..." : "Escribe un mensaje..."}
+              value={inputText} 
+              onChange={(e) => setInputText(e.target.value)} 
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  handleSendMessage(e as any);
+                }
+              }}
+              disabled={isSending || blocked} 
+            />
+            <Button type="submit" size="icon" disabled={isSending || !inputText.trim() || blocked}>
+              {isSending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+            </Button>
+          </form>
+        </div>
       </div>
 
       <CustomerProfileDialog 

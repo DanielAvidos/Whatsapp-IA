@@ -631,7 +631,7 @@ app.post('/v1/channels/:channelId/resetSession', async (req, res) => {
 });
 
 // --- MESSAGING API ---
-app.get('/v1/channels/:channelId/conversations', async (req, res) => {
+app.get('/v1/channels/:channelId/conversations', async (_req, res) => {
   try {
     const snap = await db.collection('channels').doc(req.params.channelId).collection('conversations').orderBy('lastMessageAt', 'desc').limit(50).get();
     res.json({ ok: true, conversations: snap.docs.map(d => ({ id: d.id, ...d.data() })) });
@@ -679,6 +679,61 @@ app.post('/v1/channels/:channelId/messages/send', async (req, res) => {
   } catch (e) { 
     logger.error({ error: e.message }, 'Worker send error');
     res.status(500).json({ error: e.message }); 
+  }
+});
+
+app.post('/v1/channels/:channelId/messages/send-image', async (req, res) => {
+  try {
+    const { to, storagePath, caption, meta } = req.body;
+    const { channelId } = req.params;
+    const clientMessageId = meta?.clientMessageId;
+
+    const sock = await ensureSocketReady(channelId);
+    if (!sock) return res.status(409).json({ error: 'Socket not ready' });
+
+    const jid = to.includes('@') ? to : `${to}@s.whatsapp.net`;
+
+    // Download from storage
+    const file = bucket.file(storagePath);
+    const [buffer] = await file.download();
+    
+    // Metadata from storage file
+    const [metadata] = await file.getMetadata();
+
+    const r = await sock.sendMessage(jid, { 
+      image: buffer, 
+      caption: caption || '' 
+    });
+    const waMessageId = r?.key?.id;
+
+    if (waMessageId && clientMessageId) {
+      waToClientMap.set(waMessageId, clientMessageId);
+    }
+
+    await saveMessageToFirestore(channelId, jid, waMessageId || `proxy-${Date.now()}`, {
+      waMessageId,
+      clientMessageId: clientMessageId || null,
+      jid,
+      fromMe: true,
+      direction: 'OUT',
+      text: caption || null,
+      type: 'image',
+      status: 'sent',
+      media: {
+        kind: 'image',
+        storagePath,
+        status: 'uploaded',
+        mimeType: metadata.contentType,
+        fileSize: metadata.size,
+      },
+      timestamp: Date.now(),
+      source: meta?.source || 'manual'
+    });
+
+    res.json({ ok: true, messageId: waMessageId || clientMessageId });
+  } catch (e) {
+    logger.error({ error: e.message }, 'Worker send-image error');
+    res.status(500).json({ error: e.message });
   }
 });
 
