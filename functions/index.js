@@ -645,6 +645,12 @@ exports.autoReplyOnIncomingMessage = functions
 
     if (!text || fromMe || isBot) return null;
 
+    // --- IGNORE KEYWORD COMMANDS ---
+    const normalizedText = text.toLowerCase().trim();
+    if (normalizedText === "d3t3n3r" || normalizedText === "s3gu1r") {
+      return null;
+    }
+
     const access = await getChannelAccess(channelId);
     if (access.blocked) {
       logger.info("[BOT] Canal bloqueado. Skip autoReply", { channelId, reason: access.reason });
@@ -728,6 +734,24 @@ exports.onIncomingMessageUpdateFollowupState = functions
     const now = admin.firestore.FieldValue.serverTimestamp();
 
     const convRef = db.doc(`channels/${channelId}/conversations/${jid}`);
+
+    // --- KEYWORD COMMANDS DETECTION ---
+    const KEYWORD_STOP = "d3t3n3r";
+    const KEYWORD_START = "s3gu1r";
+    const normalizedText = (text || "").toLowerCase().trim();
+
+    if (normalizedText === KEYWORD_STOP || normalizedText === KEYWORD_START) {
+      const isStop = normalizedText === KEYWORD_STOP;
+      await convRef.set({
+        botEnabled: !isStop,
+        followupEnabled: !isStop,
+        updatedAt: now,
+        lastKeywordCommand: normalizedText,
+        lastKeywordAt: now
+      }, { merge: true });
+      logger.info("[KEYWORDS] Command detected", { jid, command: normalizedText, active: !isStop });
+      return null;
+    }
 
     if (!fromMe) {
       const isOptOut = detectOptOut(text);
