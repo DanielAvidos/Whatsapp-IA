@@ -297,8 +297,11 @@ async function saveMessageToFirestore(channelId, jid, originalId, docData) {
 
   const msgRef = messagesCol.doc(targetDocId);
 
+  // Extract identity metadata for conversation enrichment
+  const { phoneE164, pushName, ...messagePayload } = docData;
+
   await msgRef.set({
-    ...docData,
+    ...messagePayload,
     id: targetDocId,
     updatedAt: FieldValue.serverTimestamp(),
     timestampServer: FieldValue.serverTimestamp(),
@@ -306,15 +309,25 @@ async function saveMessageToFirestore(channelId, jid, originalId, docData) {
 
   // Update conversation summary
   const isIn = docData.direction === 'IN';
-  await convRef.set({
+  const convPatch = {
     jid,
     type: jid.endsWith('@g.us') ? 'group' : 'user',
-    lastMessageText: docData.text || (docData.type === 'image' ? '[Imagen]' : '[media]'),
+    lastMessageText: messagePayload.text || (messagePayload.type === 'image' ? '[Imagen]' : '[media]'),
     lastMessageAt: FieldValue.serverTimestamp(),
     lastMessageId: targetDocId,
     unreadCount: isIn ? FieldValue.increment(1) : FieldValue.increment(0),
     updatedAt: FieldValue.serverTimestamp(),
-  }, { merge: true });
+  };
+
+  // Identity resolution persistence
+  if (phoneE164) {
+    convPatch.phoneE164 = phoneE164;
+  }
+  if (pushName) {
+    convPatch.name = pushName;
+  }
+
+  await convRef.set(convPatch, { merge: true });
 }
 
 // --- BAILEYS CORE ---
@@ -438,6 +451,22 @@ async function startOrRestartBaileys(channelId, reason = 'manual') {
           const waMessageId = msg?.key?.id;
           if (!jid || !waMessageId) continue;
 
+          // --- IDENTITY RESOLUTION ---
+          let phoneE164 = null;
+          if (jid.endsWith('@s.whatsapp.net')) {
+            phoneE164 = `+${jid.split('@')[0]}`;
+          }
+          // Check for participant if primary JID is LID or for group identity
+          const participantJid = msg.key.participant || msg.participant;
+          if (!phoneE164 && participantJid && participantJid.endsWith('@s.whatsapp.net')) {
+            phoneE164 = `+${participantJid.split('@')[0]}`;
+          }
+          const pushName = msg.pushName || null;
+
+          if (phoneE164) {
+            logger.debug({ jid, phoneE164 }, '[IDENTITY] Resolved phone number');
+          }
+
           const fromMe = !!msg?.key?.fromMe;
           const rawContent = msg?.message;
           const content = unwrapMessage(rawContent);
@@ -513,6 +542,8 @@ async function startOrRestartBaileys(channelId, reason = 'manual') {
             media: mediaData,
             status: fromMe ? 'sent' : 'received',
             timestamp: timestampMs,
+            phoneE164,
+            pushName
           });
         }
       } catch (e) {

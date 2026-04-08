@@ -119,6 +119,27 @@ function ResolvedImage({ storagePath, alt }: { storagePath: string; alt: string 
   );
 }
 
+/**
+ * Robust display name resolver for conversations.
+ */
+function resolveConversationDisplayName(conv: Conversation | null | undefined) {
+  if (!conv) return 'Cargando...';
+  
+  const { displayName, name, phoneE164, jid } = conv;
+  
+  // 1. Prioritize real display name from CRM/Capture (if it's not the JID)
+  if (displayName && displayName !== jid) return displayName;
+  
+  // 2. Prioritize pushName from WhatsApp profile
+  if (name && name !== jid) return name;
+  
+  // 3. Use resolved phone number
+  if (phoneE164) return phoneE164;
+  
+  // 4. Technical fallback
+  return jid;
+}
+
 export function ChannelDetailPage({ channelId }: { channelId: string }) {
   const { t } = useLanguage();
   const { firestore, user, firebaseApp } = useFirebase();
@@ -265,9 +286,9 @@ export function ChannelDetailPage({ channelId }: { channelId: string }) {
                 </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                  <Button variant="outline" onClick={handleGenerateQr} disabled={isLoading || !workerUrl}><ScanQrCode className="mr-2 h-4 w-4" />Generar QR</Button>
-                  <Button variant="outline" onClick={handleResetSession} disabled={isLoading || !workerUrl}><RotateCcw className="mr-2 h-4 w-4" />Reiniciar Sesión</Button>
-                  <Button variant="destructive" onClick={handleDisconnect} disabled={isLoading || !workerUrl || channel?.status !== 'CONNECTED'}><LogOut className="mr-2 h-4 w-4" />Desconectar</Button>
+                  <Button variant="outline" onClick={handleApiCall.bind(null, '/qr', 'Generando código QR...', 'Error al solicitar QR')} disabled={isLoading || !workerUrl}><ScanQrCode className="mr-2 h-4 w-4" />Generar QR</Button>
+                  <Button variant="outline" onClick={handleApiCall.bind(null, '/resetSession', 'Reiniciando sesión...', 'Error al reiniciar sesión')} disabled={isLoading || !workerUrl}><RotateCcw className="mr-2 h-4 w-4" />Reiniciar Sesión</Button>
+                  <Button variant="destructive" onClick={handleApiCall.bind(null, '/disconnect', 'Desconectando...', 'Error al desconectar')} disabled={isLoading || !workerUrl || channel?.status !== 'CONNECTED'}><LogOut className="mr-2 h-4 w-4" />Desconectar</Button>
                 </div>
                  {channel?.lastError && (
                    <Alert variant="destructive"><AlertTitle>Último Error</AlertTitle><AlertDescription>{channel.lastError?.message || JSON.stringify(channel.lastError)}</AlertDescription></Alert>
@@ -562,8 +583,6 @@ function FollowupConfigTab({ channelId, blocked }: { channelId: string, blocked:
       updatedByEmail: user.email || '',
     };
 
-    console.log("FOLLOWUP SAVE payload", payload);
-
     try {
       await setDoc(followupRef, payload, { merge: true });
       
@@ -574,9 +593,6 @@ function FollowupConfigTab({ channelId, blocked }: { channelId: string, blocked:
         maxTouches: parsedCadence.length,
       }));
       setCadenceText(parsedCadence.join(', '));
-
-      const verify = await getDoc(followupRef);
-      console.log("FOLLOWUP AFTER SAVE", verify.data());
 
       toast({ title: 'Configuración de seguimiento guardada' });
     } catch (e) {
@@ -918,7 +934,7 @@ function ChatInterface({ channelId, blocked }: { channelId: string, blocked: boo
                     className={cn("flex flex-col items-start gap-1 p-4 text-left border-b hover:bg-muted/50 transition-colors", selectedJid === conv.jid && "bg-muted")}
                   >
                     <div className="flex justify-between w-full font-semibold text-sm truncate">
-                      <span className="truncate flex-1">{conv.displayName || conv.name || conv.jid}</span>
+                      <span className="truncate flex-1">{resolveConversationDisplayName(conv)}</span>
                       <div className="flex items-center gap-1 shrink-0">
                         {conv.botEnabled === false && <Badge variant="outline" className="text-[8px] h-4 px-1 border-amber-500/20 text-amber-600">IA OFF</Badge>}
                         {conv.followupStopped && <Badge variant="destructive" className="text-[8px] h-4 px-1">STOP</Badge>}
@@ -1139,7 +1155,6 @@ function MessageThread({ channelId, jid, conversation, blocked, onDeleteSuccess 
       setInputText('');
 
       const sendFn = httpsCallable(functions, "sendMessageProxy");
-      console.log('[CHAT_SEND] try', { channelId, jid, clientMessageId });
       
       await sendFn({ 
         channelId, 
@@ -1280,7 +1295,6 @@ function MessageThread({ channelId, jid, conversation, blocked, onDeleteSuccess 
         
         await batch.commit();
         deletedCount += snapshot.size;
-        console.log(`[CLEAR_CHAT] Deleted ${deletedCount} messages from ${jid}`);
       }
 
       toast({ title: 'Chat limpiado', description: 'Todos los mensajes han sido eliminados correctamente.' });
@@ -1335,7 +1349,9 @@ function MessageThread({ channelId, jid, conversation, blocked, onDeleteSuccess 
     <>
       <CardHeader className="border-b py-3 px-4 flex-row justify-between items-center bg-card">
         <div className="flex-1 min-w-0">
-          <CardTitle className="text-sm font-bold truncate">{conversation?.displayName || conversation?.name || jid}</CardTitle>
+          <CardTitle className="text-sm font-bold truncate">
+            {resolveConversationDisplayName(conversation)}
+          </CardTitle>
           <CardDescription className="text-[10px] truncate">{jid}</CardDescription>
         </div>
         <div className="flex items-center gap-2">

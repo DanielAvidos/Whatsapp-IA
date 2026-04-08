@@ -124,6 +124,7 @@ export type Conversation = {
   unreadCount: number;
   updatedAt: Timestamp | FieldValue;
   displayName?: string;
+  phoneE164?: string | null;
   customer?: CustomerProfile;
   botEnabled?: boolean;
   // Follow-up fields
