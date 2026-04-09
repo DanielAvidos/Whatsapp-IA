@@ -1373,7 +1373,7 @@ function MessageThread({ channelId, jid, conversation, blocked, onDeleteSuccess 
 
     setIsSending(true);
     const clientMessageId = (globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`);
-    const ext = 'webm'; // Coherente con audio/webm;codecs=opus generado por navegador
+    const ext = 'webm'; // Browser native format (audio/webm;codecs=opus)
     const storagePath = `channels/${channelId}/conversations/${jid}/messages/${clientMessageId}/original.${ext}`;
 
     try {
@@ -1401,7 +1401,7 @@ function MessageThread({ channelId, jid, conversation, blocked, onDeleteSuccess 
           mimeType: recordedBlob.type,
           fileSize: recordedBlob.size,
           seconds: recordingDuration,
-          ptt: false // Enviamos como AUDIO NORMAL para asegurar recepción desde navegador
+          ptt: false // Standard audio for delivery safety
         },
         timestamp: Date.now(),
         createdAt: serverTimestamp(),
@@ -1417,9 +1417,9 @@ function MessageThread({ channelId, jid, conversation, blocked, onDeleteSuccess 
           to: jid,
           storagePath,
           mimetype: recordedBlob.type,
-          ptt: false, // AUDIO NORMAL
+          ptt: false, // AUDIO NORMAL (converted by worker)
           seconds: recordingDuration,
-          meta: { clientMessageId, source: 'manual' }
+          meta: { clientMessageId, source: 'manual', isWebRecording: true }
         })
       });
 

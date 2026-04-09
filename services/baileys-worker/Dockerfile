@@ -1,26 +1,23 @@
+
 FROM node:20-slim
 
-WORKDIR /usr/src/app
+# Install ffmpeg and clear apt cache
+RUN apt-get update && \
+    apt-get install -y ffmpeg && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
 
-RUN apt-get update && apt-get install -y \
-  ca-certificates \
-  openssl \
-  curl \
-  dnsutils \
-  iproute2 \
-  git \
-  openssh-client \
-  dumb-init \
-  && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
 
+# Copy package files and install dependencies
 COPY package*.json ./
-RUN npm install --omit=dev
+RUN npm install --production
 
+# Copy source code
 COPY . .
 
-ENV NODE_OPTIONS="--dns-result-order=ipv4first"
-ENV PORT=8080
+# Expose the default Cloud Run port
 EXPOSE 8080
 
-ENTRYPOINT ["dumb-init","--"]
-CMD ["npm","start"]
+# Start the application using npm start script
+CMD [ "npm", "start" ]

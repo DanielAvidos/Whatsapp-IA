@@ -22,6 +22,14 @@ const { Boom } = require('@hapi/boom');
 const cors = require('cors');
 const dns = require('dns');
 
+// --- UTILS FOR AUDIO CONVERSION ---
+const { exec } = require('child_process');
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+const { promisify } = require('util');
+const execPromise = promisify(exec);
+
 // --- BOOT ---
 process.on('uncaughtException', (err) => {
   console.error('[FATAL] uncaughtException', err?.stack || err);
@@ -810,10 +818,41 @@ app.post('/v1/channels/:channelId/messages/send-audio', async (req, res) => {
     const file = bucket.file(storagePath);
     const [buffer] = await file.download();
     const [metadata] = await file.getMetadata();
+    
+    console.log(`[AUDIO_SEND] downloaded | Size: ${buffer.length} bytes`);
+
+    let finalBuffer = buffer;
+    let finalMimeType = mimetype || metadata.contentType || 'audio/ogg';
+
+    // CONVERSION LOGIC FOR BROWSER RECORDINGS (WEBM)
+    const isWebm = finalMimeType.includes('webm') || meta?.isWebRecording;
+    if (isWebm) {
+      console.log(`[AUDIO_SEND] converting | Source: ${finalMimeType}`);
+      const tempId = clientMessageId || Date.now();
+      const tempIn = path.join(os.tmpdir(), `in-${tempId}.webm`);
+      const tempOut = path.join(os.tmpdir(), `out-${tempId}.ogg`);
+      
+      try {
+        await fs.promises.writeFile(tempIn, buffer);
+        // Convert to highly compatible ogg opus for WhatsApp
+        await execPromise(`ffmpeg -y -i ${tempIn} -c:a libopus -ac 1 -ar 16000 -b:a 32k ${tempOut}`);
+        finalBuffer = await fs.promises.readFile(tempOut);
+        finalMimeType = 'audio/ogg; codecs=opus';
+        console.log(`[AUDIO_SEND] converted | New Size: ${finalBuffer.length} bytes`);
+      } catch (convErr) {
+        console.error(`[AUDIO_SEND] conversion_error | ${convErr.message}`);
+        // Fallback to original buffer if conversion fails
+      } finally {
+        try { if (fs.existsSync(tempIn)) await fs.promises.unlink(tempIn); } catch (e) {}
+        try { if (fs.existsSync(tempOut)) await fs.promises.unlink(tempOut); } catch (e) {}
+      }
+    }
+
+    console.log(`[AUDIO_SEND] sending | ID: ${clientMessageId || 'no-id'}`);
 
     const r = await sock.sendMessage(jid, { 
-      audio: buffer, 
-      mimetype: mimetype || metadata.contentType || 'audio/ogg',
+      audio: finalBuffer, 
+      mimetype: finalMimeType,
       ptt: !!ptt
     });
     const waMessageId = r?.key?.id;
@@ -833,8 +872,8 @@ app.post('/v1/channels/:channelId/messages/send-audio', async (req, res) => {
         kind: 'audio',
         storagePath,
         status: 'uploaded',
-        mimeType: mimetype || metadata.contentType,
-        fileSize: metadata.size,
+        mimeType: finalMimeType,
+        fileSize: finalBuffer.length,
         seconds: seconds || 0,
         ptt: !!ptt
       },
