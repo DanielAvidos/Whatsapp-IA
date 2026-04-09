@@ -1373,7 +1373,7 @@ function MessageThread({ channelId, jid, conversation, blocked, onDeleteSuccess 
 
     setIsSending(true);
     const clientMessageId = (globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`);
-    const ext = 'ogg'; // Baileys prefiere ogg para ptt
+    const ext = 'webm'; // Coherente con audio/webm;codecs=opus generado por navegador
     const storagePath = `channels/${channelId}/conversations/${jid}/messages/${clientMessageId}/original.${ext}`;
 
     try {
@@ -1401,7 +1401,7 @@ function MessageThread({ channelId, jid, conversation, blocked, onDeleteSuccess 
           mimeType: recordedBlob.type,
           fileSize: recordedBlob.size,
           seconds: recordingDuration,
-          ptt: true 
+          ptt: false // Enviamos como AUDIO NORMAL para asegurar recepción desde navegador
         },
         timestamp: Date.now(),
         createdAt: serverTimestamp(),
@@ -1417,7 +1417,7 @@ function MessageThread({ channelId, jid, conversation, blocked, onDeleteSuccess 
           to: jid,
           storagePath,
           mimetype: recordedBlob.type,
-          ptt: true,
+          ptt: false, // AUDIO NORMAL
           seconds: recordingDuration,
           meta: { clientMessageId, source: 'manual' }
         })

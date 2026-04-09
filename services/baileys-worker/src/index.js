@@ -797,8 +797,13 @@ app.post('/v1/channels/:channelId/messages/send-audio', async (req, res) => {
     const { channelId } = req.params;
     const clientMessageId = meta?.clientMessageId;
 
+    console.log(`[AUDIO_SEND] start | To: ${to} | Mime: ${mimetype} | PTT: ${ptt}`);
+
     const sock = await ensureSocketReady(channelId);
-    if (!sock) return res.status(409).json({ error: 'Socket not ready' });
+    if (!sock) {
+      console.error(`[AUDIO_SEND] failure | Socket not ready`);
+      return res.status(409).json({ error: 'Socket not ready' });
+    }
 
     const jid = to.includes('@') ? to : `${to}@s.whatsapp.net`;
 
@@ -828,7 +833,7 @@ app.post('/v1/channels/:channelId/messages/send-audio', async (req, res) => {
         kind: 'audio',
         storagePath,
         status: 'uploaded',
-        mimeType: metadata.contentType,
+        mimeType: mimetype || metadata.contentType,
         fileSize: metadata.size,
         seconds: seconds || 0,
         ptt: !!ptt
@@ -837,9 +842,10 @@ app.post('/v1/channels/:channelId/messages/send-audio', async (req, res) => {
       source: meta?.source || 'manual'
     });
 
+    console.log(`[AUDIO_SEND] success | ID: ${waMessageId || clientMessageId}`);
     res.json({ ok: true, messageId: waMessageId || clientMessageId });
   } catch (e) {
-    logger.error({ error: e.message }, 'Worker send-audio error');
+    console.error(`[AUDIO_SEND] failure | Error: ${e.message}`);
     res.status(500).json({ error: e.message });
   }
 });
