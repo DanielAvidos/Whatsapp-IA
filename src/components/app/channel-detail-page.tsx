@@ -2,7 +2,7 @@
 "use client";
 
 import { useState, useEffect, useRef, useMemo } from 'react';
-import { Loader2, ScanQrCode, LogOut, RotateCcw, MessageSquare, Link as LinkIcon, Send, Bot, FileText, Save, History, Brain, Info, AlertCircle, CheckCircle2, Clock, PlusCircle, Trash2, Settings2, MoreVertical, User, CalendarClock, XCircle, Image as ImageIcon, Paperclip, Music } from 'lucide-react';
+import { Loader2, ScanQrCode, LogOut, RotateCcw, MessageSquare, Link as LinkIcon, Send, Bot, FileText, Save, History, Brain, Info, AlertCircle, CheckCircle2, Clock, PlusCircle, Trash2, Settings2, MoreVertical, User, CalendarClock, XCircle, Image as ImageIcon, Paperclip, Music, Mic, Square, Trash } from 'lucide-react';
 import { useFirestore, useDoc, useMemoFirebase, useCollection, useUser, setDocumentNonBlocking, useFirebase } from '@/firebase';
 import { doc, collection, query, orderBy, limit, Timestamp, serverTimestamp, setDoc, updateDoc, deleteDoc, where, getDoc, addDoc, writeBatch, getDocs } from 'firebase/firestore';
 import { getFunctions, httpsCallable } from 'firebase/functions';
@@ -1146,8 +1146,15 @@ function MessageThread({ channelId, jid, conversation, blocked, onDeleteSuccess 
   const [isDeleting, setIsDeleting] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const audioInputRef = useRef<HTMLInputElement>(null);
   const { toast } = useToast();
+
+  // RECORDER STATES
+  const [recordingState, setRecordingState] = useState<'idle' | 'recording' | 'finished'>('idle');
+  const [recordingDuration, setRecordingDuration] = useState(0);
+  const [recordedBlob, setRecordedBlob] = useState<Blob | null>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+  const timerRef = useRef<NodeJS.Timeout | null>(null);
 
   const isSuperAdmin = getIsSuperAdmin(user);
   const workerUrl = process.env.NEXT_PUBLIC_BAILEYS_WORKER_URL;
@@ -1312,25 +1319,68 @@ function MessageThread({ channelId, jid, conversation, blocked, onDeleteSuccess 
     }
   };
 
-  const handleAudioUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file || !firebaseApp || !firestore) return;
+  // --- RECORDING LOGIC ---
+  const startRecording = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const options = { mimeType: 'audio/webm;codecs=opus' };
+      const mediaRecorder = new MediaRecorder(stream, options);
+      mediaRecorderRef.current = mediaRecorder;
+      audioChunksRef.current = [];
 
-    if (!file.type.startsWith('audio/')) {
-      toast({ variant: 'destructive', title: 'Archivo no soportado', description: 'Por favor selecciona un archivo de audio.' });
-      return;
+      mediaRecorder.ondataavailable = (e) => {
+        if (e.data.size > 0) audioChunksRef.current.push(e.data);
+      };
+
+      mediaRecorder.onstop = () => {
+        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm;codecs=opus' });
+        setRecordedBlob(audioBlob);
+        stream.getTracks().forEach(track => track.stop());
+      };
+
+      mediaRecorder.start();
+      setRecordingState('recording');
+      setRecordingDuration(0);
+      timerRef.current = setInterval(() => {
+        setRecordingDuration(prev => prev + 1);
+      }, 1000);
+    } catch (err) {
+      console.error('Mic error', err);
+      toast({ variant: 'destructive', title: 'Error de micrófono', description: 'Asegúrate de dar permisos de acceso.' });
     }
+  };
+
+  const stopRecording = () => {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      mediaRecorderRef.current.stop();
+      if (timerRef.current) clearInterval(timerRef.current);
+      setRecordingState('finished');
+    }
+  };
+
+  const cancelRecording = () => {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      mediaRecorderRef.current.stop();
+    }
+    if (timerRef.current) clearInterval(timerRef.current);
+    setRecordingState('idle');
+    setRecordedBlob(null);
+    setRecordingDuration(0);
+  };
+
+  const handleSendRecordedAudio = async () => {
+    if (!recordedBlob || !firebaseApp || !firestore) return;
 
     setIsSending(true);
     const clientMessageId = (globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`);
-    const ext = file.name.split('.').pop() || 'ogg';
+    const ext = 'ogg'; // Baileys prefiere ogg para ptt
     const storagePath = `channels/${channelId}/conversations/${jid}/messages/${clientMessageId}/original.${ext}`;
 
     try {
       const { getStorage, ref, uploadBytes } = await import('firebase/storage');
       const storage = getStorage(firebaseApp);
       const fileRef = ref(storage, storagePath);
-      await uploadBytes(fileRef, file);
+      await uploadBytes(fileRef, recordedBlob);
 
       const msgDocRef = doc(firestore, 'channels', channelId, 'conversations', jid, 'messages', clientMessageId);
       await setDoc(msgDocRef, {
@@ -1348,9 +1398,10 @@ function MessageThread({ channelId, jid, conversation, blocked, onDeleteSuccess 
           kind: 'audio',
           storagePath,
           status: 'uploaded',
-          mimeType: file.type,
-          fileSize: file.size,
-          ptt: false // Por defecto enviamos como audio, no PTT
+          mimeType: recordedBlob.type,
+          fileSize: recordedBlob.size,
+          seconds: recordingDuration,
+          ptt: true 
         },
         timestamp: Date.now(),
         createdAt: serverTimestamp(),
@@ -1365,20 +1416,21 @@ function MessageThread({ channelId, jid, conversation, blocked, onDeleteSuccess 
         body: JSON.stringify({
           to: jid,
           storagePath,
-          mimetype: file.type,
-          ptt: false,
+          mimetype: recordedBlob.type,
+          ptt: true,
+          seconds: recordingDuration,
           meta: { clientMessageId, source: 'manual' }
         })
       });
 
       if (!response.ok) throw new Error("Worker failed to send audio");
 
+      cancelRecording();
     } catch (err: any) {
       console.error('[AUDIO_SEND] error', err);
       toast({ variant: 'destructive', title: 'Error al enviar audio', description: err.message });
     } finally {
       setIsSending(false);
-      if (audioInputRef.current) audioInputRef.current.value = '';
     }
   };
 
@@ -1461,6 +1513,12 @@ function MessageThread({ channelId, jid, conversation, blocked, onDeleteSuccess 
     } finally {
       setIsDeleting(false);
     }
+  };
+
+  const formatTimer = (seconds: number) => {
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins}:${secs.toString().padStart(2, '0')}`;
   };
 
   return (
@@ -1601,44 +1659,74 @@ function MessageThread({ channelId, jid, conversation, blocked, onDeleteSuccess 
             <AlertDescription className="text-xs">Trial expirado. Funciones bloqueadas.</AlertDescription>
           </Alert>
         )}
-        <div className="flex gap-2 items-center">
-          <input type="file" className="hidden" ref={fileInputRef} accept="image/*" onChange={handleImageUpload} />
-          <input type="file" className="hidden" ref={audioInputRef} accept="audio/*" onChange={handleAudioUpload} />
-          
-          <DropdownMenu modal={false}>
-            <DropdownMenuTrigger asChild>
-              <Button type="button" variant="ghost" size="icon" className="shrink-0 text-muted-foreground" disabled={isSending || blocked}>
-                <Paperclip className="h-5 w-5" />
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="start" side="top">
-              <DropdownMenuItem onClick={() => fileInputRef.current?.click()}>
-                <ImageIcon className="mr-2 h-4 w-4" /> Imagen
-              </DropdownMenuItem>
-              <DropdownMenuItem onClick={() => audioInputRef.current?.click()}>
-                <Music className="mr-2 h-4 w-4" /> Audio
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
+        
+        {recordingState === 'idle' ? (
+          <div className="flex gap-2 items-center">
+            <input type="file" className="hidden" ref={fileInputRef} accept="image/*" onChange={handleImageUpload} />
+            
+            <DropdownMenu modal={false}>
+              <DropdownMenuTrigger asChild>
+                <Button type="button" variant="ghost" size="icon" className="shrink-0 text-muted-foreground" disabled={isSending || blocked}>
+                  <Paperclip className="h-5 w-5" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" side="top">
+                <DropdownMenuItem onClick={() => fileInputRef.current?.click()}>
+                  <ImageIcon className="mr-2 h-4 w-4" /> Imagen
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={startRecording}>
+                  <Mic className="mr-2 h-4 w-4" /> Grabar Audio
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
 
-          <form onSubmit={handleSendMessage} className="flex-1 flex gap-2">
-            <Input 
-              placeholder={blocked ? "Canal expirado..." : "Escribe un mensaje..."}
-              value={inputText} 
-              onChange={(e) => setInputText(e.target.value)} 
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey) {
-                  e.preventDefault();
-                  handleSendMessage(e as any);
-                }
-              }}
-              disabled={isSending || blocked} 
-            />
-            <Button type="submit" size="icon" disabled={isSending || !inputText.trim() || blocked}>
-              {isSending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
-            </Button>
-          </form>
-        </div>
+            <form onSubmit={handleSendMessage} className="flex-1 flex gap-2">
+              <Input 
+                placeholder={blocked ? "Canal expirado..." : "Escribe un mensaje..."}
+                value={inputText} 
+                onChange={(e) => setInputText(e.target.value)} 
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    handleSendMessage(e as any);
+                  }
+                }}
+                disabled={isSending || blocked} 
+              />
+              <Button type="submit" size="icon" disabled={isSending || !inputText.trim() || blocked}>
+                {isSending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+              </Button>
+            </form>
+          </div>
+        ) : (
+          <div className="flex items-center justify-between gap-4 p-2 bg-muted/50 rounded-lg animate-in fade-in duration-200">
+            <div className="flex items-center gap-3">
+              <div className="flex items-center gap-2 text-destructive animate-pulse">
+                <div className="size-2 rounded-full bg-destructive" />
+                <span className="text-xs font-bold font-mono">{formatTimer(recordingDuration)}</span>
+              </div>
+              <span className="text-xs text-muted-foreground font-medium">
+                {recordingState === 'recording' ? 'Grabando nota de voz...' : 'Audio listo'}
+              </span>
+            </div>
+            
+            <div className="flex items-center gap-2">
+              <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground hover:text-destructive" onClick={cancelRecording} disabled={isSending}>
+                <Trash className="h-4 w-4" />
+              </Button>
+              
+              {recordingState === 'recording' ? (
+                <Button size="icon" className="h-8 w-8 rounded-full" onClick={stopRecording}>
+                  <Square className="h-3 w-3" />
+                </Button>
+              ) : (
+                <Button size="icon" className="h-8 w-8 rounded-full bg-primary" onClick={handleSendRecordedAudio} disabled={isSending}>
+                  {isSending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+                </Button>
+              )}
+            </div>
+          </div>
+        )}
       </div>
 
       <CustomerProfileDialog channelId={channelId} conversation={conversation} isOpen={isProfileOpen} onOpenChange={setIsProfileOpen} />
