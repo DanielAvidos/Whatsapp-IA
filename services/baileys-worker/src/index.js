@@ -312,7 +312,7 @@ async function saveMessageToFirestore(channelId, jid, originalId, docData) {
   const convPatch = {
     jid,
     type: jid.endsWith('@g.us') ? 'group' : 'user',
-    lastMessageText: messagePayload.text || (messagePayload.type === 'image' ? '[Imagen]' : '[media]'),
+    lastMessageText: messagePayload.text || (messagePayload.type === 'image' ? '[Imagen]' : messagePayload.type === 'audio' ? '[Audio]' : '[media]'),
     lastMessageAt: FieldValue.serverTimestamp(),
     lastMessageId: targetDocId,
     unreadCount: isIn ? FieldValue.increment(1) : FieldValue.increment(0),
@@ -473,15 +473,16 @@ async function startOrRestartBaileys(channelId, reason = 'manual') {
           
           if (!content) continue;
 
-          // Identify image (including view once types handled by unwrap)
+          // Detect media types
           const imageMsg = content.imageMessage;
-          const isImage = !!imageMsg;
+          const audioMsg = content.audioMessage;
           
           let text = extractText(rawContent);
           let mediaData = null;
           let messageType = 'text';
 
-          if (isImage) {
+          // --- IMAGE PROCESSING ---
+          if (imageMsg) {
             messageType = 'image';
             console.log(`[MEDIA_STEP] image_detected | ID: ${waMessageId} | JID: ${jid}`);
             try {
@@ -503,10 +504,7 @@ async function startOrRestartBaileys(channelId, reason = 'manual') {
               await file.save(buffer, { metadata: { contentType: mimeType } });
               console.log(`[MEDIA_STEP] upload_success | ID: ${waMessageId}`);
 
-              console.log(`[MEDIA_STEP] exists_check_start | ID: ${waMessageId}`);
               const [exists] = await file.exists();
-              console.log(`[MEDIA_STEP] exists_result | ID: ${waMessageId} | Exists: ${exists}`);
-
               mediaData = {
                 kind: 'image',
                 storagePath,
@@ -520,13 +518,43 @@ async function startOrRestartBaileys(channelId, reason = 'manual') {
               if (imageMsg.caption) text = imageMsg.caption;
             } catch (err) {
               console.error(`[MEDIA_STEP] failure | ID: ${waMessageId} | Error: ${err.message}`, err);
-              mediaData = {
-                kind: 'image',
-                status: 'failed',
-                errorMessage: err.message
-              };
+              mediaData = { kind: 'image', status: 'failed', errorMessage: err.message };
             }
-            console.log(`[MEDIA_STEP] firestore_save_ready | ID: ${waMessageId}`);
+          }
+
+          // --- AUDIO PROCESSING ---
+          if (audioMsg) {
+            messageType = 'audio';
+            console.log(`[MEDIA_STEP] audio_detected | ID: ${waMessageId} | JID: ${jid}`);
+            try {
+              const buffer = await downloadMediaMessage(
+                msg,
+                'buffer',
+                {},
+                { logger, reuploadRequest: sock.updateMediaMessage }
+              );
+              
+              const mimeType = audioMsg.mimetype || 'audio/ogg';
+              const ext = mimeType.split('/')[1]?.split(';')[0] || 'ogg';
+              const storagePath = `channels/${channelId}/conversations/${jid}/messages/${waMessageId}/original.${ext}`;
+              
+              const file = bucket.file(storagePath);
+              await file.save(buffer, { metadata: { contentType: mimeType } });
+              
+              const [exists] = await file.exists();
+              mediaData = {
+                kind: 'audio',
+                storagePath,
+                status: exists ? 'uploaded' : 'failed',
+                mimeType,
+                fileSize: buffer.length,
+                seconds: audioMsg.seconds,
+                ptt: !!audioMsg.ptt
+              };
+            } catch (err) {
+              console.error(`[MEDIA_STEP] audio_failure | ID: ${waMessageId}`, err);
+              mediaData = { kind: 'audio', status: 'failed', errorMessage: err.message };
+            }
           }
 
           const tsSec = typeof msg?.messageTimestamp === 'number' ? msg.messageTimestamp : null;
@@ -724,11 +752,8 @@ app.post('/v1/channels/:channelId/messages/send-image', async (req, res) => {
 
     const jid = to.includes('@') ? to : `${to}@s.whatsapp.net`;
 
-    // Download from storage
     const file = bucket.file(storagePath);
     const [buffer] = await file.download();
-    
-    // Metadata from storage file
     const [metadata] = await file.getMetadata();
 
     const r = await sock.sendMessage(jid, { 
@@ -737,9 +762,7 @@ app.post('/v1/channels/:channelId/messages/send-image', async (req, res) => {
     });
     const waMessageId = r?.key?.id;
 
-    if (waMessageId && clientMessageId) {
-      waToClientMap.set(waMessageId, clientMessageId);
-    }
+    if (waMessageId && clientMessageId) waToClientMap.set(waMessageId, clientMessageId);
 
     await saveMessageToFirestore(channelId, jid, waMessageId || `proxy-${Date.now()}`, {
       waMessageId,
@@ -764,6 +787,59 @@ app.post('/v1/channels/:channelId/messages/send-image', async (req, res) => {
     res.json({ ok: true, messageId: waMessageId || clientMessageId });
   } catch (e) {
     logger.error({ error: e.message }, 'Worker send-image error');
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/v1/channels/:channelId/messages/send-audio', async (req, res) => {
+  try {
+    const { to, storagePath, mimetype, ptt, seconds, meta } = req.body;
+    const { channelId } = req.params;
+    const clientMessageId = meta?.clientMessageId;
+
+    const sock = await ensureSocketReady(channelId);
+    if (!sock) return res.status(409).json({ error: 'Socket not ready' });
+
+    const jid = to.includes('@') ? to : `${to}@s.whatsapp.net`;
+
+    const file = bucket.file(storagePath);
+    const [buffer] = await file.download();
+    const [metadata] = await file.getMetadata();
+
+    const r = await sock.sendMessage(jid, { 
+      audio: buffer, 
+      mimetype: mimetype || metadata.contentType || 'audio/ogg',
+      ptt: !!ptt
+    });
+    const waMessageId = r?.key?.id;
+
+    if (waMessageId && clientMessageId) waToClientMap.set(waMessageId, clientMessageId);
+
+    await saveMessageToFirestore(channelId, jid, waMessageId || `proxy-${Date.now()}`, {
+      waMessageId,
+      clientMessageId: clientMessageId || null,
+      jid,
+      fromMe: true,
+      direction: 'OUT',
+      text: null,
+      type: 'audio',
+      status: 'sent',
+      media: {
+        kind: 'audio',
+        storagePath,
+        status: 'uploaded',
+        mimeType: metadata.contentType,
+        fileSize: metadata.size,
+        seconds: seconds || 0,
+        ptt: !!ptt
+      },
+      timestamp: Date.now(),
+      source: meta?.source || 'manual'
+    });
+
+    res.json({ ok: true, messageId: waMessageId || clientMessageId });
+  } catch (e) {
+    logger.error({ error: e.message }, 'Worker send-audio error');
     res.status(500).json({ error: e.message });
   }
 });

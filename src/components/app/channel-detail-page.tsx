@@ -2,7 +2,7 @@
 "use client";
 
 import { useState, useEffect, useRef, useMemo } from 'react';
-import { Loader2, ScanQrCode, LogOut, RotateCcw, MessageSquare, Link as LinkIcon, Send, Bot, FileText, Save, History, Brain, Info, AlertCircle, CheckCircle2, Clock, PlusCircle, Trash2, Settings2, MoreVertical, User, CalendarClock, XCircle, Image as ImageIcon, Paperclip } from 'lucide-react';
+import { Loader2, ScanQrCode, LogOut, RotateCcw, MessageSquare, Link as LinkIcon, Send, Bot, FileText, Save, History, Brain, Info, AlertCircle, CheckCircle2, Clock, PlusCircle, Trash2, Settings2, MoreVertical, User, CalendarClock, XCircle, Image as ImageIcon, Paperclip, Music } from 'lucide-react';
 import { useFirestore, useDoc, useMemoFirebase, useCollection, useUser, setDocumentNonBlocking, useFirebase } from '@/firebase';
 import { doc, collection, query, orderBy, limit, Timestamp, serverTimestamp, setDoc, updateDoc, deleteDoc, where, getDoc, addDoc, writeBatch, getDocs } from 'firebase/firestore';
 import { getFunctions, httpsCallable } from 'firebase/functions';
@@ -116,6 +116,74 @@ function ResolvedImage({ storagePath, alt }: { storagePath: string; alt: string 
       onClick={() => window.open(url!, '_blank')}
       loading="lazy"
     />
+  );
+}
+
+/**
+ * Resolves a Storage path to a download URL for audio and renders a player.
+ */
+function ResolvedAudio({ storagePath, ptt }: { storagePath: string; ptt?: boolean }) {
+  const { firebaseApp } = useFirebase();
+  const [url, setUrl] = useState<string | null>(null);
+  const [error, setError] = useState(false);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let active = true;
+    if (!storagePath || !firebaseApp) {
+      setLoading(false);
+      return;
+    }
+
+    const resolve = async () => {
+      try {
+        const { getStorage, ref, getDownloadURL } = await import('firebase/storage');
+        const storage = getStorage(firebaseApp);
+        const pathRef = ref(storage, storagePath);
+        const downloadUrl = await getDownloadURL(pathRef);
+        if (active) setUrl(downloadUrl);
+      } catch (e) {
+        console.error("[ResolvedAudio] Failed to resolve URL", e);
+        if (active) setError(true);
+      } finally {
+        if (active) setLoading(false);
+      }
+    };
+
+    resolve();
+    return () => { active = false; };
+  }, [storagePath, firebaseApp]);
+
+  if (error) {
+    return (
+      <div className="flex items-center gap-2 p-2 text-muted-foreground italic text-xs">
+        <AlertCircle className="h-4 w-4 opacity-50" />
+        <span>[Audio no disponible]</span>
+      </div>
+    );
+  }
+
+  if (loading) {
+    return (
+      <div className="flex items-center gap-2 p-2 w-full">
+        <Loader2 className="h-4 w-4 animate-spin opacity-20" />
+        <div className="h-2 flex-1 bg-muted rounded-full animate-pulse" />
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-1 min-w-[200px] py-1">
+      <audio controls className="h-8 w-full">
+        <source src={url!} />
+        Tu navegador no soporta el elemento de audio.
+      </audio>
+      {ptt && (
+        <span className="text-[8px] uppercase tracking-tighter font-bold text-muted-foreground flex items-center gap-1 opacity-60 ml-1">
+          <Music className="size-2" /> Nota de voz
+        </span>
+      )}
+    </div>
   );
 }
 
@@ -1078,6 +1146,7 @@ function MessageThread({ channelId, jid, conversation, blocked, onDeleteSuccess 
   const [isDeleting, setIsDeleting] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const audioInputRef = useRef<HTMLInputElement>(null);
   const { toast } = useToast();
 
   const isSuperAdmin = getIsSuperAdmin(user);
@@ -1183,20 +1252,18 @@ function MessageThread({ channelId, jid, conversation, blocked, onDeleteSuccess 
 
     setIsSending(true);
     const caption = inputText.trim();
-    setInputText(''); // Clear input early for better UX
+    setInputText(''); 
 
     const clientMessageId = (globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`);
     const ext = file.name.split('.').pop() || 'jpg';
     const storagePath = `channels/${channelId}/conversations/${jid}/messages/${clientMessageId}/original.${ext}`;
 
     try {
-      // 1. Upload to Storage
       const { getStorage, ref, uploadBytes } = await import('firebase/storage');
       const storage = getStorage(firebaseApp);
       const fileRef = ref(storage, storagePath);
       await uploadBytes(fileRef, file);
 
-      // 2. Optimistic Write to Firestore
       const msgDocRef = doc(firestore, 'channels', channelId, 'conversations', jid, 'messages', clientMessageId);
       await setDoc(msgDocRef, {
         id: clientMessageId,
@@ -1221,7 +1288,6 @@ function MessageThread({ channelId, jid, conversation, blocked, onDeleteSuccess 
         timestampServer: serverTimestamp(),
       }, { merge: true });
 
-      // 3. Call Worker
       if (!workerUrl) throw new Error("Worker URL not configured");
       
       const response = await fetch(`${workerUrl}/v1/channels/${channelId}/messages/send-image`, {
@@ -1243,6 +1309,76 @@ function MessageThread({ channelId, jid, conversation, blocked, onDeleteSuccess 
     } finally {
       setIsSending(false);
       if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  };
+
+  const handleAudioUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !firebaseApp || !firestore) return;
+
+    if (!file.type.startsWith('audio/')) {
+      toast({ variant: 'destructive', title: 'Archivo no soportado', description: 'Por favor selecciona un archivo de audio.' });
+      return;
+    }
+
+    setIsSending(true);
+    const clientMessageId = (globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`);
+    const ext = file.name.split('.').pop() || 'ogg';
+    const storagePath = `channels/${channelId}/conversations/${jid}/messages/${clientMessageId}/original.${ext}`;
+
+    try {
+      const { getStorage, ref, uploadBytes } = await import('firebase/storage');
+      const storage = getStorage(firebaseApp);
+      const fileRef = ref(storage, storagePath);
+      await uploadBytes(fileRef, file);
+
+      const msgDocRef = doc(firestore, 'channels', channelId, 'conversations', jid, 'messages', clientMessageId);
+      await setDoc(msgDocRef, {
+        id: clientMessageId,
+        clientMessageId,
+        jid,
+        text: null,
+        type: 'audio',
+        fromMe: true,
+        direction: "OUT",
+        status: "sending",
+        isBot: false,
+        source: "manual",
+        media: {
+          kind: 'audio',
+          storagePath,
+          status: 'uploaded',
+          mimeType: file.type,
+          fileSize: file.size,
+          ptt: false // Por defecto enviamos como audio, no PTT
+        },
+        timestamp: Date.now(),
+        createdAt: serverTimestamp(),
+        timestampServer: serverTimestamp(),
+      }, { merge: true });
+
+      if (!workerUrl) throw new Error("Worker URL not configured");
+      
+      const response = await fetch(`${workerUrl}/v1/channels/${channelId}/messages/send-audio`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          to: jid,
+          storagePath,
+          mimetype: file.type,
+          ptt: false,
+          meta: { clientMessageId, source: 'manual' }
+        })
+      });
+
+      if (!response.ok) throw new Error("Worker failed to send audio");
+
+    } catch (err: any) {
+      console.error('[AUDIO_SEND] error', err);
+      toast({ variant: 'destructive', title: 'Error al enviar audio', description: err.message });
+    } finally {
+      setIsSending(false);
+      if (audioInputRef.current) audioInputRef.current.value = '';
     }
   };
 
@@ -1280,28 +1416,18 @@ function MessageThread({ channelId, jid, conversation, blocked, onDeleteSuccess 
     setIsClearing(true);
     try {
       const messagesRef = collection(firestore, 'channels', channelId, 'conversations', jid, 'messages');
-      let deletedCount = 0;
-      
       while (true) {
-        // Query by batches of 400
         const q = query(messagesRef, limit(400));
         const snapshot = await getDocs(q);
         if (snapshot.empty) break;
-
         const batch = writeBatch(firestore);
-        snapshot.docs.forEach((doc) => {
-          batch.delete(doc.ref);
-        });
-        
+        snapshot.docs.forEach((doc) => batch.delete(doc.ref));
         await batch.commit();
-        deletedCount += snapshot.size;
       }
-
-      toast({ title: 'Chat limpiado', description: 'Todos los mensajes han sido eliminados correctamente.' });
+      toast({ title: 'Chat limpiado' });
       setIsClearOpen(false);
     } catch (error: any) {
-      console.error('[CLEAR_CHAT] error', error);
-      toast({ variant: 'destructive', title: 'Error al limpiar chat', description: error.message || String(error) });
+      toast({ variant: 'destructive', title: 'Error al limpiar chat', description: error.message });
     } finally {
       setIsClearing(false);
     }
@@ -1312,8 +1438,6 @@ function MessageThread({ channelId, jid, conversation, blocked, onDeleteSuccess 
     setIsDeleting(true);
     try {
       const convRef = doc(firestore, 'channels', channelId, 'conversations', jid);
-      
-      // Helper to delete a collection in batches
       const deleteCollection = async (collectionPath: string) => {
         const colRef = collection(firestore, collectionPath);
         while (true) {
@@ -1325,21 +1449,15 @@ function MessageThread({ channelId, jid, conversation, blocked, onDeleteSuccess 
           await batch.commit();
         }
       };
-
-      // 1. Delete subcollections (known ones)
       await deleteCollection(`channels/${channelId}/conversations/${jid}/messages`);
       await deleteCollection(`channels/${channelId}/conversations/${jid}/followup_locks`);
       await deleteCollection(`channels/${channelId}/conversations/${jid}/profile_processed`);
-
-      // 2. Delete the conversation document itself
       await deleteDoc(convRef);
-
-      toast({ title: 'Conversación eliminada', description: 'La conversación ha sido borrada completamente.' });
+      toast({ title: 'Conversación eliminada' });
       setIsDeleteOpen(false);
       if (onDeleteSuccess) onDeleteSuccess();
     } catch (error: any) {
-      console.error('[DELETE_CONV] error', error);
-      toast({ variant: 'destructive', title: 'Error al eliminar', description: error.message || String(error) });
+      toast({ variant: 'destructive', title: 'Error al eliminar', description: error.message });
     } finally {
       setIsDeleting(false);
     }
@@ -1421,7 +1539,6 @@ function MessageThread({ channelId, jid, conversation, blocked, onDeleteSuccess 
             <div className="flex flex-col gap-2">
               {dedupedMessages.map((msg) => (
                 <div key={msg.id} className={cn("max-w-[80%] rounded-lg p-3 text-sm shadow-sm", msg.fromMe ? "bg-primary text-primary-foreground ml-auto rounded-tr-none" : "bg-card mr-auto rounded-tl-none")}>
-                  {/* Image Rendering with Fallback */}
                   {msg.type === 'image' && (
                     <div className="mb-2 rounded overflow-hidden bg-black/5 flex flex-col justify-center items-center min-h-[100px]">
                       {msg.media?.storagePath ? (
@@ -1437,7 +1554,12 @@ function MessageThread({ channelId, jid, conversation, blocked, onDeleteSuccess 
                       )}
                     </div>
                   )}
-                  <p className="whitespace-pre-wrap">{msg.text}</p>
+                  {msg.type === 'audio' && msg.media?.storagePath && (
+                    <div className="mb-1">
+                      <ResolvedAudio storagePath={msg.media.storagePath} ptt={msg.media.ptt} />
+                    </div>
+                  )}
+                  {msg.text && <p className="whitespace-pre-wrap">{msg.text}</p>}
                   <div className="text-[10px] mt-1 opacity-70 flex justify-end gap-1">
                     {(() => {
                       const d = msg.timestamp?.toDate ? msg.timestamp.toDate() : new Date(msg.timestamp);
@@ -1449,7 +1571,6 @@ function MessageThread({ channelId, jid, conversation, blocked, onDeleteSuccess 
                 </div>
               ))}
               <div ref={scrollRef} />
-              
               <div className="mt-8 border-t pt-4">
                 <div className="bg-card/50 rounded-lg p-3 border border-dashed text-[10px] space-y-2">
                   <p className="font-bold uppercase tracking-wider text-muted-foreground flex items-center gap-1">
@@ -1458,16 +1579,12 @@ function MessageThread({ channelId, jid, conversation, blocked, onDeleteSuccess 
                   <div className="grid grid-cols-2 gap-x-4 gap-y-1">
                     <span className="text-muted-foreground">Habilitado:</span>
                     <span className={conversation?.followupEnabled ? 'text-green-600 font-bold' : ''}>{conversation?.followupEnabled ? 'SÍ' : 'NO'}</span>
-                    
                     <span className="text-muted-foreground">Etapa Actual:</span>
                     <span>{conversation?.followupStage ?? 0}</span>
-                    
                     <span className="text-muted-foreground">Próximo Envío:</span>
                     <span>{conversation?.followupNextAt ? format((conversation.followupNextAt as Timestamp).toDate(), 'PPpp') : '---'}</span>
-                    
                     <span className="text-muted-foreground">Detección STOP:</span>
                     <span>{conversation?.followupStopped ? `SÍ (${conversation.followupStopReason})` : 'NO'}</span>
-                    
                     <span className="text-muted-foreground">Último del Cliente:</span>
                     <span>{conversation?.followupLastCustomerAt ? format((conversation.followupLastCustomerAt as Timestamp).toDate(), 'PPpp') : '---'}</span>
                   </div>
@@ -1485,23 +1602,25 @@ function MessageThread({ channelId, jid, conversation, blocked, onDeleteSuccess 
           </Alert>
         )}
         <div className="flex gap-2 items-center">
-          <input 
-            type="file" 
-            className="hidden" 
-            ref={fileInputRef} 
-            accept="image/*" 
-            onChange={handleImageUpload}
-          />
-          <Button 
-            type="button" 
-            variant="ghost" 
-            size="icon" 
-            className="shrink-0 text-muted-foreground"
-            onClick={() => fileInputRef.current?.click()}
-            disabled={isSending || blocked}
-          >
-            <ImageIcon className="h-5 w-5" />
-          </Button>
+          <input type="file" className="hidden" ref={fileInputRef} accept="image/*" onChange={handleImageUpload} />
+          <input type="file" className="hidden" ref={audioInputRef} accept="audio/*" onChange={handleAudioUpload} />
+          
+          <DropdownMenu modal={false}>
+            <DropdownMenuTrigger asChild>
+              <Button type="button" variant="ghost" size="icon" className="shrink-0 text-muted-foreground" disabled={isSending || blocked}>
+                <Paperclip className="h-5 w-5" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start" side="top">
+              <DropdownMenuItem onClick={() => fileInputRef.current?.click()}>
+                <ImageIcon className="mr-2 h-4 w-4" /> Imagen
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => audioInputRef.current?.click()}>
+                <Music className="mr-2 h-4 w-4" /> Audio
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+
           <form onSubmit={handleSendMessage} className="flex-1 flex gap-2">
             <Input 
               placeholder={blocked ? "Canal expirado..." : "Escribe un mensaje..."}
@@ -1522,58 +1641,31 @@ function MessageThread({ channelId, jid, conversation, blocked, onDeleteSuccess 
         </div>
       </div>
 
-      <CustomerProfileDialog 
-        channelId={channelId} 
-        conversation={conversation} 
-        isOpen={isProfileOpen} 
-        onOpenChange={setIsProfileOpen} 
-      />
-
+      <CustomerProfileDialog channelId={channelId} conversation={conversation} isOpen={isProfileOpen} onOpenChange={setIsProfileOpen} />
       <AlertDialog open={isClearOpen} onOpenChange={setIsClearOpen}>
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>Limpiar chat</AlertDialogTitle>
-            <AlertDialogDescription>
-              Esta acción eliminará todos los mensajes de esta conversación. El chat seguirá apareciendo en la lista. No se puede deshacer.
-            </AlertDialogDescription>
+            <AlertDialogDescription>Esta acción eliminará todos los mensajes de esta conversación.</AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel disabled={isClearing}>Cancelar</AlertDialogCancel>
-            <AlertDialogAction 
-              onClick={(e) => {
-                e.preventDefault();
-                clearChatMessages();
-              }}
-              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-              disabled={isClearing}
-            >
-              {isClearing ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Trash2 className="mr-2 h-4 w-4" />}
-              Eliminar mensajes
+            <AlertDialogAction onClick={(e) => { e.preventDefault(); clearChatMessages(); }} className="bg-destructive text-destructive-foreground" disabled={isClearing}>
+              {isClearing ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Trash2 className="mr-2 h-4 w-4" />} Eliminar mensajes
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
-
       <AlertDialog open={isDeleteOpen} onOpenChange={setIsDeleteOpen}>
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>¿Eliminar conversación completa?</AlertDialogTitle>
-            <AlertDialogDescription>
-              Esta acción eliminará la conversación completa y todos sus mensajes de forma permanente. <strong>Ya no aparecerá en la lista izquierda.</strong>
-            </AlertDialogDescription>
+            <AlertDialogDescription>Esta acción eliminará la conversación completa y todos sus mensajes de forma permanente.</AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel disabled={isDeleting}>Cancelar</AlertDialogCancel>
-            <AlertDialogAction 
-              onClick={(e) => {
-                e.preventDefault();
-                deleteFullConversation();
-              }}
-              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-              disabled={isDeleting}
-            >
-              {isDeleting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Trash2 className="mr-2 h-4 w-4" />}
-              Borrar definitivamente
+            <AlertDialogAction onClick={(e) => { e.preventDefault(); deleteFullConversation(); }} className="bg-destructive text-destructive-foreground" disabled={isDeleting}>
+              {isDeleting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Trash2 className="mr-2 h-4 w-4" />} Borrar definitivamente
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

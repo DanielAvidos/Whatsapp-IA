@@ -144,9 +144,9 @@ export type Message = {
   fromMe: boolean;
   direction: 'IN' | 'OUT';
   text: string | null;
-  type?: 'text' | 'image';
+  type?: 'text' | 'image' | 'audio';
   media?: {
-    kind: 'image';
+    kind: 'image' | 'audio';
     storagePath: string;
     downloadUrl?: string;
     status?: 'uploaded' | 'failed';
@@ -154,6 +154,9 @@ export type Message = {
     fileSize?: number;
     width?: number;
     height?: number;
+    seconds?: number;
+    ptt?: boolean;
+    fileName?: string;
     errorMessage?: string;
   } | null;
   status: 'received' | 'sent' | 'delivered' | 'read' | 'sending' | 'error' | null;
