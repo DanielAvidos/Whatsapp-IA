@@ -2,8 +2,8 @@
 "use client";
 
 import { useState, useEffect, useRef, useMemo } from 'react';
-import { Loader2, ScanQrCode, LogOut, RotateCcw, MessageSquare, Link as LinkIcon, Send, Bot, FileText, Save, History, Brain, Info, AlertCircle, CheckCircle2, Clock, PlusCircle, Trash2, Settings2, MoreVertical, User, CalendarClock, XCircle, Image as ImageIcon, Paperclip, Music, Mic, Square, Trash } from 'lucide-react';
-import { useFirestore, useDoc, useMemoFirebase, useCollection, useUser, setDocumentNonBlocking, useFirebase } from '@/firebase';
+import { Loader2, ScanQrCode, LogOut, RotateCcw, MessageSquare, Link as LinkIcon, Send, Bot, FileText, Save, History, Brain, Info, AlertCircle, CheckCircle2, Clock, PlusCircle, Trash2, Settings2, MoreVertical, User, CalendarClock, XCircle, Image as ImageIcon, Paperclip, Music, Mic, Square, Trash, Edit3 } from 'lucide-react';
+import { useFirestore, useDoc, useMemoFirebase, useCollection, useUser, setDocumentNonBlocking, useFirebase, deleteDocumentNonBlocking } from '@/firebase';
 import { doc, collection, query, orderBy, limit, Timestamp, serverTimestamp, setDoc, updateDoc, deleteDoc, where, getDoc, addDoc, writeBatch, getDocs } from 'firebase/firestore';
 import { getFunctions, httpsCallable } from 'firebase/functions';
 import { PageHeader } from '@/components/app/page-header';
@@ -11,7 +11,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useLanguage } from '@/context/language-provider';
-import type { WhatsappChannel, Conversation, Message, BotConfig, FollowupConfig } from '@/lib/types';
+import type { WhatsappChannel, Conversation, Message, BotConfig, FollowupConfig, ImageResponse } from '@/lib/types';
 import { StatusBadge } from '@/components/app/status-badge';
 import { QrCodeDialog } from '@/components/app/qr-code-dialog';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -442,8 +442,9 @@ function ChatbotConfig({ channelId, blocked }: { channelId: string, blocked: boo
   return (
     <div className="space-y-6">
       <Tabs value={activeSubTab} onValueChange={setActiveSubTab} className="w-full">
-        <TabsList className="grid w-full grid-cols-3 max-w-lg">
+        <TabsList className="grid w-full grid-cols-4 max-w-2xl">
           <TabsTrigger value="training" className="flex items-center gap-2"><Brain className="h-4 w-4" />Entrenamiento</TabsTrigger>
+          <TabsTrigger value="visual" className="flex items-center gap-2"><ImageIcon className="h-4 w-4" />Respuestas Visuales</TabsTrigger>
           <TabsTrigger value="documents" className="flex items-center gap-2"><FileText className="h-4 w-4" />Documentos</TabsTrigger>
           <TabsTrigger value="followup" className="flex items-center gap-2"><History className="h-4 w-4" />Seguimiento</TabsTrigger>
         </TabsList>
@@ -532,6 +533,10 @@ function ChatbotConfig({ channelId, blocked }: { channelId: string, blocked: boo
           </Card>
         </TabsContent>
 
+        <TabsContent value="visual" className="pt-4">
+          <VisualResponsesTab channelId={channelId} blocked={blocked} />
+        </TabsContent>
+
         <TabsContent value="documents" className="pt-4">
           <DocumentsTab channelId={channelId} />
         </TabsContent>
@@ -540,6 +545,212 @@ function ChatbotConfig({ channelId, blocked }: { channelId: string, blocked: boo
           <FollowupConfigTab channelId={channelId} blocked={blocked} />
         </TabsContent>
       </Tabs>
+    </div>
+  );
+}
+
+function VisualResponsesTab({ channelId, blocked }: { channelId: string, blocked: boolean }) {
+  const { firestore, firebaseApp, user } = useFirebase();
+  const { toast } = useToast();
+  const [isDialogOpen, setIsDialogOpen] = useState(false);
+  const [editingResponse, setEditingResponse] = useState<ImageResponse | null>(null);
+  const [isSaving, setIsSaving] = useState(false);
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+
+  const responsesRef = useMemoFirebase(() => {
+    if (!firestore) return null;
+    return query(collection(firestore, 'channels', channelId, 'image_responses'), orderBy('priority', 'desc'));
+  }, [firestore, channelId]);
+
+  const { data: responses, isLoading } = useCollection<ImageResponse>(responsesRef);
+
+  const handleOpenDialog = (resp: ImageResponse | null = null) => {
+    setEditingResponse(resp);
+    setSelectedFile(null);
+    setIsDialogOpen(true);
+  };
+
+  const handleSave = async (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    if (!firestore || !firebaseApp || !user || blocked || isSaving) return;
+
+    const formData = new FormData(e.currentTarget);
+    const title = formData.get('title') as string;
+    const keywordsRaw = formData.get('keywords') as string;
+    const caption = formData.get('caption') as string;
+    const priority = parseInt(formData.get('priority') as string) || 0;
+    const enabled = formData.get('enabled') === 'on';
+
+    const keywords = keywordsRaw.split(',').map(k => k.trim().toLowerCase()).filter(k => k);
+
+    if (!title || keywords.length === 0) {
+      toast({ variant: 'destructive', title: 'Campos incompletos', description: 'El título y las palabras clave son obligatorios.' });
+      return;
+    }
+
+    if (!editingResponse && !selectedFile) {
+      toast({ variant: 'destructive', title: 'Imagen faltante', description: 'Debes seleccionar una imagen para la respuesta.' });
+      return;
+    }
+
+    setIsSaving(true);
+    try {
+      const respId = editingResponse?.id || Math.random().toString(36).substring(7);
+      let storagePath = editingResponse?.storagePath || '';
+
+      if (selectedFile) {
+        const { getStorage, ref, uploadBytes } = await import('firebase/storage');
+        const storage = getStorage(firebaseApp);
+        const ext = selectedFile.name.split('.').pop() || 'jpg';
+        storagePath = `channels/${channelId}/image_responses/${respId}/original.${ext}`;
+        const fileRef = ref(storage, storagePath);
+        await uploadBytes(fileRef, selectedFile);
+      }
+
+      const docRef = doc(firestore, 'channels', channelId, 'image_responses', respId);
+      const data: Partial<ImageResponse> = {
+        title,
+        keywords,
+        caption,
+        storagePath,
+        priority,
+        enabled,
+        updatedAt: serverTimestamp(),
+      };
+
+      if (!editingResponse) {
+        data.createdAt = serverTimestamp();
+      }
+
+      await setDoc(docRef, data, { merge: true });
+      toast({ title: 'Respuesta guardada' });
+      setIsDialogOpen(false);
+    } catch (error: any) {
+      toast({ variant: 'destructive', title: 'Error al guardar', description: error.message });
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleDelete = async (resp: ImageResponse) => {
+    if (!firestore || !firebaseApp || blocked) return;
+    try {
+      const docRef = doc(firestore, 'channels', channelId, 'image_responses', resp.id);
+      await deleteDoc(docRef);
+      
+      // Cleanup storage
+      const { getStorage, ref, deleteObject } = await import('firebase/storage');
+      const storage = getStorage(firebaseApp);
+      const fileRef = ref(storage, resp.storagePath);
+      await deleteObject(fileRef).catch(e => console.warn("Storage delete failed", e));
+
+      toast({ title: 'Respuesta eliminada' });
+    } catch (e: any) {
+      toast({ variant: 'destructive', title: 'Error al eliminar', description: e.message });
+    }
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <h3 className="text-lg font-medium">Respuestas Visuales (Imagen)</h3>
+        <Button onClick={() => handleOpenDialog()} disabled={blocked}>
+          <PlusCircle className="mr-2 h-4 w-4" />
+          Nueva Respuesta
+        </Button>
+      </div>
+
+      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+        {isLoading ? (
+          <Skeleton className="h-48 w-full" />
+        ) : responses?.length === 0 ? (
+          <Card className="col-span-full border-dashed p-8 flex flex-col items-center justify-center text-muted-foreground">
+            <ImageIcon className="h-12 w-12 mb-2 opacity-20" />
+            <p>No hay respuestas visuales configuradas.</p>
+          </Card>
+        ) : (
+          responses?.map(resp => (
+            <Card key={resp.id} className="overflow-hidden flex flex-col">
+              <div className="aspect-video relative bg-muted border-b overflow-hidden">
+                <ResolvedImage storagePath={resp.storagePath} alt={resp.title} />
+                <div className="absolute top-2 right-2 flex gap-1">
+                  <Badge variant={resp.enabled ? 'default' : 'outline'} className="text-[10px] h-5">
+                    {resp.enabled ? 'Activa' : 'Pausada'}
+                  </Badge>
+                  <Badge variant="secondary" className="text-[10px] h-5">P:{resp.priority}</Badge>
+                </div>
+              </div>
+              <CardHeader className="p-4 pb-2">
+                <CardTitle className="text-sm font-bold truncate">{resp.title}</CardTitle>
+                <CardDescription className="text-[10px] line-clamp-1">
+                  Keywords: {resp.keywords.join(', ')}
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="p-4 pt-0 flex-1">
+                {resp.caption && <p className="text-[10px] text-muted-foreground line-clamp-2 italic">"{resp.caption}"</p>}
+              </CardContent>
+              <div className="p-2 border-t flex justify-end gap-1 bg-muted/20">
+                <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => handleOpenDialog(resp)} disabled={blocked}>
+                  <Edit3 className="h-4 w-4" />
+                </Button>
+                <Button variant="ghost" size="icon" className="h-8 w-8 text-destructive" onClick={() => handleDelete(resp)} disabled={blocked}>
+                  <Trash2 className="h-4 w-4" />
+                </Button>
+              </div>
+            </Card>
+          ))
+        )}
+      </div>
+
+      <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>{editingResponse ? 'Editar Respuesta Visual' : 'Nueva Respuesta Visual'}</DialogTitle>
+            <DialogDescription>Configura una imagen que se enviará automáticamente al detectar palabras clave.</DialogDescription>
+          </DialogHeader>
+          <form onSubmit={handleSave} className="space-y-4 pt-4">
+            <div className="space-y-2">
+              <Label htmlFor="title">Nombre Interno (Título)</Label>
+              <Input id="title" name="title" defaultValue={editingResponse?.title} placeholder="Ej: Catálogo Verano" required />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="keywords">Palabras Clave (Separadas por comas)</Label>
+              <Input id="keywords" name="keywords" defaultValue={editingResponse?.keywords.join(', ')} placeholder="precio, catalogo, ver productos" required />
+              <p className="text-[10px] text-muted-foreground">Si el cliente escribe algo que incluya esto, se enviará la imagen.</p>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="caption">Mensaje de Imagen (Caption opcional)</Label>
+              <Textarea id="caption" name="caption" defaultValue={editingResponse?.caption || ''} placeholder="¡Claro! Aquí tienes nuestra información..." rows={2} />
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label htmlFor="priority">Prioridad (0-100)</Label>
+                <Input id="priority" name="priority" type="number" defaultValue={editingResponse?.priority || 0} />
+              </div>
+              <div className="flex items-center gap-2 pt-8">
+                <Switch id="enabled" name="enabled" defaultChecked={editingResponse?.enabled ?? true} />
+                <Label htmlFor="enabled">Activada</Label>
+              </div>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="image">Imagen</Label>
+              <div className="flex flex-col gap-2">
+                <Input id="image" type="file" accept="image/*" onChange={(e) => setSelectedFile(e.target.files?.[0] || null)} />
+                {editingResponse?.storagePath && !selectedFile && (
+                  <p className="text-[10px] text-muted-foreground">Mantén vacío para conservar la imagen actual.</p>
+                )}
+              </div>
+            </div>
+            <DialogFooter>
+              <Button type="button" variant="ghost" onClick={() => setIsDialogOpen(false)} disabled={isSaving}>Cancelar</Button>
+              <Button type="submit" disabled={isSaving}>
+                {isSaving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
+                Guardar
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

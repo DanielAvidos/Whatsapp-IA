@@ -180,3 +180,15 @@ export type BotConfig = {
   lastError?: string | null;
   lastErrorAt?: Timestamp | FieldValue | null;
 };
+
+export type ImageResponse = {
+  id: string;
+  title: string;
+  keywords: string[];
+  caption?: string | null;
+  storagePath: string;
+  enabled: boolean;
+  priority: number;
+  createdAt: Timestamp | FieldValue;
+  updatedAt: Timestamp | FieldValue;
+};

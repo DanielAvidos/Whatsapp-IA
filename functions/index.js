@@ -525,12 +525,61 @@ async function sendViaWorker({ workerUrl, channelId, toJid, text, meta }) {
   return body;
 }
 
+async function sendImageViaWorker({ workerUrl, channelId, toJid, storagePath, caption, meta }) {
+  const url = `${workerUrl}/v1/channels/${encodeURIComponent(channelId)}/messages/send-image`;
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ 
+      to: toJid, 
+      storagePath,
+      caption,
+      meta
+    }),
+  });
+
+  const body = await res.json().catch(() => ({}));
+
+  if (!res.ok) {
+    throw new Error(`Worker send image failed ${res.status}: ${JSON.stringify(body).slice(0, 300)}`);
+  }
+
+  return body;
+}
+
 const OPT_OUT_KEYWORDS = ["stop", "alto", "cancelar", "no me escribas", "deja de escribir", "no me interesa", "no estoy interesado", "ya no", "baja", "unsubscribe", "quitar", "no gracias", "no quiero"];
 
 function detectOptOut(text) {
   if (!text) return false;
   const normalized = text.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
   return OPT_OUT_KEYWORDS.some(k => normalized.includes(k));
+}
+
+async function findMatchingImageResponse(channelId, incomingText) {
+  const normalized = (incomingText || "").toLowerCase().trim();
+  if (!normalized) return null;
+
+  const snap = await db.collection("channels").doc(channelId).collection("image_responses")
+    .where("enabled", "==", true)
+    .orderBy("priority", "desc")
+    .get();
+
+  for (const doc of snap.docs) {
+    const data = doc.data();
+    const keywords = Array.isArray(data.keywords) ? data.keywords : [];
+    
+    const match = keywords.some(k => {
+      const kw = k.toLowerCase().trim();
+      if (!kw) return false;
+      return normalized === kw || normalized.includes(kw);
+    });
+
+    if (match) {
+      return { id: doc.id, ...data };
+    }
+  }
+  return null;
 }
 
 // --- CLOUD FUNCTIONS ---
@@ -723,6 +772,26 @@ exports.autoReplyOnIncomingMessage = functions
       }
 
       const workerUrl = await getWorkerUrl();
+
+      // --- NEW: CHECK FOR IMAGE RESPONSES FIRST ---
+      const matchingImage = await findMatchingImageResponse(channelId, text);
+      if (matchingImage) {
+        logger.info("[BOT] Image response match found", { channelId, responseId: matchingImage.id });
+        await sendImageViaWorker({
+          workerUrl,
+          channelId,
+          toJid: jid,
+          storagePath: matchingImage.storagePath,
+          caption: matchingImage.caption || "",
+          meta: { triggerMessageId: messageId, source: "bot_auto_image" }
+        });
+        await db.doc(`channels/${channelId}/runtime/bot`).set({
+          lastAutoReplyAt: admin.firestore.FieldValue.serverTimestamp(),
+          lastError: null,
+        }, { merge: true });
+        return null;
+      }
+
       const projectId = process.env.GOOGLE_CLOUD_PROJECT || admin.app().options.projectId;
       const location = "us-central1";
 
