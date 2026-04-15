@@ -537,6 +537,9 @@ function SalesFunnel({ channelId, blocked, channel }: { channelId: string, block
       {/* Reutilización del Chat en Modal */}
       <Dialog open={!!selectedJid} onOpenChange={(open) => !open && setSelectedJid(null)}>
         <DialogContent className="max-w-4xl p-0 h-[80vh] flex flex-col overflow-hidden">
+          <DialogHeader className="sr-only">
+            <DialogTitle>Detalle del Chat</DialogTitle>
+          </DialogHeader>
           {selectedJid && activeConversation && (
             <MessageThread 
               channelId={channelId} 
