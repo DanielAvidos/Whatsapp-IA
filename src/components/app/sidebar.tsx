@@ -221,7 +221,8 @@ export function AppSidebar() {
                     <Bot />
                     <span>Chatbot</span>
                   </Link>
-                </SidebarMenuItem>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
 
               <SidebarMenuItem>
                 <SidebarMenuButton
