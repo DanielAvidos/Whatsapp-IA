@@ -2,6 +2,7 @@
 "use client";
 
 import { useState, useEffect, useRef, useMemo } from 'react';
+import { useSearchParams, useRouter } from 'next/navigation';
 import { Loader2, ScanQrCode, LogOut, RotateCcw, MessageSquare, Link as LinkIcon, Send, Bot, FileText, Save, History, Brain, Info, AlertCircle, CheckCircle2, Clock, PlusCircle, Trash2, Settings2, MoreVertical, User, CalendarClock, XCircle, Image as ImageIcon, Paperclip, Music, Mic, Square, Trash, Edit3 } from 'lucide-react';
 import { useFirestore, useDoc, useMemoFirebase, useCollection, useUser, setDocumentNonBlocking, useFirebase, deleteDocumentNonBlocking } from '@/firebase';
 import { doc, collection, query, orderBy, limit, Timestamp, serverTimestamp, setDoc, updateDoc, deleteDoc, where, getDoc, addDoc, writeBatch, getDocs } from 'firebase/firestore';
@@ -212,6 +213,8 @@ export function ChannelDetailPage({ channelId }: { channelId: string }) {
   const { t } = useLanguage();
   const { firestore, user, firebaseApp } = useFirebase();
   const { toast } = useToast();
+  const searchParams = useSearchParams();
+  const router = useRouter();
   
   const channelRef = useMemoFirebase(() => {
     if (!firestore) return null;
@@ -223,6 +226,14 @@ export function ChannelDetailPage({ channelId }: { channelId: string }) {
   const [isQrModalOpen, setQrModalOpen] = useState(false);
   const [activeTab, setActiveTab] = useState('connection');
   const [isExtending, setIsExtending] = useState(false);
+
+  // Sync activeTab with URL search params
+  useEffect(() => {
+    const tab = searchParams.get('tab');
+    if (tab && ['connection', 'chats', 'chatbot'].includes(tab)) {
+      setActiveTab(tab);
+    }
+  }, [searchParams]);
 
   // Unified environment variable for Worker URL
   const workerUrl = process.env.NEXT_PUBLIC_BAILEYS_WORKER_URL;
@@ -244,10 +255,6 @@ export function ChannelDetailPage({ channelId }: { channelId: string }) {
       toast({ variant: 'destructive', title: errorMessage, description: String(error) });
     }
   }
-
-  const handleGenerateQr = () => handleApiCall('/qr', 'Generando código QR...', 'Error al solicitar QR');
-  const handleDisconnect = () => handleApiCall('/disconnect', 'Desconectando...', 'Error al desconectar');
-  const handleResetSession = () => handleApiCall('/resetSession', 'Reiniciando sesión...', 'Error al reiniciar sesión');
 
   const handleExtendTrial = async (days: number) => {
     if (!firestore || !user || isExtending) return;
@@ -325,14 +332,9 @@ export function ChannelDetailPage({ channelId }: { channelId: string }) {
         </Alert>
       )}
 
-      <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-4">
-        <TabsList>
-          <TabsTrigger value="connection" className="flex items-center gap-2"><LinkIcon className="h-4 w-4" />Conexión</TabsTrigger>
-          <TabsTrigger value="chats" className="flex items-center gap-2" disabled={channel?.status !== 'CONNECTED'}><MessageSquare className="h-4 w-4" />Chats</TabsTrigger>
-          <TabsTrigger value="chatbot" className="flex items-center gap-2"><Bot className="h-4 w-4" />Chatbot</TabsTrigger>
-        </TabsList>
-
-        <TabsContent value="connection">
+      <Tabs value={activeTab} className="space-y-4 border-none">
+        {/* Note: TabsList removed as navigation is now in the sidebar */}
+        <TabsContent value="connection" className="m-0 border-none outline-none">
           <div className="grid gap-8 md:grid-cols-2 lg:grid-cols-3">
             <Card className="lg:col-span-2">
               <CardHeader>
@@ -377,11 +379,11 @@ export function ChannelDetailPage({ channelId }: { channelId: string }) {
           </div>
         </TabsContent>
 
-        <TabsContent value="chats">
+        <TabsContent value="chats" className="m-0 border-none outline-none">
           {workerUrl && <ChatInterface channelId={channelId} blocked={isBlocked} />}
         </TabsContent>
 
-        <TabsContent value="chatbot">
+        <TabsContent value="chatbot" className="m-0 border-none outline-none">
           <ChatbotConfig channelId={channelId} blocked={isBlocked} />
         </TabsContent>
       </Tabs>
