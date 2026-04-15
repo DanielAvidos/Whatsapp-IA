@@ -3,7 +3,7 @@
 
 import { useState, useEffect, useRef, useMemo } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
-import { Loader2, ScanQrCode, LogOut, RotateCcw, MessageSquare, Link as LinkIcon, Send, Bot, FileText, Save, History, Brain, Info, AlertCircle, CheckCircle2, Clock, PlusCircle, Trash2, Settings2, MoreVertical, User, CalendarClock, XCircle, Image as ImageIcon, Paperclip, Music, Mic, Square, Trash, Edit3 } from 'lucide-react';
+import { Loader2, ScanQrCode, LogOut, RotateCcw, MessageSquare, Link as LinkIcon, Send, Bot, FileText, Save, History, Brain, Info, AlertCircle, CheckCircle2, Clock, PlusCircle, Trash2, Settings2, MoreVertical, User, CalendarClock, XCircle, Image as ImageIcon, Paperclip, Music, Mic, Square, Trash, Edit3, LayoutGrid, ChevronRight } from 'lucide-react';
 import { useFirestore, useDoc, useMemoFirebase, useCollection, useUser, setDocumentNonBlocking, useFirebase, deleteDocumentNonBlocking } from '@/firebase';
 import { doc, collection, query, orderBy, limit, Timestamp, serverTimestamp, setDoc, updateDoc, deleteDoc, where, getDoc, addDoc, writeBatch, getDocs } from 'firebase/firestore';
 import { getFunctions, httpsCallable } from 'firebase/functions';
@@ -12,13 +12,13 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useLanguage } from '@/context/language-provider';
-import type { WhatsappChannel, Conversation, Message, BotConfig, FollowupConfig, ImageResponse } from '@/lib/types';
+import type { WhatsappChannel, Conversation, Message, BotConfig, FollowupConfig, ImageResponse, FunnelStageConfig } from '@/lib/types';
 import { StatusBadge } from '@/components/app/status-badge';
 import { QrCodeDialog } from '@/components/app/qr-code-dialog';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Alert, AlertTitle, AlertDescription } from '@/components/ui/alert';
 import { Input } from '@/components/ui/input';
-import { ScrollArea } from '@/components/ui/scroll-area';
+import { ScrollArea, ScrollBar } from '@/components/ui/scroll-area';
 import { format } from 'date-fns';
 import { cn } from '@/lib/utils';
 import Link from 'next/link';
@@ -29,7 +29,7 @@ import { useToast } from '@/hooks/use-toast';
 import { Badge } from '@/components/ui/badge';
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion';
 import { Progress } from '@/components/ui/progress';
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, DropdownMenuSeparator } from '@/components/ui/dropdown-menu';
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, DropdownMenuSeparator, DropdownMenuLabel, DropdownMenuSub, DropdownMenuSubTrigger, DropdownMenuPortal, DropdownMenuSubContent } from '@/components/ui/dropdown-menu';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from '@/components/ui/dialog';
 import {
   AlertDialog,
@@ -44,6 +44,14 @@ import {
 import { getIsSuperAdmin } from '@/lib/auth-helpers';
 
 const GEMINI_MODEL_LOCKED = "gemini-2.5-flash";
+
+const DEFAULT_STAGES: FunnelStageConfig[] = [
+  { id: 1, name: 'Prospecto' },
+  { id: 2, name: 'Contactado' },
+  { id: 3, name: 'Calificado' },
+  { id: 4, name: 'Propuesta' },
+  { id: 5, name: 'Cierre' },
+];
 
 /**
  * Unified helper to determine trial state from channel document.
@@ -230,7 +238,7 @@ export function ChannelDetailPage({ channelId }: { channelId: string }) {
   // Sync activeTab with URL search params
   useEffect(() => {
     const tab = searchParams.get('tab');
-    if (tab && ['connection', 'chats', 'chatbot'].includes(tab)) {
+    if (tab && ['connection', 'chats', 'chatbot', 'funnel'].includes(tab)) {
       setActiveTab(tab);
     }
   }, [searchParams]);
@@ -333,7 +341,6 @@ export function ChannelDetailPage({ channelId }: { channelId: string }) {
       )}
 
       <Tabs value={activeTab} className="space-y-4 border-none">
-        {/* Note: TabsList removed as navigation is now in the sidebar */}
         <TabsContent value="connection" className="m-0 border-none outline-none">
           <div className="grid gap-8 md:grid-cols-2 lg:grid-cols-3">
             <Card className="lg:col-span-2">
@@ -380,16 +387,190 @@ export function ChannelDetailPage({ channelId }: { channelId: string }) {
         </TabsContent>
 
         <TabsContent value="chats" className="m-0 border-none outline-none">
-          {workerUrl && <ChatInterface channelId={channelId} blocked={isBlocked} />}
+          {workerUrl && <ChatInterface channelId={channelId} blocked={isBlocked} funnelStages={channel?.funnelConfig?.stages || DEFAULT_STAGES} />}
         </TabsContent>
 
         <TabsContent value="chatbot" className="m-0 border-none outline-none">
           <ChatbotConfig channelId={channelId} blocked={isBlocked} />
         </TabsContent>
+
+        <TabsContent value="funnel" className="m-0 border-none outline-none">
+          <SalesFunnel channelId={channelId} blocked={isBlocked} channel={channel} />
+        </TabsContent>
       </Tabs>
 
       <QrCodeDialog qrDataUrl={channel?.qrDataUrl ?? null} isOpen={isQrModalOpen} onOpenChange={setQrModalOpen} />
     </main>
+  );
+}
+
+function SalesFunnel({ channelId, blocked, channel }: { channelId: string, blocked: boolean, channel: WhatsappChannel | null | undefined }) {
+  const firestore = useFirestore();
+  const { toast } = useToast();
+  const [selectedJid, setSelectedJid] = useState<string | null>(null);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [editingStages, setEditingStages] = useState<FunnelStageConfig[]>([]);
+
+  const stages = channel?.funnelConfig?.stages || DEFAULT_STAGES;
+
+  const conversationsQuery = useMemoFirebase(() => {
+    if (!firestore) return null;
+    return query(collection(firestore, 'channels', channelId, 'conversations'), orderBy('lastMessageAt', 'desc'), limit(150));
+  }, [firestore, channelId]);
+
+  const { data: conversations, isLoading } = useCollection<Conversation>(conversationsQuery);
+
+  const activeConversation = useMemo(() => {
+    return conversations?.find(c => c.jid === selectedJid);
+  }, [conversations, selectedJid]);
+
+  const handleOpenSettings = () => {
+    setEditingStages(JSON.parse(JSON.stringify(stages)));
+    setIsSettingsOpen(true);
+  };
+
+  const handleSaveStages = async () => {
+    if (!firestore || !channelId) return;
+    try {
+      const ref = doc(firestore, 'channels', channelId);
+      await updateDoc(ref, {
+        "funnelConfig.stages": editingStages,
+        updatedAt: serverTimestamp()
+      });
+      toast({ title: 'Nombres de etapas actualizados' });
+      setIsSettingsOpen(false);
+    } catch (e) {
+      toast({ variant: 'destructive', title: 'Error al guardar etapas' });
+    }
+  };
+
+  const updateStageName = (id: number, name: string) => {
+    setEditingStages(prev => prev.map(s => s.id === id ? { ...s, name } : s));
+  };
+
+  const moveConversation = async (jid: string, newStage: number) => {
+    if (!firestore || blocked) return;
+    try {
+      const convRef = doc(firestore, 'channels', channelId, 'conversations', jid);
+      await updateDoc(convRef, { funnelStage: newStage, updatedAt: serverTimestamp() });
+      toast({ title: 'Conversación movida' });
+    } catch (e) {
+      toast({ variant: 'destructive', title: 'Error al mover' });
+    }
+  };
+
+  if (isLoading) return <div className="flex h-[400px] items-center justify-center"><Loader2 className="animate-spin" /></div>;
+
+  return (
+    <div className="space-y-6">
+      <div className="flex items-center justify-between">
+        <h3 className="text-lg font-semibold flex items-center gap-2">
+          <LayoutGrid className="h-5 w-5 text-primary" />
+          Seguimiento Comercial
+        </h3>
+        <Button variant="outline" size="sm" onClick={handleOpenSettings} disabled={blocked}>
+          <Settings2 className="h-4 w-4 mr-2" />
+          Configurar Etapas
+        </Button>
+      </div>
+
+      <ScrollArea className="w-full pb-4">
+        <div className="flex gap-4 min-w-[1200px]">
+          {stages.map((stage) => {
+            const stageConvs = conversations?.filter(c => (c.funnelStage || 1) === stage.id) || [];
+            return (
+              <div key={stage.id} className="flex-1 min-w-[240px] flex flex-col gap-3">
+                <div className="flex items-center justify-between px-2">
+                  <h4 className="text-xs font-bold uppercase tracking-wider text-muted-foreground flex items-center gap-2">
+                    <span className="size-5 rounded-full bg-primary/10 text-primary flex items-center justify-center text-[10px]">{stage.id}</span>
+                    {stage.name}
+                  </h4>
+                  <Badge variant="secondary" className="text-[10px]">{stageConvs.length}</Badge>
+                </div>
+                
+                <div className="flex-1 bg-muted/30 rounded-lg p-2 flex flex-col gap-2 min-h-[500px]">
+                  {stageConvs.map(conv => (
+                    <Card key={conv.jid} className={cn("cursor-pointer hover:border-primary/50 transition-colors shadow-none", selectedJid === conv.jid && "border-primary")}>
+                      <CardContent className="p-3" onClick={() => setSelectedJid(conv.jid)}>
+                        <div className="flex items-center justify-between gap-1 mb-1">
+                          <p className="text-xs font-bold truncate flex-1">{resolveConversationDisplayName(conv)}</p>
+                          <DropdownMenu modal={false}>
+                            <DropdownMenuTrigger asChild>
+                              <Button variant="ghost" size="icon" className="h-6 w-6 -mr-1" onClick={(e) => e.stopPropagation()}>
+                                <ChevronRight className="h-3 w-3" />
+                              </Button>
+                            </DropdownMenuTrigger>
+                            <DropdownMenuContent align="end">
+                              <DropdownMenuLabel>Mover a etapa</DropdownMenuLabel>
+                              {stages.filter(s => s.id !== stage.id).map(s => (
+                                <DropdownMenuItem key={s.id} onClick={() => moveConversation(conv.jid, s.id)}>
+                                  {s.name}
+                                </DropdownMenuItem>
+                              ))}
+                            </DropdownMenuContent>
+                          </DropdownMenu>
+                        </div>
+                        <p className="text-[10px] text-muted-foreground line-clamp-2 mb-2 italic">
+                          {conv.lastMessageText || 'Sin mensajes'}
+                        </p>
+                        <div className="flex flex-wrap gap-1">
+                          {conv.botEnabled === false && <Badge variant="outline" className="text-[8px] h-4 px-1 border-amber-500/20 text-amber-600">IA OFF</Badge>}
+                          {conv.followupEnabled && !conv.followupStopped && <Badge variant="outline" className="text-[8px] h-4 px-1 bg-green-500/10 text-green-600 border-green-500/20">FU</Badge>}
+                        </div>
+                      </CardContent>
+                    </Card>
+                  ))}
+                  {stageConvs.length === 0 && (
+                    <div className="flex flex-col items-center justify-center p-8 text-center opacity-20">
+                      <LayoutGrid className="h-8 w-8 mb-2" />
+                      <p className="text-[10px]">Vacío</p>
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        <ScrollBar orientation="horizontal" />
+      </ScrollArea>
+
+      {/* Reutilización del Chat en Modal */}
+      <Dialog open={!!selectedJid} onOpenChange={(open) => !open && setSelectedJid(null)}>
+        <DialogContent className="max-w-4xl p-0 h-[80vh] flex flex-col overflow-hidden">
+          {selectedJid && activeConversation && (
+            <MessageThread 
+              channelId={channelId} 
+              jid={selectedJid} 
+              conversation={activeConversation} 
+              blocked={blocked}
+              funnelStages={stages}
+            />
+          )}
+        </DialogContent>
+      </Dialog>
+
+      {/* Configuración de Etapas */}
+      <Dialog open={isSettingsOpen} onOpenChange={setIsSettingsOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Personalizar Etapas</DialogTitle>
+            <DialogDescription>Define los nombres de las 5 etapas de tu embudo de ventas.</DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-4 py-4">
+            {editingStages.map((s) => (
+              <div key={s.id} className="grid grid-cols-4 items-center gap-4">
+                <Label className="text-right">Etapa {s.id}</Label>
+                <Input value={s.name} onChange={(e) => updateStageName(s.id, e.target.value)} className="col-span-3" />
+              </div>
+            ))}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setIsSettingsOpen(false)}>Cancelar</Button>
+            <Button onClick={handleSaveStages}>Guardar Nombres</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </div>
   );
 }
 
@@ -1185,7 +1366,7 @@ function DocumentsTab({ channelId }: { channelId: string }) {
   );
 }
 
-function ChatInterface({ channelId, blocked }: { channelId: string, blocked: boolean }) {
+function ChatInterface({ channelId, blocked, funnelStages }: { channelId: string, blocked: boolean, funnelStages: FunnelStageConfig[] }) {
   const firestore = useFirestore();
   const [selectedJid, setSelectedJid] = useState<string | null>(null);
 
@@ -1246,6 +1427,7 @@ function ChatInterface({ channelId, blocked }: { channelId: string, blocked: boo
             conversation={activeConversation} 
             blocked={blocked}
             onDeleteSuccess={() => setSelectedJid(null)}
+            funnelStages={funnelStages}
           />
         ) : selectedJid ? (
           <div className="flex flex-col items-center justify-center h-full text-muted-foreground p-8">
@@ -1347,7 +1529,7 @@ function CustomerProfileDialog({ channelId, conversation, isOpen, onOpenChange }
   );
 }
 
-function MessageThread({ channelId, jid, conversation, blocked, onDeleteSuccess }: { channelId: string, jid: string, conversation: Conversation, blocked: boolean, onDeleteSuccess?: () => void }) {
+function MessageThread({ channelId, jid, conversation, blocked, onDeleteSuccess, funnelStages }: { channelId: string, jid: string, conversation: Conversation, blocked: boolean, onDeleteSuccess?: () => void, funnelStages: FunnelStageConfig[] }) {
   const { user, firestore, firebaseApp } = useFirebase();
   const functions = firebaseApp ? getFunctions(firebaseApp, "us-central1") : null;
   const [inputText, setInputText] = useState('');
@@ -1378,6 +1560,8 @@ function MessageThread({ channelId, jid, conversation, blocked, onDeleteSuccess 
   }, [firestore, channelId, jid]);
 
   const { data: messages, isLoading } = useCollection<Message>(messagesQuery);
+
+  const currentStageName = funnelStages.find(s => s.id === (conversation?.funnelStage || 1))?.name || 'Etapa 1';
 
   // IDEMPOTENT UI DEDUPLICATION
   const dedupedMessages = useMemo(() => {
@@ -1662,6 +1846,17 @@ function MessageThread({ channelId, jid, conversation, blocked, onDeleteSuccess 
     toast({ title: newState ? 'IA activada para este chat' : 'IA desactivada para este chat' });
   };
 
+  const handleChangeFunnelStage = async (stageId: number) => {
+    if (!firestore || blocked) return;
+    try {
+      const convRef = doc(firestore, 'channels', channelId, 'conversations', jid);
+      await updateDoc(convRef, { funnelStage: stageId, updatedAt: serverTimestamp() });
+      toast({ title: 'Etapa comercial actualizada' });
+    } catch (e) {
+      toast({ variant: 'destructive', title: 'Error al cambiar etapa' });
+    }
+  };
+
   const handleResetFollowup = async () => {
     if (!firestore || blocked) return;
     const convRef = doc(firestore, 'channels', channelId, 'conversations', jid);
@@ -1747,6 +1942,11 @@ function MessageThread({ channelId, jid, conversation, blocked, onDeleteSuccess 
           <Button variant="ghost" size="icon" className="h-8 w-8 text-primary" onClick={() => setIsProfileOpen(true)}>
             <User className="h-4 w-4" />
           </Button>
+          
+          <Badge variant="outline" className="bg-primary/10 text-primary border-primary/20 text-[10px] hidden sm:inline-flex">
+            ETAPA: {currentStageName}
+          </Badge>
+
           {conversation?.botEnabled !== false ? (
             <Badge variant="outline" className="bg-blue-500/10 text-blue-600 border-blue-500/20 text-[10px]">
               IA ACTIVA
@@ -1764,10 +1964,25 @@ function MessageThread({ channelId, jid, conversation, blocked, onDeleteSuccess 
           <DropdownMenu modal={false}>
             <DropdownMenuTrigger asChild><Button variant="ghost" size="icon" className="h-8 w-8"><MoreVertical className="h-4 w-4" /></Button></DropdownMenuTrigger>
             <DropdownMenuContent align="end">
+              <DropdownMenuSub>
+                <DropdownMenuSubTrigger>
+                  <LayoutGrid className="mr-2 h-4 w-4" /> Mover a etapa
+                </DropdownMenuSubTrigger>
+                <DropdownMenuPortal>
+                  <DropdownMenuSubContent>
+                    {funnelStages.map(s => (
+                      <DropdownMenuItem key={s.id} onClick={() => handleChangeFunnelStage(s.id)}>
+                        {s.name}
+                      </DropdownMenuItem>
+                    ))}
+                  </DropdownMenuSubContent>
+                </DropdownMenuPortal>
+              </DropdownMenuSub>
+              
+              <DropdownMenuSeparator />
               <DropdownMenuItem onClick={handleToggleBot} disabled={blocked}>
                 {conversation?.botEnabled === false ? 'Activar IA' : 'Desactivar IA'}
               </DropdownMenuItem>
-              <DropdownMenuSeparator />
               <DropdownMenuItem onClick={handleToggleFollowup} disabled={blocked}>
                 {conversation?.followupEnabled ? 'Desactivar Seguimiento' : 'Activar Seguimiento'}
               </DropdownMenuItem>
@@ -1848,6 +2063,8 @@ function MessageThread({ channelId, jid, conversation, blocked, onDeleteSuccess 
                     <Settings2 className="h-3 w-3" /> Estado del Seguimiento
                   </p>
                   <div className="grid grid-cols-2 gap-x-4 gap-y-1">
+                    <span className="text-muted-foreground">Etapa Comercial:</span>
+                    <span className="font-bold text-primary">{currentStageName}</span>
                     <span className="text-muted-foreground">Habilitado:</span>
                     <span className={conversation?.followupEnabled ? 'text-green-600 font-bold' : ''}>{conversation?.followupEnabled ? 'SÍ' : 'NO'}</span>
                     <span className="text-muted-foreground">Etapa Actual:</span>

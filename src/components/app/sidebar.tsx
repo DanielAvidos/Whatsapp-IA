@@ -28,7 +28,8 @@ import {
   Loader2,
   Bot,
   Link as LinkIcon,
-  ChevronDown
+  ChevronDown,
+  LayoutGrid
 } from "lucide-react";
 import { Logo } from "@/components/icons/logo";
 import { useUser, useAuth, useFirestore, useMemoFirebase, useCollection } from "@/firebase";
@@ -45,6 +46,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { cn } from "@/lib/utils";
 
 const navItems: { href: string; icon: React.ElementType; labelKey: TranslationKey; adminOnly: boolean }[] = [
   { href: "/dashboard", icon: Building2, labelKey: "nav.tenants", adminOnly: true },
@@ -178,7 +180,7 @@ export function AppSidebar() {
         {/* --- CONTEXTUAL CHANNEL MENU --- */}
         {selectedChannelId && activeChannel && (
           <SidebarGroup>
-            <SidebarGroupLabel className="px-2">
+            <SidebarGroupLabel className="px-2 truncate">
               Canal: {activeChannel.displayName}
             </SidebarGroupLabel>
             <SidebarMenu>
@@ -219,6 +221,18 @@ export function AppSidebar() {
                     <Bot />
                     <span>Chatbot</span>
                   </Link>
+                </SidebarMenuItem>
+
+              <SidebarMenuItem>
+                <SidebarMenuButton
+                  asChild
+                  isActive={pathname.startsWith(`/channels/${selectedChannelId}`) && currentTab === 'funnel'}
+                  tooltip="Embudo de ventas"
+                >
+                  <Link href={`/channels/${selectedChannelId}?tab=funnel`} onClick={() => setOpenMobile(false)}>
+                    <LayoutGrid />
+                    <span>Embudo de ventas</span>
+                  </Link>
                 </SidebarMenuButton>
               </SidebarMenuItem>
             </SidebarMenu>
@@ -250,8 +264,4 @@ export function AppSidebar() {
       </SidebarFooter>
     </Sidebar>
   );
-}
-
-function cn(...inputs: any[]) {
-  return inputs.filter(Boolean).join(' ');
 }

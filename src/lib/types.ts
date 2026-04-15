@@ -57,6 +57,11 @@ export type TrialConfig = {
   reason?: string | null;
 };
 
+export type FunnelStageConfig = {
+  id: number;
+  name: string;
+};
+
 export type WhatsappChannel = {
   id: string;
   displayName: string;
@@ -78,6 +83,9 @@ export type WhatsappChannel = {
   trial?: TrialConfig;
   billing?: {
     plan: 'TRIAL' | 'PAID' | 'BLOCKED';
+  };
+  funnelConfig?: {
+    stages: FunnelStageConfig[];
   };
 };
 
@@ -127,6 +135,8 @@ export type Conversation = {
   phoneE164?: string | null;
   customer?: CustomerProfile;
   botEnabled?: boolean;
+  // Funnel
+  funnelStage?: number;
   // Follow-up fields
   followupEnabled?: boolean;
   followupStage?: number;
