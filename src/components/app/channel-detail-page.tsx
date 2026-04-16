@@ -1,4 +1,3 @@
-
 "use client";
 
 import { useState, useEffect, useRef, useMemo } from 'react';
@@ -300,6 +299,8 @@ export function ChannelDetailPage({ channelId }: { channelId: string }) {
     }
   };
 
+  const isFromFunnel = searchParams.get('source') === 'funnel';
+
   return (
     <main className="container mx-auto p-4 md:p-6 lg:p-8">
       <PageHeader title={channel?.displayName || 'Cargando...'} description={t('manage.connection')}>
@@ -319,7 +320,15 @@ export function ChannelDetailPage({ channelId }: { channelId: string }) {
               </DropdownMenuContent>
             </DropdownMenu>
           )}
-          <Button variant="outline" asChild><Link href="/channels">Volver a Canales</Link></Button>
+          {isFromFunnel ? (
+            <Button variant="outline" asChild>
+              <Link href={`/channels/${channelId}?tab=funnel`}>Regresar</Link>
+            </Button>
+          ) : (
+            <Button variant="outline" asChild>
+              <Link href="/channels">Volver a Canales</Link>
+            </Button>
+          )}
         </div>
       </PageHeader>
       
@@ -407,7 +416,7 @@ export function ChannelDetailPage({ channelId }: { channelId: string }) {
 function SalesFunnel({ channelId, blocked, channel }: { channelId: string, blocked: boolean, channel: WhatsappChannel | null | undefined }) {
   const firestore = useFirestore();
   const { toast } = useToast();
-  const [selectedJid, setSelectedJid] = useState<string | null>(null);
+  const router = useRouter();
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [editingStages, setEditingStages] = useState<FunnelStageConfig[]>([]);
 
@@ -419,10 +428,6 @@ function SalesFunnel({ channelId, blocked, channel }: { channelId: string, block
   }, [firestore, channelId]);
 
   const { data: conversations, isLoading } = useCollection<Conversation>(conversationsQuery);
-
-  const activeConversation = useMemo(() => {
-    return conversations?.find(c => c.jid === selectedJid);
-  }, [conversations, selectedJid]);
 
   const handleOpenSettings = () => {
     setEditingStages(JSON.parse(JSON.stringify(stages)));
@@ -459,6 +464,10 @@ function SalesFunnel({ channelId, blocked, channel }: { channelId: string, block
     }
   };
 
+  const handleConversationClick = (jid: string) => {
+    router.push(`/channels/${channelId}?tab=chats&jid=${encodeURIComponent(jid)}&source=funnel`);
+  };
+
   if (isLoading) return <div className="flex h-[400px] items-center justify-center"><Loader2 className="animate-spin" /></div>;
 
   return (
@@ -468,10 +477,12 @@ function SalesFunnel({ channelId, blocked, channel }: { channelId: string, block
           <LayoutGrid className="h-5 w-5 text-primary" />
           Seguimiento Comercial
         </h3>
-        <Button variant="outline" size="sm" onClick={handleOpenSettings} disabled={blocked}>
-          <Settings2 className="h-4 w-4 mr-2" />
-          Configurar Etapas
-        </Button>
+        <div className="flex gap-2">
+          <Button variant="outline" size="sm" onClick={handleOpenSettings} disabled={blocked}>
+            <Settings2 className="h-4 w-4 mr-2" />
+            Configurar Etapas
+          </Button>
+        </div>
       </div>
 
       <ScrollArea className="w-full pb-4">
@@ -490,8 +501,12 @@ function SalesFunnel({ channelId, blocked, channel }: { channelId: string, block
                 
                 <div className="flex-1 bg-muted/30 rounded-lg p-2 flex flex-col gap-2 min-h-[500px]">
                   {stageConvs.map(conv => (
-                    <Card key={conv.jid} className={cn("cursor-pointer hover:border-primary/50 transition-colors shadow-none", selectedJid === conv.jid && "border-primary")}>
-                      <CardContent className="p-3" onClick={() => setSelectedJid(conv.jid)}>
+                    <Card 
+                      key={conv.jid} 
+                      className={cn("cursor-pointer hover:border-primary/50 transition-colors shadow-none")}
+                      onClick={() => handleConversationClick(conv.jid)}
+                    >
+                      <CardContent className="p-3">
                         <div className="flex items-center justify-between gap-1 mb-1">
                           <p className="text-xs font-bold truncate flex-1">{resolveConversationDisplayName(conv)}</p>
                           <DropdownMenu modal={false}>
@@ -503,7 +518,7 @@ function SalesFunnel({ channelId, blocked, channel }: { channelId: string, block
                             <DropdownMenuContent align="end">
                               <DropdownMenuLabel>Mover a etapa</DropdownMenuLabel>
                               {stages.filter(s => s.id !== stage.id).map(s => (
-                                <DropdownMenuItem key={s.id} onClick={() => moveConversation(conv.jid, s.id)}>
+                                <DropdownMenuItem key={s.id} onClick={(e) => { e.stopPropagation(); moveConversation(conv.jid, s.id); }}>
                                   {s.name}
                                 </DropdownMenuItem>
                               ))}
@@ -533,24 +548,6 @@ function SalesFunnel({ channelId, blocked, channel }: { channelId: string, block
         </div>
         <ScrollBar orientation="horizontal" />
       </ScrollArea>
-
-      {/* Reutilización del Chat en Modal */}
-      <Dialog open={!!selectedJid} onOpenChange={(open) => !open && setSelectedJid(null)}>
-        <DialogContent className="max-w-4xl p-0 h-[80vh] flex flex-col overflow-hidden">
-          <DialogHeader className="sr-only">
-            <DialogTitle>Detalle del Chat</DialogTitle>
-          </DialogHeader>
-          {selectedJid && activeConversation && (
-            <MessageThread 
-              channelId={channelId} 
-              jid={selectedJid} 
-              conversation={activeConversation} 
-              blocked={blocked}
-              funnelStages={stages}
-            />
-          )}
-        </DialogContent>
-      </Dialog>
 
       {/* Configuración de Etapas */}
       <Dialog open={isSettingsOpen} onOpenChange={setIsSettingsOpen}>
@@ -1371,7 +1368,15 @@ function DocumentsTab({ channelId }: { channelId: string }) {
 
 function ChatInterface({ channelId, blocked, funnelStages }: { channelId: string, blocked: boolean, funnelStages: FunnelStageConfig[] }) {
   const firestore = useFirestore();
+  const searchParams = useSearchParams();
   const [selectedJid, setSelectedJid] = useState<string | null>(null);
+
+  useEffect(() => {
+    const jidParam = searchParams.get('jid');
+    if (jidParam) {
+      setSelectedJid(decodeURIComponent(jidParam));
+    }
+  }, [searchParams]);
 
   const conversationsQuery = useMemoFirebase(() => {
     if (!firestore) return null;
