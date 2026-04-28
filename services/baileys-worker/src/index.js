@@ -331,7 +331,10 @@ async function saveMessageToFirestore(channelId, jid, originalId, docData) {
   if (phoneE164) {
     convPatch.phoneE164 = phoneE164;
   }
-  if (pushName) {
+  
+  // BUG FIX: Only update conversation name if the message is INCOMING from a client.
+  // This prevents the business account's pushName from overwriting the client's name.
+  if (isIn && pushName) {
     convPatch.name = pushName;
   }
 
@@ -423,7 +426,7 @@ async function startOrRestartBaileys(channelId, reason = 'manual') {
       }
 
       if (connection === 'close') {
-        channelConnState.set(channelId, { connected: false, lastSeenAt: Date.now() });
+        channelConnState.set(channelId, { Map: false, lastSeenAt: Date.now() });
         const err = lastDisconnect?.error;
         const statusCode = err instanceof Boom ? err.output.statusCode : 500;
         const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
@@ -469,13 +472,17 @@ async function startOrRestartBaileys(channelId, reason = 'manual') {
           if (!phoneE164 && participantJid && participantJid.endsWith('@s.whatsapp.net')) {
             phoneE164 = `+${participantJid.split('@')[0]}`;
           }
-          const pushName = msg.pushName || null;
+          
+          const fromMe = !!msg?.key?.fromMe;
+          
+          // BUG FIX: Only use pushName if the message is NOT from me.
+          // This prevents the business account's name from overwriting the client's name.
+          const pushName = !fromMe ? (msg.pushName || null) : null;
 
           if (phoneE164) {
             logger.debug({ jid, phoneE164 }, '[IDENTITY] Resolved phone number');
           }
 
-          const fromMe = !!msg?.key?.fromMe;
           const rawContent = msg?.message;
           const content = unwrapMessage(rawContent);
           
