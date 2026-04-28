@@ -331,7 +331,9 @@ async function saveMessageToFirestore(channelId, jid, originalId, docData) {
   if (phoneE164) {
     convPatch.phoneE164 = phoneE164;
   }
-  if (pushName) {
+  
+  // Only update name from incoming client messages to avoid renaming conversation to business name
+  if (isIn && pushName) {
     convPatch.name = pushName;
   }
 
