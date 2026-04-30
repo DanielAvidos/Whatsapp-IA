@@ -1,3 +1,4 @@
+
 "use client";
 
 import { useState, useEffect, useRef, useMemo } from 'react';
@@ -197,22 +198,31 @@ function ResolvedAudio({ storagePath, ptt }: { storagePath: string; ptt?: boolea
 
 /**
  * Robust display name resolver for conversations.
+ * Priorities:
+ * 1. Manual contact name (isContact: true)
+ * 2. Previous displayName
+ * 3. pushName from Baileys
+ * 4. Resolved phone number
+ * 5. technical JID
  */
 function resolveConversationDisplayName(conv: Conversation | null | undefined) {
   if (!conv) return 'Cargando...';
   
-  const { displayName, name, phoneE164, jid } = conv;
+  const { displayName, name, phoneE164, jid, customer, isContact } = conv;
   
-  // 1. Prioritize real display name from CRM/Capture (if it's not the JID)
+  // 1. Prioritize manual contact name
+  if ((isContact || customer?.isContact) && customer?.name) return customer.name;
+
+  // 2. Prioritize real display name from CRM/Capture (if it's not the JID)
   if (displayName && displayName !== jid) return displayName;
   
-  // 2. Prioritize pushName from WhatsApp profile
+  // 3. Prioritize pushName from WhatsApp profile
   if (name && name !== jid) return name;
   
-  // 3. Use resolved phone number
+  // 4. Use resolved phone number
   if (phoneE164) return phoneE164;
   
-  // 4. Technical fallback
+  // 5. Technical fallback
   return jid;
 }
 
@@ -508,7 +518,10 @@ function SalesFunnel({ channelId, blocked, channel }: { channelId: string, block
                     >
                       <CardContent className="p-3">
                         <div className="flex items-center justify-between gap-1 mb-1">
-                          <p className="text-xs font-bold truncate flex-1">{resolveConversationDisplayName(conv)}</p>
+                          <p className="text-xs font-bold truncate flex-1 flex items-center gap-1">
+                            {(conv.isContact || conv.customer?.isContact) && <User className="size-3 text-primary" />}
+                            {resolveConversationDisplayName(conv)}
+                          </p>
                           <DropdownMenu modal={false}>
                             <DropdownMenuTrigger asChild>
                               <Button variant="ghost" size="icon" className="h-6 w-6 -mr-1" onClick={(e) => e.stopPropagation()}>
@@ -1404,7 +1417,10 @@ function ChatInterface({ channelId, blocked, funnelStages }: { channelId: string
                     className={cn("flex flex-col items-start gap-1 p-4 text-left border-b hover:bg-muted/50 transition-colors", selectedJid === conv.jid && "bg-muted")}
                   >
                     <div className="flex justify-between w-full font-semibold text-sm truncate">
-                      <span className="truncate flex-1">{resolveConversationDisplayName(conv)}</span>
+                      <span className="truncate flex-1 flex items-center gap-1">
+                        {(conv.isContact || conv.customer?.isContact) && <User className="size-3 text-primary" />}
+                        {resolveConversationDisplayName(conv)}
+                      </span>
                       <div className="flex items-center gap-1 shrink-0">
                         {conv.botEnabled === false && <Badge variant="outline" className="text-[8px] h-4 px-1 border-amber-500/20 text-amber-600">IA OFF</Badge>}
                         {conv.followupStopped && <Badge variant="destructive" className="text-[8px] h-4 px-1">STOP</Badge>}
@@ -1464,38 +1480,55 @@ function CustomerProfileDialog({ channelId, conversation, isOpen, onOpenChange }
     notes: ''
   });
 
+  const isAlreadyContact = conversation?.isContact || conversation?.customer?.isContact;
+
   useEffect(() => {
-    if (conversation?.customer) {
-      setFormData({
-        name: conversation.customer.name || '',
-        email: conversation.customer.email || '',
-        phone: conversation.customer.phone || '',
-        company: conversation.customer.company || '',
-        notes: conversation.customer.notes || ''
-      });
-    } else {
-      setFormData({ name: '', email: '', phone: '', company: '', notes: '' });
+    if (isOpen && conversation) {
+      if (isAlreadyContact && conversation.customer) {
+        setFormData({
+          name: conversation.customer.name || '',
+          email: conversation.customer.email || '',
+          phone: conversation.customer.phone || '',
+          company: conversation.customer.company || '',
+          notes: conversation.customer.notes || ''
+        });
+      } else {
+        // Autocomplete phone for new contact
+        let suggestedPhone = conversation.customer?.phone || conversation.phoneE164 || '';
+        if (!suggestedPhone && conversation.jid?.endsWith('@s.whatsapp.net')) {
+          suggestedPhone = conversation.jid.split('@')[0];
+        }
+        setFormData({ name: '', email: '', phone: suggestedPhone, company: '', notes: '' });
+      }
     }
-  }, [conversation]);
+  }, [isOpen, conversation, isAlreadyContact]);
 
   const handleSave = async () => {
     if (!firestore || !conversation) return;
+    
+    if (!formData.name.trim() || !formData.phone.trim()) {
+      toast({ variant: 'destructive', title: 'Campos obligatorios', description: 'Nombre y Teléfono son requeridos para guardar como contacto.' });
+      return;
+    }
+
     const convRef = doc(firestore, 'channels', channelId, 'conversations', conversation.jid);
-    const displayName = formData.name || formData.email || formData.phone || conversation.jid;
     
     try {
       await updateDoc(convRef, {
         customer: {
           ...formData,
+          isContact: true,
           updatedAt: serverTimestamp(),
           source: 'manual'
         },
-        displayName
+        isContact: true,
+        displayName: formData.name.trim(),
+        updatedAt: serverTimestamp()
       });
-      toast({ title: 'Perfil actualizado' });
+      toast({ title: isAlreadyContact ? 'Contacto actualizado' : 'Contacto guardado' });
       onOpenChange(false);
     } catch (e) {
-      toast({ variant: 'destructive', title: 'Error al actualizar perfil' });
+      toast({ variant: 'destructive', title: 'Error al actualizar contacto' });
     }
   };
 
@@ -1503,21 +1536,25 @@ function CustomerProfileDialog({ channelId, conversation, isOpen, onOpenChange }
     <Dialog open={isOpen} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Perfil del Cliente</DialogTitle>
-          <DialogDescription>Información capturada automáticamente o editada manualmente.</DialogDescription>
+          <DialogTitle>{isAlreadyContact ? 'Modificar contacto' : 'Crear contacto'}</DialogTitle>
+          <DialogDescription>
+            {isAlreadyContact 
+              ? 'Actualiza la información manual de este contacto.' 
+              : 'Guarda esta conversación en tu agenda de contactos manual.'}
+          </DialogDescription>
         </DialogHeader>
         <div className="grid gap-4 py-4">
           <div className="grid gap-2">
-            <Label>Nombre</Label>
+            <Label className="flex items-center gap-1">Nombre <span className="text-destructive">*</span></Label>
             <Input value={formData.name} onChange={e => setFormData({ ...formData, name: e.target.value })} placeholder="Nombre completo" />
+          </div>
+          <div className="grid gap-2">
+            <Label className="flex items-center gap-1">Teléfono <span className="text-destructive">*</span></Label>
+            <Input value={formData.phone} onChange={e => setFormData({ ...formData, phone: e.target.value })} placeholder="+52..." />
           </div>
           <div className="grid gap-2">
             <Label>Email</Label>
             <Input value={formData.email} onChange={e => setFormData({ ...formData, email: e.target.value })} placeholder="correo@ejemplo.com" />
-          </div>
-          <div className="grid gap-2">
-            <Label>Teléfono</Label>
-            <Input value={formData.phone} onChange={e => setFormData({ ...formData, phone: e.target.value })} placeholder="+521234567890" />
           </div>
           <div className="grid gap-2">
             <Label>Empresa</Label>
@@ -1525,12 +1562,14 @@ function CustomerProfileDialog({ channelId, conversation, isOpen, onOpenChange }
           </div>
           <div className="grid gap-2">
             <Label>Notas</Label>
-            <Textarea value={formData.notes} onChange={e => setFormData({ ...formData, notes: e.target.value })} placeholder="Notas adicionales sobre el cliente..." />
+            <Textarea value={formData.notes} onChange={e => setFormData({ ...formData, notes: e.target.value })} placeholder="Notas adicionales..." />
           </div>
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>Cancelar</Button>
-          <Button onClick={handleSave}>Guardar Perfil</Button>
+          <Button onClick={handleSave}>
+            {isAlreadyContact ? 'Guardar cambios' : 'Guardar contacto'}
+          </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
@@ -1583,9 +1622,7 @@ function MessageThread({ channelId, jid, conversation, blocked, onDeleteSuccess,
     });
 
     for (const m of sorted) {
-      // Rule: primary dedupe by clientMessageId, secondary by waMessageId
       const key = m.clientMessageId ? `cid:${m.clientMessageId}` : `waid:${m.waMessageId || m.id}`;
-      
       if (seen.has(key)) continue;
       seen.add(key);
       out.push(m);
@@ -1598,13 +1635,7 @@ function MessageThread({ channelId, jid, conversation, blocked, onDeleteSuccess,
   const handleSendMessage = async (e: React.FormEvent) => {
     if (e) e.preventDefault();
     const text = inputText.trim();
-    
-    if (!text) return;
-    if (blocked) {
-      toast({ variant: 'destructive', title: 'Canal bloqueado', description: 'Trial expirado.' });
-      return;
-    }
-    if (isSending) return;
+    if (!text || blocked || isSending) return;
 
     if (!firebaseApp || !functions || !firestore) {
       toast({ variant: 'destructive', title: 'Config Firebase incompleta' });
@@ -1612,12 +1643,10 @@ function MessageThread({ channelId, jid, conversation, blocked, onDeleteSuccess,
     }
 
     setIsSending(true);
-    
     const clientMessageId = (globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`);
     const msgDocRef = doc(firestore, 'channels', channelId, 'conversations', jid, 'messages', clientMessageId);
 
     try {
-      // OPTIMISTIC WRITE
       await setDoc(msgDocRef, {
         id: clientMessageId,
         clientMessageId,
@@ -1634,18 +1663,9 @@ function MessageThread({ channelId, jid, conversation, blocked, onDeleteSuccess,
       }, { merge: true });
 
       setInputText('');
-
       const sendFn = httpsCallable(functions, "sendMessageProxy");
-      
-      await sendFn({ 
-        channelId, 
-        to: jid, 
-        text, 
-        clientMessageId 
-      });
-
+      await sendFn({ channelId, to: jid, text, clientMessageId });
     } catch (err: any) { 
-      console.error('[CHAT_SEND] error', err);
       toast({ variant: 'destructive', title: 'No se pudo enviar', description: err.message }); 
       await setDoc(msgDocRef, { status: 'error' }, { merge: true }).catch(() => {});
     } finally { 
@@ -1701,22 +1721,13 @@ function MessageThread({ channelId, jid, conversation, blocked, onDeleteSuccess,
       }, { merge: true });
 
       if (!workerUrl) throw new Error("Worker URL not configured");
-      
       const response = await fetch(`${workerUrl}/v1/channels/${channelId}/messages/send-image`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          to: jid,
-          storagePath,
-          caption,
-          meta: { clientMessageId, source: 'manual' }
-        })
+        body: JSON.stringify({ to: jid, storagePath, caption, meta: { clientMessageId, source: 'manual' } })
       });
-
       if (!response.ok) throw new Error("Worker failed to send image");
-
     } catch (err: any) {
-      console.error('[IMAGE_SEND] error', err);
       toast({ variant: 'destructive', title: 'Error al enviar imagen', description: err.message });
     } finally {
       setIsSending(false);
@@ -1724,7 +1735,6 @@ function MessageThread({ channelId, jid, conversation, blocked, onDeleteSuccess,
     }
   };
 
-  // --- RECORDING LOGIC ---
   const startRecording = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -1732,25 +1742,17 @@ function MessageThread({ channelId, jid, conversation, blocked, onDeleteSuccess,
       const mediaRecorder = new MediaRecorder(stream, options);
       mediaRecorderRef.current = mediaRecorder;
       audioChunksRef.current = [];
-
-      mediaRecorder.ondataavailable = (e) => {
-        if (e.data.size > 0) audioChunksRef.current.push(e.data);
-      };
-
+      mediaRecorder.ondataavailable = (e) => { if (e.data.size > 0) audioChunksRef.current.push(e.data); };
       mediaRecorder.onstop = () => {
         const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm;codecs=opus' });
         setRecordedBlob(audioBlob);
         stream.getTracks().forEach(track => track.stop());
       };
-
       mediaRecorder.start();
       setRecordingState('recording');
       setRecordingDuration(0);
-      timerRef.current = setInterval(() => {
-        setRecordingDuration(prev => prev + 1);
-      }, 1000);
+      timerRef.current = setInterval(() => setRecordingDuration(prev => prev + 1), 1000);
     } catch (err) {
-      console.error('Mic error', err);
       toast({ variant: 'destructive', title: 'Error de micrófono', description: 'Asegúrate de dar permisos de acceso.' });
     }
   };
@@ -1764,9 +1766,7 @@ function MessageThread({ channelId, jid, conversation, blocked, onDeleteSuccess,
   };
 
   const cancelRecording = () => {
-    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
-      mediaRecorderRef.current.stop();
-    }
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') mediaRecorderRef.current.stop();
     if (timerRef.current) clearInterval(timerRef.current);
     setRecordingState('idle');
     setRecordedBlob(null);
@@ -1775,18 +1775,14 @@ function MessageThread({ channelId, jid, conversation, blocked, onDeleteSuccess,
 
   const handleSendRecordedAudio = async () => {
     if (!recordedBlob || !firebaseApp || !firestore) return;
-
     setIsSending(true);
     const clientMessageId = (globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`);
-    const ext = 'webm'; // Browser native format (audio/webm;codecs=opus)
-    const storagePath = `channels/${channelId}/conversations/${jid}/messages/${clientMessageId}/original.${ext}`;
-
+    const storagePath = `channels/${channelId}/conversations/${jid}/messages/${clientMessageId}/original.webm`;
     try {
       const { getStorage, ref, uploadBytes } = await import('firebase/storage');
       const storage = getStorage(firebaseApp);
       const fileRef = ref(storage, storagePath);
       await uploadBytes(fileRef, recordedBlob);
-
       const msgDocRef = doc(firestore, 'channels', channelId, 'conversations', jid, 'messages', clientMessageId);
       await setDoc(msgDocRef, {
         id: clientMessageId,
@@ -1799,40 +1795,21 @@ function MessageThread({ channelId, jid, conversation, blocked, onDeleteSuccess,
         status: "sending",
         isBot: false,
         source: "manual",
-        media: {
-          kind: 'audio',
-          storagePath,
-          status: 'uploaded',
-          mimeType: recordedBlob.type,
-          fileSize: recordedBlob.size,
-          seconds: recordingDuration,
-          ptt: false // Standard audio for delivery safety
-        },
+        media: { kind: 'audio', storagePath, status: 'uploaded', mimeType: recordedBlob.type, fileSize: recordedBlob.size, seconds: recordingDuration, ptt: false },
         timestamp: Date.now(),
         createdAt: serverTimestamp(),
         timestampServer: serverTimestamp(),
       }, { merge: true });
 
       if (!workerUrl) throw new Error("Worker URL not configured");
-      
       const response = await fetch(`${workerUrl}/v1/channels/${channelId}/messages/send-audio`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          to: jid,
-          storagePath,
-          mimetype: recordedBlob.type,
-          ptt: false, // AUDIO NORMAL (converted by worker)
-          seconds: recordingDuration,
-          meta: { clientMessageId, source: 'manual', isWebRecording: true }
-        })
+        body: JSON.stringify({ to: jid, storagePath, mimetype: recordedBlob.type, ptt: false, seconds: recordingDuration, meta: { clientMessageId, source: 'manual', isWebRecording: true } })
       });
-
       if (!response.ok) throw new Error("Worker failed to send audio");
-
       cancelRecording();
     } catch (err: any) {
-      console.error('[AUDIO_SEND] error', err);
       toast({ variant: 'destructive', title: 'Error al enviar audio', description: err.message });
     } finally {
       setIsSending(false);
@@ -1868,14 +1845,7 @@ function MessageThread({ channelId, jid, conversation, blocked, onDeleteSuccess,
   const handleResetFollowup = async () => {
     if (!firestore || blocked) return;
     const convRef = doc(firestore, 'channels', channelId, 'conversations', jid);
-    await updateDoc(convRef, {
-      followupStage: 0,
-      followupNextAt: null,
-      followupStopped: false,
-      followupStopReason: null,
-      followupStopAt: null,
-      updatedAt: serverTimestamp()
-    });
+    await updateDoc(convRef, { followupStage: 0, followupNextAt: null, followupStopped: false, followupStopReason: null, followupStopAt: null, updatedAt: serverTimestamp() });
     toast({ title: 'Seguimiento reiniciado' });
   };
 
@@ -1941,7 +1911,8 @@ function MessageThread({ channelId, jid, conversation, blocked, onDeleteSuccess,
     <>
       <CardHeader className="border-b py-3 px-4 flex-row justify-between items-center bg-card">
         <div className="flex-1 min-w-0">
-          <CardTitle className="text-sm font-bold truncate">
+          <CardTitle className="text-sm font-bold truncate flex items-center gap-1">
+            {(conversation?.isContact || conversation?.customer?.isContact) && <User className="size-3 text-primary" />}
             {resolveConversationDisplayName(conversation)}
           </CardTitle>
           <CardDescription className="text-[10px] truncate">{jid}</CardDescription>
@@ -1950,76 +1921,21 @@ function MessageThread({ channelId, jid, conversation, blocked, onDeleteSuccess,
           <Button variant="ghost" size="icon" className="h-8 w-8 text-primary" onClick={() => setIsProfileOpen(true)}>
             <User className="h-4 w-4" />
           </Button>
-          
-          <Badge variant="outline" className="bg-primary/10 text-primary border-primary/20 text-[10px] hidden sm:inline-flex">
-            ETAPA: {currentStageName}
-          </Badge>
-
-          {conversation?.botEnabled !== false ? (
-            <Badge variant="outline" className="bg-blue-500/10 text-blue-600 border-blue-500/20 text-[10px]">
-              IA ACTIVA
-            </Badge>
-          ) : (
-            <Badge variant="outline" className="bg-amber-500/10 text-amber-600 border-amber-500/20 text-[10px]">IA INACTIVA</Badge>
-          )}
-          {conversation?.followupEnabled ? (
-            <Badge variant="outline" className="bg-green-500/10 text-green-600 border-green-500/20 text-[10px]">
-              FU ACTIVO
-            </Badge>
-          ) : (
-            <Badge variant="outline" className="text-[10px]">FU INACTIVO</Badge>
-          )}
+          <Badge variant="outline" className="bg-primary/10 text-primary border-primary/20 text-[10px] hidden sm:inline-flex">ETAPA: {currentStageName}</Badge>
+          {conversation?.botEnabled !== false ? <Badge variant="outline" className="bg-blue-500/10 text-blue-600 border-blue-500/20 text-[10px]">IA ACTIVA</Badge> : <Badge variant="outline" className="bg-amber-500/10 text-amber-600 border-amber-500/20 text-[10px]">IA INACTIVA</Badge>}
+          {conversation?.followupEnabled ? <Badge variant="outline" className="bg-green-500/10 text-green-600 border-green-500/20 text-[10px]">FU ACTIVO</Badge> : <Badge variant="outline" className="text-[10px]">FU INACTIVO</Badge>}
           <DropdownMenu modal={false}>
             <DropdownMenuTrigger asChild><Button variant="ghost" size="icon" className="h-8 w-8"><MoreVertical className="h-4 w-4" /></Button></DropdownMenuTrigger>
             <DropdownMenuContent align="end">
-              <DropdownMenuSub>
-                <DropdownMenuSubTrigger>
-                  <LayoutGrid className="mr-2 h-4 w-4" /> Mover a etapa
-                </DropdownMenuSubTrigger>
-                <DropdownMenuPortal>
-                  <DropdownMenuSubContent>
-                    {funnelStages.map(s => (
-                      <DropdownMenuItem key={s.id} onClick={() => handleChangeFunnelStage(s.id)}>
-                        {s.name}
-                      </DropdownMenuItem>
-                    ))}
-                  </DropdownMenuSubContent>
-                </DropdownMenuPortal>
-              </DropdownMenuSub>
-              
+              <DropdownMenuSub><DropdownMenuSubTrigger><LayoutGrid className="mr-2 h-4 w-4" /> Mover a etapa</DropdownMenuSubTrigger><DropdownMenuPortal><DropdownMenuSubContent>{funnelStages.map(s => (<DropdownMenuItem key={s.id} onClick={() => handleChangeFunnelStage(s.id)}>{s.name}</DropdownMenuItem>))}</DropdownMenuSubContent></DropdownMenuPortal></DropdownMenuSub>
               <DropdownMenuSeparator />
-              <DropdownMenuItem onClick={handleToggleBot} disabled={blocked}>
-                {conversation?.botEnabled === false ? 'Activar IA' : 'Desactivar IA'}
-              </DropdownMenuItem>
-              <DropdownMenuItem onClick={handleToggleFollowup} disabled={blocked}>
-                {conversation?.followupEnabled ? 'Desactivar Seguimiento' : 'Activar Seguimiento'}
-              </DropdownMenuItem>
-              <DropdownMenuItem onClick={handleResetFollowup} disabled={blocked}>
-                Reiniciar Seguimiento
-              </DropdownMenuItem>
+              <DropdownMenuItem onClick={handleToggleBot} disabled={blocked}>{conversation?.botEnabled === false ? 'Activar IA' : 'Desactivar IA'}</DropdownMenuItem>
+              <DropdownMenuItem onClick={handleToggleFollowup} disabled={blocked}>{conversation?.followupEnabled ? 'Desactivar Seguimiento' : 'Activar Seguimiento'}</DropdownMenuItem>
+              <DropdownMenuItem onClick={handleResetFollowup} disabled={blocked}>Reiniciar Seguimiento</DropdownMenuItem>
               {isSuperAdmin && (
-                <>
-                  <DropdownMenuSeparator />
-                  <DropdownMenuItem 
-                    className="text-destructive focus:text-destructive" 
-                    onSelect={(e) => {
-                      e.preventDefault();
-                      setIsClearOpen(true);
-                    }}
-                    disabled={isClearing || isDeleting}
-                  >
-                    <Trash2 className="mr-2 h-4 w-4" /> Limpiar chat
-                  </DropdownMenuItem>
-                  <DropdownMenuItem 
-                    className="text-destructive focus:text-destructive" 
-                    onSelect={(e) => {
-                      e.preventDefault();
-                      setIsDeleteOpen(true);
-                    }}
-                    disabled={isClearing || isDeleting}
-                  >
-                    <XCircle className="mr-2 h-4 w-4" /> Eliminar conversación
-                  </DropdownMenuItem>
+                <><DropdownMenuSeparator />
+                  <DropdownMenuItem className="text-destructive focus:text-destructive" onSelect={(e) => { e.preventDefault(); setIsClearOpen(true); }} disabled={isClearing || isDeleting}><Trash2 className="mr-2 h-4 w-4" /> Limpiar chat</DropdownMenuItem>
+                  <DropdownMenuItem className="text-destructive focus:text-destructive" onSelect={(e) => { e.preventDefault(); setIsDeleteOpen(true); }} disabled={isClearing || isDeleting}><XCircle className="mr-2 h-4 w-4" /> Eliminar conversación</DropdownMenuItem>
                 </>
               )}
             </DropdownMenuContent>
@@ -2033,169 +1949,43 @@ function MessageThread({ channelId, jid, conversation, blocked, onDeleteSuccess,
             <div className="flex flex-col gap-2">
               {dedupedMessages.map((msg) => (
                 <div key={msg.id} className={cn("max-w-[80%] rounded-lg p-3 text-sm shadow-sm", msg.fromMe ? "bg-primary text-primary-foreground ml-auto rounded-tr-none" : "bg-card mr-auto rounded-tl-none")}>
-                  {msg.type === 'image' && (
-                    <div className="mb-2 rounded overflow-hidden bg-black/5 flex flex-col justify-center items-center min-h-[100px]">
-                      {msg.media?.storagePath ? (
-                        <ResolvedImage 
-                          storagePath={msg.media.storagePath} 
-                          alt={msg.text || "WhatsApp Image"} 
-                        />
-                      ) : (
-                        <div className="flex flex-col items-center gap-2 p-4 text-muted-foreground italic text-xs">
-                          <AlertCircle className="h-5 w-5 opacity-50" />
-                          <span>[Imagen no disponible]</span>
-                        </div>
-                      )}
-                    </div>
-                  )}
-                  {msg.type === 'audio' && msg.media?.storagePath && (
-                    <div className="mb-1">
-                      <ResolvedAudio storagePath={msg.media.storagePath} ptt={msg.media.ptt} />
-                    </div>
-                  )}
+                  {msg.type === 'image' && msg.media?.storagePath && <div className="mb-2 rounded overflow-hidden bg-black/5 min-h-[100px] flex items-center justify-center"><ResolvedImage storagePath={msg.media.storagePath} alt={msg.text || "WhatsApp Image"} /></div>}
+                  {msg.type === 'audio' && msg.media?.storagePath && <div className="mb-1"><ResolvedAudio storagePath={msg.media.storagePath} ptt={msg.media.ptt} /></div>}
                   {msg.text && <p className="whitespace-pre-wrap">{msg.text}</p>}
                   <div className="text-[10px] mt-1 opacity-70 flex justify-end gap-1">
-                    {(() => {
-                      const d = msg.timestamp?.toDate ? msg.timestamp.toDate() : new Date(msg.timestamp);
-                      return format(d, 'HH:mm');
-                    })()}
+                    {(() => { const d = msg.timestamp?.toDate ? msg.timestamp.toDate() : new Date(msg.timestamp); return format(d, 'HH:mm'); })()}
                     {msg.fromMe && <span>{msg.status || 'sent'}</span>}
                     {msg.isBot && <Bot className="h-3 w-3" />}
                   </div>
                 </div>
               ))}
               <div ref={scrollRef} />
-              <div className="mt-8 border-t pt-4">
-                <div className="bg-card/50 rounded-lg p-3 border border-dashed text-[10px] space-y-2">
-                  <p className="font-bold uppercase tracking-wider text-muted-foreground flex items-center gap-1">
-                    <Settings2 className="h-3 w-3" /> Estado del Seguimiento
-                  </p>
-                  <div className="grid grid-cols-2 gap-x-4 gap-y-1">
-                    <span className="text-muted-foreground">Etapa Comercial:</span>
-                    <span className="font-bold text-primary">{currentStageName}</span>
-                    <span className="text-muted-foreground">Habilitado:</span>
-                    <span className={conversation?.followupEnabled ? 'text-green-600 font-bold' : ''}>{conversation?.followupEnabled ? 'SÍ' : 'NO'}</span>
-                    <span className="text-muted-foreground">Etapa Actual:</span>
-                    <span>{conversation?.followupStage ?? 0}</span>
-                    <span className="text-muted-foreground">Próximo Envío:</span>
-                    <span>{conversation?.followupNextAt ? format((conversation.followupNextAt as Timestamp).toDate(), 'PPpp') : '---'}</span>
-                    <span className="text-muted-foreground">Detección STOP:</span>
-                    <span>{conversation?.followupStopped ? `SÍ (${conversation.followupStopReason})` : 'NO'}</span>
-                    <span className="text-muted-foreground">Último del Cliente:</span>
-                    <span>{conversation?.followupLastCustomerAt ? format((conversation.followupLastCustomerAt as Timestamp).toDate(), 'PPpp') : '---'}</span>
-                  </div>
-                </div>
-              </div>
             </div>
           )}
         </ScrollArea>
       </CardContent>
       <div className="p-4 border-t bg-card">
-        {blocked && (
-          <Alert variant="destructive" className="mb-2 py-2">
-            <AlertCircle className="h-3 w-3" />
-            <AlertDescription className="text-xs">Trial expirado. Funciones bloqueadas.</AlertDescription>
-          </Alert>
-        )}
-        
+        {blocked && <Alert variant="destructive" className="mb-2 py-2"><AlertCircle className="h-3 w-3" /><AlertDescription className="text-xs">Trial expirado. Funciones bloqueadas.</AlertDescription></Alert>}
         {recordingState === 'idle' ? (
           <div className="flex gap-2 items-center">
             <input type="file" className="hidden" ref={fileInputRef} accept="image/*" onChange={handleImageUpload} />
-            
             <DropdownMenu modal={false}>
-              <DropdownMenuTrigger asChild>
-                <Button type="button" variant="ghost" size="icon" className="shrink-0 text-muted-foreground" disabled={isSending || blocked}>
-                  <Paperclip className="h-5 w-5" />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="start" side="top">
-                <DropdownMenuItem onClick={() => fileInputRef.current?.click()}>
-                  <ImageIcon className="mr-2 h-4 w-4" /> Imagen
-                </DropdownMenuItem>
-                <DropdownMenuItem onClick={startRecording}>
-                  <Mic className="mr-2 h-4 w-4" /> Grabar Audio
-                </DropdownMenuItem>
-              </DropdownMenuContent>
+              <DropdownMenuTrigger asChild><Button type="button" variant="ghost" size="icon" className="shrink-0 text-muted-foreground" disabled={isSending || blocked}><Paperclip className="h-5 w-5" /></Button></DropdownMenuTrigger>
+              <DropdownMenuContent align="start" side="top"><DropdownMenuItem onClick={() => fileInputRef.current?.click()}><ImageIcon className="mr-2 h-4 w-4" /> Imagen</DropdownMenuItem><DropdownMenuItem onClick={startRecording}><Mic className="mr-2 h-4 w-4" /> Grabar Audio</DropdownMenuItem></DropdownMenuContent>
             </DropdownMenu>
-
-            <form onSubmit={handleSendMessage} className="flex-1 flex gap-2">
-              <Input 
-                placeholder={blocked ? "Canal expirado..." : "Escribe un mensaje..."}
-                value={inputText} 
-                onChange={(e) => setInputText(e.target.value)} 
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && !e.shiftKey) {
-                    e.preventDefault();
-                    handleSendMessage(e as any);
-                  }
-                }}
-                disabled={isSending || blocked} 
-              />
-              <Button type="submit" size="icon" disabled={isSending || !inputText.trim() || blocked}>
-                {isSending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
-              </Button>
-            </form>
+            <form onSubmit={handleSendMessage} className="flex-1 flex gap-2"><Input placeholder={blocked ? "Canal expirado..." : "Escribe un mensaje..."} value={inputText} onChange={(e) => setInputText(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSendMessage(e as any); } }} disabled={isSending || blocked} /><Button type="submit" size="icon" disabled={isSending || !inputText.trim() || blocked}>{isSending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}</Button></form>
           </div>
         ) : (
-          <div className="flex items-center justify-between gap-4 p-2 bg-muted/50 rounded-lg animate-in fade-in duration-200">
-            <div className="flex items-center gap-3">
-              <div className="flex items-center gap-2 text-destructive animate-pulse">
-                <div className="size-2 rounded-full bg-destructive" />
-                <span className="text-xs font-bold font-mono">{formatTimer(recordingDuration)}</span>
-              </div>
-              <span className="text-xs text-muted-foreground font-medium">
-                {recordingState === 'recording' ? 'Grabando nota de voz...' : 'Audio listo'}
-              </span>
-            </div>
-            
-            <div className="flex items-center gap-2">
-              <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground hover:text-destructive" onClick={cancelRecording} disabled={isSending}>
-                <Trash className="h-4 w-4" />
-              </Button>
-              
-              {recordingState === 'recording' ? (
-                <Button size="icon" className="h-8 w-8 rounded-full" onClick={stopRecording}>
-                  <Square className="h-3 w-3" />
-                </Button>
-              ) : (
-                <Button size="icon" className="h-8 w-8 rounded-full bg-primary" onClick={handleSendRecordedAudio} disabled={isSending}>
-                  {isSending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
-                </Button>
-              )}
-            </div>
+          <div className="flex items-center justify-between gap-4 p-2 bg-muted/50 rounded-lg">
+            <div className="flex items-center gap-3"><div className="flex items-center gap-2 text-destructive animate-pulse"><div className="size-2 rounded-full bg-destructive" /><span className="text-xs font-bold font-mono">{formatTimer(recordingDuration)}</span></div><span className="text-xs text-muted-foreground font-medium">{recordingState === 'recording' ? 'Grabando...' : 'Audio listo'}</span></div>
+            <div className="flex items-center gap-2"><Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground hover:text-destructive" onClick={cancelRecording} disabled={isSending}><Trash className="h-4 w-4" /></Button>{recordingState === 'recording' ? (<Button size="icon" className="h-8 w-8 rounded-full" onClick={stopRecording}><Square className="h-3 w-3" /></Button>) : (<Button size="icon" className="h-8 w-8 rounded-full bg-primary" onClick={handleSendRecordedAudio} disabled={isSending}>{isSending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}</Button>)}</div>
           </div>
         )}
       </div>
 
       <CustomerProfileDialog channelId={channelId} conversation={conversation} isOpen={isProfileOpen} onOpenChange={setIsProfileOpen} />
-      <AlertDialog open={isClearOpen} onOpenChange={setIsClearOpen}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Limpiar chat</AlertDialogTitle>
-            <AlertDialogDescription>Esta acción eliminará todos los mensajes de esta conversación.</AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel disabled={isClearing}>Cancelar</AlertDialogCancel>
-            <AlertDialogAction onClick={(e) => { e.preventDefault(); clearChatMessages(); }} className="bg-destructive text-destructive-foreground" disabled={isClearing}>
-              {isClearing ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Trash2 className="mr-2 h-4 w-4" />} Eliminar mensajes
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
-      <AlertDialog open={isDeleteOpen} onOpenChange={setIsDeleteOpen}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>¿Eliminar conversación completa?</AlertDialogTitle>
-            <AlertDialogDescription>Esta acción eliminará la conversación completa y todos sus mensajes de forma permanente.</AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel disabled={isDeleting}>Cancelar</AlertDialogCancel>
-            <AlertDialogAction onClick={(e) => { e.preventDefault(); deleteFullConversation(); }} className="bg-destructive text-destructive-foreground" disabled={isDeleting}>
-              {isDeleting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Trash2 className="mr-2 h-4 w-4" />} Borrar definitivamente
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+      <AlertDialog open={isClearOpen} onOpenChange={setIsClearOpen}><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>Limpiar chat</AlertDialogTitle><AlertDialogDescription>Esta acción eliminará todos los mensajes de esta conversación.</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel disabled={isClearing}>Cancelar</AlertDialogCancel><AlertDialogAction onClick={(e) => { e.preventDefault(); clearChatMessages(); }} className="bg-destructive text-destructive-foreground" disabled={isClearing}>{isClearing ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Trash2 className="mr-2 h-4 w-4" />} Eliminar mensajes</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>
+      <AlertDialog open={isDeleteOpen} onOpenChange={setIsDeleteOpen}><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>¿Eliminar conversación?</AlertDialogTitle><AlertDialogDescription>Esta acción eliminará la conversación completa y todos sus mensajes permanentemente.</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel disabled={isDeleting}>Cancelar</AlertDialogCancel><AlertDialogAction onClick={(e) => { e.preventDefault(); deleteFullConversation(); }} className="bg-destructive text-destructive-foreground" disabled={isDeleting}>{isDeleting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Trash2 className="mr-2 h-4 w-4" />} Borrar definitivamente</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>
     </>
   );
 }

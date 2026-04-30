@@ -115,6 +115,7 @@ export type CustomerProfile = {
   notes: string | null;
   updatedAt: Timestamp | FieldValue;
   source: "auto-extract" | "manual";
+  isContact?: boolean;
   confidence?: {
     nameConfidence?: "low" | "med" | "high";
     emailConfidence?: "low" | "high";
@@ -135,6 +136,7 @@ export type Conversation = {
   phoneE164?: string | null;
   customer?: CustomerProfile;
   botEnabled?: boolean;
+  isContact?: boolean;
   // Funnel
   funnelStage?: number;
   // Follow-up fields
