@@ -12,5 +12,11 @@
         "*.local"
       ]
     }
+  ],
+  "apphosting": [
+    {
+      "backendId": "studio",
+      "rootDir": "."
+    }
   ]
 }
