@@ -247,7 +247,7 @@ export function ChannelDetailPage({ channelId }: { channelId: string }) {
   // Sync activeTab with URL search params
   useEffect(() => {
     const tab = searchParams.get('tab');
-    if (tab && ['connection', 'chats', 'chatbot', 'funnel'].includes(tab)) {
+    if (tab && ['connection', 'chats', 'chatbot', 'funnel', 'contacts'].includes(tab)) {
       setActiveTab(tab);
     }
   }, [searchParams]);
@@ -416,10 +416,117 @@ export function ChannelDetailPage({ channelId }: { channelId: string }) {
         <TabsContent value="funnel" className="m-0 border-none outline-none">
           <SalesFunnel channelId={channelId} blocked={isBlocked} channel={channel} />
         </TabsContent>
+
+        <TabsContent value="contacts" className="m-0 border-none outline-none">
+          <ContactsView channelId={channelId} />
+        </TabsContent>
       </Tabs>
 
       <QrCodeDialog qrDataUrl={channel?.qrDataUrl ?? null} isOpen={isQrModalOpen} onOpenChange={setQrModalOpen} />
     </main>
+  );
+}
+
+function ContactsView({ channelId }: { channelId: string }) {
+  const firestore = useFirestore();
+
+  const conversationsQuery = useMemoFirebase(() => {
+    if (!firestore) return null;
+    return query(
+      collection(firestore, 'channels', channelId, 'conversations'),
+      orderBy('lastMessageAt', 'desc'),
+      limit(200)
+    );
+  }, [firestore, channelId]);
+
+  const { data: conversations, isLoading } = useCollection<Conversation>(conversationsQuery);
+
+  const contacts = useMemo(() => {
+    if (!conversations) return [];
+    return conversations.filter(
+      (conv) => conv.isContact === true || conv.customer?.isContact === true
+    );
+  }, [conversations]);
+
+  if (isLoading) {
+    return (
+      <div className="flex h-[400px] items-center justify-center">
+        <Loader2 className="animate-spin text-muted-foreground" />
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-6">
+      <div className="flex items-center justify-between">
+        <h3 className="text-lg font-semibold flex items-center gap-2">
+          <User className="h-5 w-5 text-primary" />
+          Contactos
+          <Badge variant="secondary" className="ml-1">{contacts.length}</Badge>
+        </h3>
+      </div>
+
+      {contacts.length === 0 ? (
+        <div className="flex flex-col items-center justify-center py-20 text-center text-muted-foreground gap-3">
+          <User className="h-12 w-12 opacity-20" />
+          <p className="text-sm">Aún no hay contactos guardados.</p>
+        </div>
+      ) : (
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          {contacts.map((conv) => {
+            const displayName =
+              conv.customer?.name ||
+              (conv.displayName && conv.displayName !== conv.jid ? conv.displayName : null) ||
+              (conv.name && conv.name !== conv.jid ? conv.name : null) ||
+              conv.phoneE164 ||
+              conv.jid;
+
+            const phone = conv.customer?.phone || conv.phoneE164 || null;
+            const email = conv.customer?.email || null;
+            const company = conv.customer?.company || null;
+            const notes = conv.customer?.notes || null;
+
+            return (
+              <Card key={conv.jid} className="shadow-none">
+                <CardContent className="p-4 space-y-2">
+                  <div className="flex items-center gap-2">
+                    <div className="flex items-center justify-center size-8 rounded-full bg-primary/10 shrink-0">
+                      <User className="size-4 text-primary" />
+                    </div>
+                    <p className="font-semibold text-sm truncate">{displayName}</p>
+                  </div>
+
+                  {phone && (
+                    <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                      <span className="font-medium min-w-[52px]">Teléfono:</span>
+                      <span>{phone}</span>
+                    </div>
+                  )}
+                  {email && (
+                    <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                      <span className="font-medium min-w-[52px]">Email:</span>
+                      <span className="truncate">{email}</span>
+                    </div>
+                  )}
+                  {company && (
+                    <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                      <span className="font-medium min-w-[52px]">Empresa:</span>
+                      <span className="truncate">{company}</span>
+                    </div>
+                  )}
+                  {notes && (
+                    <div className="flex items-start gap-2 text-xs text-muted-foreground">
+                      <span className="font-medium min-w-[52px] pt-0.5">Notas:</span>
+                      <span className="line-clamp-3 whitespace-pre-line">{notes}</span>
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            );
+          })}
+        </div>
+      )}
+    </div>
   );
 }
 

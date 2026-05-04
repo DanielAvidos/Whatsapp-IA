@@ -29,7 +29,8 @@ import {
   Bot,
   Link as LinkIcon,
   ChevronDown,
-  LayoutGrid
+  LayoutGrid,
+  BookUser
 } from "lucide-react";
 import { Logo } from "@/components/icons/logo";
 import { useUser, useAuth, useFirestore, useMemoFirebase, useCollection } from "@/firebase";
@@ -233,6 +234,19 @@ export function AppSidebar() {
                   <Link href={`/channels/${selectedChannelId}?tab=funnel`} onClick={() => setOpenMobile(false)}>
                     <LayoutGrid />
                     <span>Embudo de ventas</span>
+                  </Link>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+
+              <SidebarMenuItem>
+                <SidebarMenuButton
+                  asChild
+                  isActive={pathname.startsWith(`/channels/${selectedChannelId}`) && currentTab === 'contacts'}
+                  tooltip="Contactos"
+                >
+                  <Link href={`/channels/${selectedChannelId}?tab=contacts`} onClick={() => setOpenMobile(false)}>
+                    <BookUser />
+                    <span>Contactos</span>
                   </Link>
                 </SidebarMenuButton>
               </SidebarMenuItem>
