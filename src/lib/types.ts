@@ -137,6 +137,7 @@ export type Conversation = {
   customer?: CustomerProfile;
   botEnabled?: boolean;
   isContact?: boolean;
+  labelIds?: string[];
   // Funnel
   funnelStage?: number;
   // Follow-up fields
@@ -201,6 +202,14 @@ export type ImageResponse = {
   storagePath: string;
   enabled: boolean;
   priority: number;
+  createdAt: Timestamp | FieldValue;
+  updatedAt: Timestamp | FieldValue;
+};
+
+export type ChannelLabel = {
+  id: string;
+  name: string;
+  description?: string | null;
   createdAt: Timestamp | FieldValue;
   updatedAt: Timestamp | FieldValue;
 };

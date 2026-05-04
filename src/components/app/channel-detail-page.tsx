@@ -3,7 +3,7 @@
 
 import { useState, useEffect, useRef, useMemo } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
-import { Loader2, ScanQrCode, LogOut, RotateCcw, MessageSquare, Link as LinkIcon, Send, Bot, FileText, Save, History, Brain, Info, AlertCircle, CheckCircle2, Clock, PlusCircle, Trash2, Settings2, MoreVertical, User, CalendarClock, XCircle, Image as ImageIcon, Paperclip, Music, Mic, Square, Trash, Edit3, LayoutGrid, ChevronRight } from 'lucide-react';
+import { Loader2, ScanQrCode, LogOut, RotateCcw, MessageSquare, Link as LinkIcon, Send, Bot, FileText, Save, History, Brain, Info, AlertCircle, CheckCircle2, Clock, PlusCircle, Trash2, Settings2, MoreVertical, User, CalendarClock, XCircle, Image as ImageIcon, Paperclip, Music, Mic, Square, Trash, Edit3, LayoutGrid, ChevronRight, Tag } from 'lucide-react';
 import { useFirestore, useDoc, useMemoFirebase, useCollection, useUser, setDocumentNonBlocking, useFirebase, deleteDocumentNonBlocking } from '@/firebase';
 import { doc, collection, query, orderBy, limit, Timestamp, serverTimestamp, setDoc, updateDoc, deleteDoc, where, getDoc, addDoc, writeBatch, getDocs } from 'firebase/firestore';
 import { getFunctions, httpsCallable } from 'firebase/functions';
@@ -12,7 +12,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useLanguage } from '@/context/language-provider';
-import type { WhatsappChannel, Conversation, Message, BotConfig, FollowupConfig, ImageResponse, FunnelStageConfig } from '@/lib/types';
+import type { WhatsappChannel, Conversation, Message, BotConfig, FollowupConfig, ImageResponse, FunnelStageConfig, ChannelLabel } from '@/lib/types';
 import { StatusBadge } from '@/components/app/status-badge';
 import { QrCodeDialog } from '@/components/app/qr-code-dialog';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -247,7 +247,7 @@ export function ChannelDetailPage({ channelId }: { channelId: string }) {
   // Sync activeTab with URL search params
   useEffect(() => {
     const tab = searchParams.get('tab');
-    if (tab && ['connection', 'chats', 'chatbot', 'funnel', 'contacts'].includes(tab)) {
+    if (tab && ['connection', 'chats', 'chatbot', 'funnel', 'contacts', 'labels'].includes(tab)) {
       setActiveTab(tab);
     }
   }, [searchParams]);
@@ -420,10 +420,212 @@ export function ChannelDetailPage({ channelId }: { channelId: string }) {
         <TabsContent value="contacts" className="m-0 border-none outline-none">
           <ContactsView channelId={channelId} />
         </TabsContent>
+
+        <TabsContent value="labels" className="m-0 border-none outline-none">
+          <LabelsView channelId={channelId} />
+        </TabsContent>
       </Tabs>
 
       <QrCodeDialog qrDataUrl={channel?.qrDataUrl ?? null} isOpen={isQrModalOpen} onOpenChange={setQrModalOpen} />
     </main>
+  );
+}
+
+function LabelsView({ channelId }: { channelId: string }) {
+  const firestore = useFirestore();
+  const { user } = useUser();
+  const { toast } = useToast();
+
+  const labelsQuery = useMemoFirebase(() => {
+    if (!firestore) return null;
+    return query(
+      collection(firestore, 'channels', channelId, 'labels'),
+      orderBy('createdAt', 'desc')
+    );
+  }, [firestore, channelId]);
+
+  const { data: labels, isLoading } = useCollection<ChannelLabel>(labelsQuery);
+
+  // Form state
+  const [isFormOpen, setIsFormOpen] = useState(false);
+  const [editingLabel, setEditingLabel] = useState<ChannelLabel | null>(null);
+  const [formName, setFormName] = useState('');
+  const [formDescription, setFormDescription] = useState('');
+  const [isSaving, setIsSaving] = useState(false);
+
+  // Delete confirmation state
+  const [deletingLabel, setDeletingLabel] = useState<ChannelLabel | null>(null);
+
+  const openCreate = () => {
+    setEditingLabel(null);
+    setFormName('');
+    setFormDescription('');
+    setIsFormOpen(true);
+  };
+
+  const openEdit = (label: ChannelLabel) => {
+    setEditingLabel(label);
+    setFormName(label.name);
+    setFormDescription(label.description || '');
+    setIsFormOpen(true);
+  };
+
+  const handleSave = async () => {
+    if (!firestore || !user || !formName.trim()) return;
+    setIsSaving(true);
+    try {
+      if (editingLabel) {
+        const ref = doc(firestore, 'channels', channelId, 'labels', editingLabel.id);
+        await updateDoc(ref, {
+          name: formName.trim(),
+          description: formDescription.trim() || null,
+          updatedAt: serverTimestamp(),
+        });
+        toast({ title: 'Etiqueta actualizada' });
+      } else {
+        const ref = collection(firestore, 'channels', channelId, 'labels');
+        await addDoc(ref, {
+          name: formName.trim(),
+          description: formDescription.trim() || null,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+        toast({ title: 'Etiqueta creada' });
+      }
+      setIsFormOpen(false);
+    } catch (e) {
+      toast({ variant: 'destructive', title: 'Error al guardar etiqueta' });
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleDelete = async () => {
+    if (!firestore || !deletingLabel) return;
+    try {
+      await deleteDoc(doc(firestore, 'channels', channelId, 'labels', deletingLabel.id));
+      toast({ title: 'Etiqueta eliminada' });
+    } catch (e) {
+      toast({ variant: 'destructive', title: 'Error al eliminar etiqueta' });
+    } finally {
+      setDeletingLabel(null);
+    }
+  };
+
+  if (isLoading) {
+    return (
+      <div className="flex h-[400px] items-center justify-center">
+        <Loader2 className="animate-spin text-muted-foreground" />
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-6">
+      <div className="flex items-center justify-between">
+        <h3 className="text-lg font-semibold flex items-center gap-2">
+          <Tag className="h-5 w-5 text-primary" />
+          Etiquetas
+          <Badge variant="secondary" className="ml-1">{labels?.length ?? 0}</Badge>
+        </h3>
+        <Button size="sm" onClick={openCreate}>
+          <PlusCircle className="h-4 w-4 mr-2" />
+          Nueva etiqueta
+        </Button>
+      </div>
+
+      {(!labels || labels.length === 0) ? (
+        <div className="flex flex-col items-center justify-center py-20 text-center text-muted-foreground gap-3">
+          <Tag className="h-12 w-12 opacity-20" />
+          <p className="text-sm">Aún no hay etiquetas creadas.</p>
+        </div>
+      ) : (
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          {labels.map((label) => (
+            <Card key={label.id} className="shadow-none">
+              <CardContent className="p-4">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <div className="flex items-center justify-center size-7 rounded-full bg-primary/10 shrink-0">
+                      <Tag className="size-3.5 text-primary" />
+                    </div>
+                    <p className="font-semibold text-sm truncate">{label.name}</p>
+                  </div>
+                  <div className="flex gap-1 shrink-0">
+                    <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openEdit(label)}>
+                      <Edit3 className="h-3.5 w-3.5" />
+                    </Button>
+                    <Button variant="ghost" size="icon" className="h-7 w-7 text-destructive hover:text-destructive" onClick={() => setDeletingLabel(label)}>
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </Button>
+                  </div>
+                </div>
+                {label.description && (
+                  <p className="text-xs text-muted-foreground mt-2 line-clamp-2">{label.description}</p>
+                )}
+              </CardContent>
+            </Card>
+          ))}
+        </div>
+      )}
+
+      {/* Create / Edit dialog */}
+      <Dialog open={isFormOpen} onOpenChange={setIsFormOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{editingLabel ? 'Editar etiqueta' : 'Nueva etiqueta'}</DialogTitle>
+          </DialogHeader>
+          <div className="grid gap-4 py-4">
+            <div className="space-y-1.5">
+              <Label htmlFor="label-name">Nombre <span className="text-destructive">*</span></Label>
+              <Input
+                id="label-name"
+                value={formName}
+                onChange={(e) => setFormName(e.target.value)}
+                placeholder="Ej: Cliente VIP"
+                disabled={isSaving}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="label-description">Descripción (opcional)</Label>
+              <Textarea
+                id="label-description"
+                value={formDescription}
+                onChange={(e) => setFormDescription(e.target.value)}
+                placeholder="Breve descripción de esta etiqueta"
+                className="min-h-[80px]"
+                disabled={isSaving}
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setIsFormOpen(false)} disabled={isSaving}>Cancelar</Button>
+            <Button onClick={handleSave} disabled={!formName.trim() || isSaving}>
+              {isSaving ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Save className="h-4 w-4 mr-2" />}
+              Guardar
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Delete confirmation */}
+      <AlertDialog open={!!deletingLabel} onOpenChange={(open) => { if (!open) setDeletingLabel(null); }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>¿Eliminar etiqueta?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Se eliminará la etiqueta <strong>"{deletingLabel?.name}"</strong>. Esta acción no borra contactos ni conversaciones.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancelar</AlertDialogCancel>
+            <AlertDialogAction onClick={handleDelete} className="bg-destructive text-destructive-foreground hover:bg-destructive/90">
+              Eliminar
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </div>
   );
 }
 
@@ -518,6 +720,15 @@ function ContactsView({ channelId }: { channelId: string }) {
                     <div className="flex items-start gap-2 text-xs text-muted-foreground">
                       <span className="font-medium min-w-[52px] pt-0.5">Notas:</span>
                       <span className="line-clamp-3 whitespace-pre-line">{notes}</span>
+                    </div>
+                  )}
+                  {conv.labelIds && conv.labelIds.length > 0 && (
+                    <div className="flex flex-wrap gap-1 pt-1">
+                      {conv.labelIds.map((lid) => (
+                        <span key={lid} className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-full bg-primary/10 text-primary font-medium">
+                          <Tag className="size-2.5" />{lid}
+                        </span>
+                      ))}
                     </div>
                   )}
                 </CardContent>
