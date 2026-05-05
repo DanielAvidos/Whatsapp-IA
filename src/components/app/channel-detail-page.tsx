@@ -3,7 +3,7 @@
 
 import { useState, useEffect, useRef, useMemo } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
-import { Loader2, ScanQrCode, LogOut, RotateCcw, MessageSquare, Link as LinkIcon, Send, Bot, FileText, Save, History, Brain, Info, AlertCircle, CheckCircle2, Clock, PlusCircle, Trash2, Settings2, MoreVertical, User, CalendarClock, XCircle, Image as ImageIcon, Paperclip, Music, Mic, Square, Trash, Edit3, LayoutGrid, ChevronRight, Tag } from 'lucide-react';
+import { Loader2, ScanQrCode, LogOut, RotateCcw, MessageSquare, Link as LinkIcon, Send, Bot, FileText, Save, History, Brain, Info, AlertCircle, CheckCircle2, Clock, PlusCircle, Trash2, Settings2, MoreVertical, User, CalendarClock, XCircle, Image as ImageIcon, Paperclip, Music, Mic, Square, Trash, Edit3, LayoutGrid, ChevronRight, Tag, Tags, Search, X } from 'lucide-react';
 import { useFirestore, useDoc, useMemoFirebase, useCollection, useUser, setDocumentNonBlocking, useFirebase, deleteDocumentNonBlocking } from '@/firebase';
 import { doc, collection, query, orderBy, limit, Timestamp, serverTimestamp, setDoc, updateDoc, deleteDoc, where, getDoc, addDoc, writeBatch, getDocs } from 'firebase/firestore';
 import { getFunctions, httpsCallable } from 'firebase/functions';
@@ -31,6 +31,8 @@ import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/
 import { Progress } from '@/components/ui/progress';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, DropdownMenuSeparator, DropdownMenuLabel, DropdownMenuSub, DropdownMenuSubTrigger, DropdownMenuPortal, DropdownMenuSubContent } from '@/components/ui/dropdown-menu';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from '@/components/ui/dialog';
+import { Checkbox } from '@/components/ui/checkbox';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -641,7 +643,22 @@ function ContactsView({ channelId }: { channelId: string }) {
     );
   }, [firestore, channelId]);
 
+  const labelsQuery = useMemoFirebase(() => {
+    if (!firestore) return null;
+    return query(
+      collection(firestore, 'channels', channelId, 'labels'),
+      orderBy('createdAt', 'desc')
+    );
+  }, [firestore, channelId]);
+
   const { data: conversations, isLoading } = useCollection<Conversation>(conversationsQuery);
+  const { data: labels } = useCollection<ChannelLabel>(labelsQuery);
+
+  const tagById = useMemo(() => {
+    const map = new Map<string, ChannelLabel>();
+    labels?.forEach(l => map.set(l.id, l));
+    return map;
+  }, [labels]);
 
   const contacts = useMemo(() => {
     if (!conversations) return [];
@@ -675,69 +692,329 @@ function ContactsView({ channelId }: { channelId: string }) {
         </div>
       ) : (
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-          {contacts.map((conv) => {
-            const displayName =
-              conv.customer?.name ||
-              (conv.displayName && conv.displayName !== conv.jid ? conv.displayName : null) ||
-              (conv.name && conv.name !== conv.jid ? conv.name : null) ||
-              conv.phoneE164 ||
-              conv.jid;
-
-            const phone = conv.customer?.phone || conv.phoneE164 || null;
-            const email = conv.customer?.email || null;
-            const company = conv.customer?.company || null;
-            const notes = conv.customer?.notes || null;
-
-            return (
-              <Card key={conv.jid} className="shadow-none">
-                <CardContent className="p-4 space-y-2">
-                  <div className="flex items-center gap-2">
-                    <div className="flex items-center justify-center size-8 rounded-full bg-primary/10 shrink-0">
-                      <User className="size-4 text-primary" />
-                    </div>
-                    <p className="font-semibold text-sm truncate">{displayName}</p>
-                  </div>
-
-                  {phone && (
-                    <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                      <span className="font-medium min-w-[52px]">Teléfono:</span>
-                      <span>{phone}</span>
-                    </div>
-                  )}
-                  {email && (
-                    <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                      <span className="font-medium min-w-[52px]">Email:</span>
-                      <span className="truncate">{email}</span>
-                    </div>
-                  )}
-                  {company && (
-                    <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                      <span className="font-medium min-w-[52px]">Empresa:</span>
-                      <span className="truncate">{company}</span>
-                    </div>
-                  )}
-                  {notes && (
-                    <div className="flex items-start gap-2 text-xs text-muted-foreground">
-                      <span className="font-medium min-w-[52px] pt-0.5">Notas:</span>
-                      <span className="line-clamp-3 whitespace-pre-line">{notes}</span>
-                    </div>
-                  )}
-                  {conv.labelIds && conv.labelIds.length > 0 && (
-                    <div className="flex flex-wrap gap-1 pt-1">
-                      {conv.labelIds.map((lid) => (
-                        <span key={lid} className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-full bg-primary/10 text-primary font-medium">
-                          <Tag className="size-2.5" />{lid}
-                        </span>
-                      ))}
-                    </div>
-                  )}
-                </CardContent>
-              </Card>
-            );
-          })}
+          {contacts.map((conv) => (
+            <ContactCard
+              key={conv.jid}
+              conv={conv}
+              channelId={channelId}
+              tags={labels || []}
+              tagById={tagById}
+            />
+          ))}
         </div>
       )}
     </div>
+  );
+}
+
+// ─── ContactLabelChips ────────────────────────────────────────────────────────
+
+const MAX_VISIBLE_TAGS = 3;
+
+function ContactLabelChips({
+  labelIds,
+  tagById,
+}: {
+  labelIds: string[];
+  tagById: Map<string, ChannelLabel>;
+}) {
+  const resolved = labelIds
+    .map(id => tagById.get(id))
+    .filter((l): l is ChannelLabel => !!l);
+
+  if (resolved.length === 0) return null;
+
+  const visible = resolved.slice(0, MAX_VISIBLE_TAGS);
+  const overflow = resolved.slice(MAX_VISIBLE_TAGS);
+
+  return (
+    <div className="flex flex-wrap items-center gap-1 pt-1">
+      {visible.map(label => (
+        <span
+          key={label.id}
+          className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-full bg-primary/10 text-primary font-medium leading-none"
+        >
+          <Tag className="size-2.5 shrink-0" />
+          <span className="max-w-[80px] truncate">{label.name}</span>
+        </span>
+      ))}
+      {overflow.length > 0 && (
+        <Popover>
+          <PopoverTrigger asChild>
+            <button
+              className="inline-flex items-center gap-0.5 text-[10px] px-1.5 py-0.5 rounded-full bg-muted text-muted-foreground font-medium leading-none hover:bg-muted/80 transition-colors cursor-pointer"
+              type="button"
+            >
+              +{overflow.length} más
+            </button>
+          </PopoverTrigger>
+          <PopoverContent className="w-56 p-3" align="start">
+            <p className="text-xs font-semibold text-muted-foreground mb-2 flex items-center gap-1">
+              <Tags className="size-3" /> Todas las etiquetas
+            </p>
+            <div className="flex flex-wrap gap-1">
+              {resolved.map(label => (
+                <span
+                  key={label.id}
+                  className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-full bg-primary/10 text-primary font-medium leading-none"
+                >
+                  <Tag className="size-2.5 shrink-0" />
+                  {label.name}
+                </span>
+              ))}
+            </div>
+          </PopoverContent>
+        </Popover>
+      )}
+    </div>
+  );
+}
+
+// ─── AssignLabelsDialog ───────────────────────────────────────────────────────
+
+function AssignLabelsDialog({
+  open,
+  onOpenChange,
+  conv,
+  channelId,
+  tags,
+}: {
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+  conv: Conversation;
+  channelId: string;
+  tags: ChannelLabel[];
+}) {
+  const firestore = useFirestore();
+  const { toast } = useToast();
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [search, setSearch] = useState('');
+  const [isSaving, setIsSaving] = useState(false);
+
+  // Sync local state when dialog opens
+  useEffect(() => {
+    if (open) {
+      setSelectedIds(conv.labelIds || []);
+      setSearch('');
+    }
+  }, [open, conv.labelIds]);
+
+  const filtered = useMemo(() => {
+    if (!search.trim()) return tags;
+    const q = search.trim().toLowerCase();
+    return tags.filter(t => t.name.toLowerCase().includes(q));
+  }, [tags, search]);
+
+  const toggle = (id: string) => {
+    setSelectedIds(prev =>
+      prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]
+    );
+  };
+
+  const handleSave = async () => {
+    if (!firestore) return;
+    setIsSaving(true);
+    try {
+      const convRef = doc(firestore, 'channels', channelId, 'conversations', conv.id);
+      await updateDoc(convRef, { labelIds: selectedIds });
+      toast({ title: 'Etiquetas guardadas' });
+      onOpenChange(false);
+    } catch (e: any) {
+      console.error('[AssignLabelsDialog] save error', e);
+      toast({ variant: 'destructive', title: 'Error al guardar', description: e?.message || String(e) });
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const displayName =
+    conv.customer?.name ||
+    (conv.displayName && conv.displayName !== conv.jid ? conv.displayName : null) ||
+    (conv.name && conv.name !== conv.jid ? conv.name : null) ||
+    conv.phoneE164 ||
+    conv.jid;
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-sm">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Tags className="h-4 w-4 text-primary" />
+            Asignar etiquetas
+          </DialogTitle>
+          <DialogDescription className="truncate text-xs">{displayName}</DialogDescription>
+        </DialogHeader>
+
+        {tags.length === 0 ? (
+          <div className="flex flex-col items-center justify-center py-8 text-center text-muted-foreground gap-2">
+            <Tag className="h-8 w-8 opacity-20" />
+            <p className="text-sm">No hay etiquetas creadas todavía.</p>
+            <p className="text-xs opacity-70">Crea etiquetas desde la sección <strong>Etiquetas</strong>.</p>
+          </div>
+        ) : (
+          <>
+            {/* Search */}
+            <div className="relative">
+              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+              <input
+                className="w-full pl-8 pr-3 py-1.5 text-sm rounded-md border bg-background focus:outline-none focus:ring-1 focus:ring-ring"
+                placeholder="Buscar etiqueta..."
+                value={search}
+                onChange={e => setSearch(e.target.value)}
+              />
+              {search && (
+                <button
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                  onClick={() => setSearch('')}
+                  type="button"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              )}
+            </div>
+
+            {/* List */}
+            <div className="max-h-56 overflow-y-auto space-y-1 pr-1">
+              {filtered.length === 0 ? (
+                <p className="text-xs text-center text-muted-foreground py-4">Sin resultados.</p>
+              ) : (
+                filtered.map(tag => {
+                  const checked = selectedIds.includes(tag.id);
+                  return (
+                    <label
+                      key={tag.id}
+                      className={cn(
+                        'flex items-center gap-3 rounded-md px-2 py-2 cursor-pointer transition-colors select-none',
+                        checked ? 'bg-primary/8' : 'hover:bg-muted/60'
+                      )}
+                    >
+                      <Checkbox
+                        checked={checked}
+                        onCheckedChange={() => toggle(tag.id)}
+                        id={`label-chk-${tag.id}`}
+                      />
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium leading-none truncate">{tag.name}</p>
+                        {tag.description && (
+                          <p className="text-[10px] text-muted-foreground mt-0.5 truncate">{tag.description}</p>
+                        )}
+                      </div>
+                      {checked && (
+                        <span className="shrink-0 size-1.5 rounded-full bg-primary" />
+                      )}
+                    </label>
+                  );
+                })
+              )}
+            </div>
+          </>
+        )}
+
+        <DialogFooter className="gap-2">
+          <Button variant="outline" size="sm" onClick={() => onOpenChange(false)} disabled={isSaving}>
+            Cancelar
+          </Button>
+          {tags.length > 0 && (
+            <Button size="sm" onClick={handleSave} disabled={isSaving}>
+              {isSaving ? <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> : <Save className="h-3.5 w-3.5 mr-1.5" />}
+              Guardar
+            </Button>
+          )}
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ─── ContactCard ──────────────────────────────────────────────────────────────
+
+function ContactCard({
+  conv,
+  channelId,
+  tags,
+  tagById,
+}: {
+  conv: Conversation;
+  channelId: string;
+  tags: ChannelLabel[];
+  tagById: Map<string, ChannelLabel>;
+}) {
+  const [dialogOpen, setDialogOpen] = useState(false);
+
+  const displayName =
+    conv.customer?.name ||
+    (conv.displayName && conv.displayName !== conv.jid ? conv.displayName : null) ||
+    (conv.name && conv.name !== conv.jid ? conv.name : null) ||
+    conv.phoneE164 ||
+    conv.jid;
+
+  const phone = conv.customer?.phone || conv.phoneE164 || null;
+  const email = conv.customer?.email || null;
+  const company = conv.customer?.company || null;
+  const notes = conv.customer?.notes || null;
+
+  return (
+    <>
+      <Card className="shadow-none">
+        <CardContent className="p-4 space-y-2">
+          {/* Header: avatar + name + actions button */}
+          <div className="flex items-center gap-2">
+            <div className="flex items-center justify-center size-8 rounded-full bg-primary/10 shrink-0">
+              <User className="size-4 text-primary" />
+            </div>
+            <p className="font-semibold text-sm truncate flex-1">{displayName}</p>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-7 w-7 shrink-0 text-muted-foreground hover:text-foreground"
+              onClick={() => setDialogOpen(true)}
+              title="Administrar etiquetas"
+            >
+              <Tags className="h-3.5 w-3.5" />
+            </Button>
+          </div>
+
+          {/* Contact details */}
+          {phone && (
+            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+              <span className="font-medium min-w-[52px]">Teléfono:</span>
+              <span>{phone}</span>
+            </div>
+          )}
+          {email && (
+            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+              <span className="font-medium min-w-[52px]">Email:</span>
+              <span className="truncate">{email}</span>
+            </div>
+          )}
+          {company && (
+            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+              <span className="font-medium min-w-[52px]">Empresa:</span>
+              <span className="truncate">{company}</span>
+            </div>
+          )}
+          {notes && (
+            <div className="flex items-start gap-2 text-xs text-muted-foreground">
+              <span className="font-medium min-w-[52px] pt-0.5">Notas:</span>
+              <span className="line-clamp-3 whitespace-pre-line">{notes}</span>
+            </div>
+          )}
+
+          {/* Label chips */}
+          {conv.labelIds && conv.labelIds.length > 0 && (
+            <ContactLabelChips labelIds={conv.labelIds} tagById={tagById} />
+          )}
+        </CardContent>
+      </Card>
+
+      <AssignLabelsDialog
+        open={dialogOpen}
+        onOpenChange={setDialogOpen}
+        conv={conv}
+        channelId={channelId}
+        tags={tags}
+      />
+    </>
   );
 }
 
