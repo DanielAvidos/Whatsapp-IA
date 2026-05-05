@@ -2167,7 +2167,7 @@ function SalesFunnel({ channelId, blocked, channel }: { channelId: string, block
                 <div className="flex-1 bg-muted/30 rounded-lg p-2 flex flex-col gap-2 min-h-[500px]">
                   {stageConvs.map(conv => (
                     <Card 
-                      key={conv.jid} 
+                      key={conv.id} 
                       className={cn("cursor-pointer hover:border-primary/50 transition-colors shadow-none")}
                       onClick={() => handleConversationClick(conv.jid)}
                     >
@@ -3067,7 +3067,7 @@ function ChatInterface({ channelId, blocked, funnelStages }: { channelId: string
               <div className="flex flex-col">
                 {conversations?.map((conv) => (
                   <button 
-                    key={conv.jid} 
+                    key={conv.id} 
                     onClick={() => setSelectedJid(conv.jid)} 
                     className={cn("flex flex-col items-start gap-1 p-4 text-left border-b hover:bg-muted/50 transition-colors", selectedJid === conv.jid && "bg-muted")}
                   >
