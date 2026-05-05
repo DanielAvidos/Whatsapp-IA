@@ -3,7 +3,7 @@
 
 import { useState, useEffect, useRef, useMemo } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
-import { Loader2, ScanQrCode, LogOut, RotateCcw, MessageSquare, Link as LinkIcon, Send, Bot, FileText, Save, History, Brain, Info, AlertCircle, CheckCircle2, Clock, PlusCircle, Trash2, Settings2, MoreVertical, User, CalendarClock, XCircle, Image as ImageIcon, Paperclip, Music, Mic, Square, Trash, Edit3, LayoutGrid, ChevronRight, Tag, Tags, Search, X } from 'lucide-react';
+import { Loader2, ScanQrCode, LogOut, RotateCcw, MessageSquare, Link as LinkIcon, Send, Bot, FileText, Save, History, Brain, Info, AlertCircle, CheckCircle2, Clock, PlusCircle, Trash2, Settings2, MoreVertical, User, UserPlus, CalendarClock, XCircle, Image as ImageIcon, Paperclip, Music, Mic, Square, Trash, Edit3, LayoutGrid, ChevronRight, Tag, Tags, Search, X, Upload, FileSpreadsheet, CheckCircle, AlertTriangle } from 'lucide-react';
 import { useFirestore, useDoc, useMemoFirebase, useCollection, useUser, setDocumentNonBlocking, useFirebase, deleteDocumentNonBlocking } from '@/firebase';
 import { doc, collection, query, orderBy, limit, Timestamp, serverTimestamp, setDoc, updateDoc, deleteDoc, where, getDoc, addDoc, writeBatch, getDocs } from 'firebase/firestore';
 import { getFunctions, httpsCallable } from 'firebase/functions';
@@ -633,6 +633,8 @@ function LabelsView({ channelId }: { channelId: string }) {
 
 function ContactsView({ channelId }: { channelId: string }) {
   const firestore = useFirestore();
+  const [isCreateOpen, setIsCreateOpen] = useState(false);
+  const [isImportOpen, setIsImportOpen] = useState(false);
 
   const conversationsQuery = useMemoFirebase(() => {
     if (!firestore) return null;
@@ -677,24 +679,44 @@ function ContactsView({ channelId }: { channelId: string }) {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-2">
         <h3 className="text-lg font-semibold flex items-center gap-2">
           <User className="h-5 w-5 text-primary" />
           Contactos
           <Badge variant="secondary" className="ml-1">{contacts.length}</Badge>
         </h3>
+        <div className="flex items-center gap-2">
+          <Button size="sm" variant="outline" onClick={() => setIsImportOpen(true)} id="btn-import-contacts">
+            <Upload className="h-4 w-4 mr-2" />
+            Importar
+          </Button>
+          <Button size="sm" onClick={() => setIsCreateOpen(true)} id="btn-add-contact">
+            <UserPlus className="h-4 w-4 mr-2" />
+            Nuevo contacto
+          </Button>
+        </div>
       </div>
 
       {contacts.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-20 text-center text-muted-foreground gap-3">
           <User className="h-12 w-12 opacity-20" />
           <p className="text-sm">Aún no hay contactos guardados.</p>
+          <div className="flex gap-2">
+            <Button variant="outline" size="sm" onClick={() => setIsImportOpen(true)}>
+              <Upload className="h-4 w-4 mr-2" />
+              Importar CSV/Excel
+            </Button>
+            <Button variant="outline" size="sm" onClick={() => setIsCreateOpen(true)}>
+              <UserPlus className="h-4 w-4 mr-2" />
+              Agregar contacto
+            </Button>
+          </div>
         </div>
       ) : (
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
           {contacts.map((conv) => (
             <ContactCard
-              key={conv.jid}
+              key={conv.id}
               conv={conv}
               channelId={channelId}
               tags={labels || []}
@@ -703,7 +725,761 @@ function ContactsView({ channelId }: { channelId: string }) {
           ))}
         </div>
       )}
+
+      <CreateContactDialog
+        open={isCreateOpen}
+        onOpenChange={setIsCreateOpen}
+        channelId={channelId}
+      />
+
+      <ImportContactsDialog
+        open={isImportOpen}
+        onOpenChange={setIsImportOpen}
+        channelId={channelId}
+        existingConversations={conversations || []}
+        existingLabels={labels || []}
+      />
     </div>
+  );
+}
+
+// ─── CreateContactDialog ─────────────────────────────────────────────────────
+
+function CreateContactDialog({
+  open,
+  onOpenChange,
+  channelId,
+}: {
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+  channelId: string;
+}) {
+  const firestore = useFirestore();
+  const { toast } = useToast();
+  const [isSaving, setIsSaving] = useState(false);
+  const [formData, setFormData] = useState({
+    name: '',
+    phone: '',
+    email: '',
+    company: '',
+    notes: '',
+  });
+
+  // Reset form when dialog opens
+  useEffect(() => {
+    if (open) {
+      setFormData({ name: '', phone: '', email: '', company: '', notes: '' });
+    }
+  }, [open]);
+
+  const handleSave = async () => {
+    if (!formData.name.trim() || !formData.phone.trim()) {
+      toast({
+        variant: 'destructive',
+        title: 'Campos obligatorios',
+        description: 'Nombre y Teléfono son requeridos.',
+      });
+      return;
+    }
+    if (!firestore) return;
+    setIsSaving(true);
+    try {
+      const colRef = collection(firestore, 'channels', channelId, 'conversations');
+      await addDoc(colRef, {
+        // Contact identity – no jid / conversationId for manual contacts
+        jid: null,
+        type: 'user',
+        name: formData.name.trim(),
+        displayName: formData.name.trim(),
+        phoneE164: formData.phone.trim() || null,
+        lastMessageText: null,
+        lastMessageAt: null,
+        unreadCount: 0,
+        isContact: true,
+        labelIds: [],
+        source: 'manual',
+        customer: {
+          name: formData.name.trim(),
+          phone: formData.phone.trim() || null,
+          email: formData.email.trim() || null,
+          company: formData.company.trim() || null,
+          notes: formData.notes.trim() || null,
+          isContact: true,
+          source: 'manual',
+          updatedAt: serverTimestamp(),
+        },
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+      toast({ title: 'Contacto creado', description: formData.name.trim() });
+      onOpenChange(false);
+    } catch (e: any) {
+      console.error('[CreateContactDialog] error', e);
+      toast({ variant: 'destructive', title: 'Error al crear contacto', description: e?.message || String(e) });
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Agregar contacto</DialogTitle>
+          <DialogDescription>Crea un contacto manual para este canal.</DialogDescription>
+        </DialogHeader>
+        <div className="grid gap-4 py-4">
+          <div className="grid gap-2">
+            <Label htmlFor="create-contact-name" className="flex items-center gap-1">
+              Nombre <span className="text-destructive">*</span>
+            </Label>
+            <Input
+              id="create-contact-name"
+              value={formData.name}
+              onChange={e => setFormData({ ...formData, name: e.target.value })}
+              placeholder="Nombre completo"
+              disabled={isSaving}
+            />
+          </div>
+          <div className="grid gap-2">
+            <Label htmlFor="create-contact-phone" className="flex items-center gap-1">
+              Teléfono <span className="text-destructive">*</span>
+            </Label>
+            <Input
+              id="create-contact-phone"
+              value={formData.phone}
+              onChange={e => setFormData({ ...formData, phone: e.target.value })}
+              placeholder="+52..."
+              disabled={isSaving}
+            />
+          </div>
+          <div className="grid gap-2">
+            <Label htmlFor="create-contact-email">Email</Label>
+            <Input
+              id="create-contact-email"
+              value={formData.email}
+              onChange={e => setFormData({ ...formData, email: e.target.value })}
+              placeholder="correo@ejemplo.com"
+              disabled={isSaving}
+            />
+          </div>
+          <div className="grid gap-2">
+            <Label htmlFor="create-contact-company">Empresa</Label>
+            <Input
+              id="create-contact-company"
+              value={formData.company}
+              onChange={e => setFormData({ ...formData, company: e.target.value })}
+              placeholder="Nombre de la empresa"
+              disabled={isSaving}
+            />
+          </div>
+          <div className="grid gap-2">
+            <Label htmlFor="create-contact-notes">Notas</Label>
+            <Textarea
+              id="create-contact-notes"
+              value={formData.notes}
+              onChange={e => setFormData({ ...formData, notes: e.target.value })}
+              placeholder="Notas adicionales..."
+              disabled={isSaving}
+            />
+          </div>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={isSaving}>
+            Cancelar
+          </Button>
+          <Button
+            onClick={handleSave}
+            disabled={isSaving || !formData.name.trim() || !formData.phone.trim()}
+          >
+            {isSaving ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <UserPlus className="h-4 w-4 mr-2" />}
+            Crear contacto
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ─── ImportContactsDialog ─────────────────────────────────────────────────────
+
+/** Normalise a phone string for deduplication comparison */
+function normalisePhone(p: string | null | undefined): string {
+  if (!p) return '';
+  return p.replace(/[\s\-().+]/g, '').toLowerCase();
+}
+
+/** Normalise a label name for deduplication comparison */
+function normaliseLabelName(n: string): string {
+  return n.trim().toLowerCase();
+}
+
+interface ImportRow {
+  rowNum: number;
+  nombre: string;
+  telefono: string;
+  email: string;
+  empresa: string;
+  notas: string;
+  etiquetas: string[];   // raw label names from file
+  error: string | null;
+}
+
+type ImportPhase = 'upload' | 'preview' | 'importing' | 'done';
+
+interface ImportResult {
+  created: number;
+  updated: number;
+  skipped: number;
+  labelsCreated: number;
+}
+
+function ImportContactsDialog({
+  open,
+  onOpenChange,
+  channelId,
+  existingConversations,
+  existingLabels,
+}: {
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+  channelId: string;
+  existingConversations: Conversation[];
+  existingLabels: ChannelLabel[];
+}) {
+  const firestore = useFirestore();
+  const { toast } = useToast();
+
+  const [phase, setPhase] = useState<ImportPhase>('upload');
+  const [isDragging, setIsDragging] = useState(false);
+  const [fileName, setFileName] = useState('');
+  const [rows, setRows] = useState<ImportRow[]>([]);
+  const [progress, setProgress] = useState(0);
+  const [result, setResult] = useState<ImportResult | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const validRows = rows.filter(r => !r.error);
+  const errorRows = rows.filter(r => r.error);
+  // Unique label names across all valid rows
+  const detectedLabels = useMemo(() => {
+    const set = new Set<string>();
+    validRows.forEach(r => r.etiquetas.forEach(e => set.add(e)));
+    return Array.from(set).sort();
+  }, [validRows]);
+
+  // Reset when dialog opens/closes
+  useEffect(() => {
+    if (!open) {
+      setTimeout(() => {
+        setPhase('upload');
+        setRows([]);
+        setFileName('');
+        setProgress(0);
+        setResult(null);
+        setIsDragging(false);
+      }, 300);
+    }
+  }, [open]);
+
+  /** Parse raw row object from xlsx into ImportRow */
+  function parseRawRow(rawRow: Record<string, any>, rowNum: number): ImportRow {
+    // Flexible column name matching (case-insensitive)
+    const get = (keys: string[]) => {
+      for (const k of keys) {
+        const found = Object.keys(rawRow).find(rk => rk.trim().toLowerCase() === k.toLowerCase());
+        if (found && rawRow[found] != null) return String(rawRow[found]).trim();
+      }
+      return '';
+    };
+
+    const nombre = get(['nombre', 'name', 'nombre completo', 'full name', 'contacto']);
+    const telefono = get(['telefono', 'teléfono', 'phone', 'tel', 'celular', 'móvil', 'movil', 'whatsapp']);
+    const email = get(['email', 'correo', 'e-mail', 'mail']);
+    const empresa = get(['empresa', 'company', 'compañia', 'compañía', 'negocio']);
+    const notas = get(['notas', 'notes', 'nota', 'comentarios', 'observaciones']);
+    const etiquetasRaw = get(['etiquetas', 'tags', 'labels', 'etiqueta', 'tag', 'label']);
+
+    const etiquetas = etiquetasRaw
+      ? etiquetasRaw.split(',').map(e => e.trim()).filter(Boolean)
+      : [];
+
+    let error: string | null = null;
+    if (!nombre && !telefono) error = 'Fila vacía';
+    else if (!nombre) error = 'Falta nombre';
+    else if (!telefono) error = 'Falta teléfono';
+
+    return { rowNum, nombre, telefono, email, empresa, notas, etiquetas, error };
+  }
+
+  /** Parse a file (csv / xlsx / xls) using dynamic import of xlsx library */
+  async function parseFile(file: File): Promise<ImportRow[]> {
+    const XLSX = await import('xlsx');
+    const buffer = await file.arrayBuffer();
+    const workbook = XLSX.read(buffer, { type: 'array' });
+    const sheetName = workbook.SheetNames[0];
+    const sheet = workbook.Sheets[sheetName];
+    const rawRows: Record<string, any>[] = XLSX.utils.sheet_to_json(sheet, {
+      defval: '',
+      raw: false,
+    });
+
+    return rawRows
+      .map((row, i) => parseRawRow(row, i + 2)) // +2 because row 1 is header
+      .filter(r => !(r.error === 'Fila vacía' && !r.nombre && !r.telefono && !r.email)); // skip fully blank rows
+  }
+
+  async function handleFile(file: File) {
+    const ext = file.name.split('.').pop()?.toLowerCase();
+    if (!ext || !['csv', 'xlsx', 'xls'].includes(ext)) {
+      toast({ variant: 'destructive', title: 'Formato no soportado', description: 'Solo se aceptan archivos .csv, .xlsx y .xls' });
+      return;
+    }
+    try {
+      setFileName(file.name);
+      const parsed = await parseFile(file);
+      setRows(parsed);
+      setPhase('preview');
+    } catch (e: any) {
+      toast({ variant: 'destructive', title: 'Error al leer el archivo', description: e?.message || String(e) });
+    }
+  }
+
+  function onFileInputChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (file) handleFile(file);
+    e.target.value = ''; // allow re-selecting same file
+  }
+
+  function onDrop(e: React.DragEvent) {
+    e.preventDefault();
+    setIsDragging(false);
+    const file = e.dataTransfer.files?.[0];
+    if (file) handleFile(file);
+  }
+
+  /** Main import handler — runs after user confirms preview */
+  async function handleImport() {
+    if (!firestore || validRows.length === 0) return;
+    setPhase('importing');
+    setProgress(0);
+
+    let created = 0;
+    let updated = 0;
+    let skipped = 0;
+    let labelsCreated = 0;
+
+    try {
+      // ── Step 1: Resolve / create labels ──────────────────────────────────────
+      // Build a map: normalisedName → labelId
+      const labelMap = new Map<string, string>();
+      existingLabels.forEach(l => labelMap.set(normaliseLabelName(l.name), l.id));
+
+      const labelsColRef = collection(firestore, 'channels', channelId, 'labels');
+
+      for (const labelName of detectedLabels) {
+        const key = normaliseLabelName(labelName);
+        if (!labelMap.has(key)) {
+          // Create missing label
+          const newLabelRef = await addDoc(labelsColRef, {
+            name: labelName,
+            description: null,
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          });
+          labelMap.set(key, newLabelRef.id);
+          labelsCreated++;
+        }
+      }
+
+      // ── Step 2: Build phone → existing contact map ────────────────────────────
+      // Use existing conversations passed in (already loaded, real-time)
+      const phoneToConv = new Map<string, Conversation>();
+      existingConversations.forEach(conv => {
+        const p1 = normalisePhone(conv.phoneE164);
+        const p2 = normalisePhone(conv.customer?.phone);
+        if (p1) phoneToConv.set(p1, conv);
+        if (p2 && p2 !== p1) phoneToConv.set(p2, conv);
+      });
+
+      // ── Step 3: Process each valid row ────────────────────────────────────────
+      const convsColRef = collection(firestore, 'channels', channelId, 'conversations');
+      const total = validRows.length;
+
+      for (let i = 0; i < total; i++) {
+        const row = validRows[i];
+        setProgress(Math.round(((i + 1) / total) * 100));
+
+        const normPhone = normalisePhone(row.telefono);
+        const newLabelIds = row.etiquetas
+          .map(e => labelMap.get(normaliseLabelName(e)))
+          .filter((id): id is string => !!id);
+
+        const existing = phoneToConv.get(normPhone);
+
+        if (existing) {
+          // ── UPDATE existing contact ─────────────────────────────────────────
+          const convRef = doc(firestore, 'channels', channelId, 'conversations', existing.id);
+          // Merge label IDs (add new, keep old)
+          const existingLabelIds = existing.labelIds || [];
+          const mergedLabelIds = Array.from(new Set([...existingLabelIds, ...newLabelIds]));
+
+          const updatePayload: Record<string, any> = {
+            isContact: true,
+            labelIds: mergedLabelIds,
+            updatedAt: serverTimestamp(),
+          };
+
+          // Only overwrite optional fields if they come from the file
+          const customerUpdate: Record<string, any> = {
+            ...(existing.customer || {}),
+            name: row.nombre || existing.customer?.name || '',
+            phone: row.telefono || existing.customer?.phone || null,
+            isContact: true,
+            source: existing.customer?.source || 'import',
+            updatedAt: serverTimestamp(),
+          };
+          if (row.email) customerUpdate.email = row.email;
+          if (row.empresa) customerUpdate.company = row.empresa;
+          if (row.notas) customerUpdate.notes = row.notas;
+
+          updatePayload.customer = customerUpdate;
+          // Also keep displayName fresh
+          if (row.nombre) {
+            updatePayload.displayName = row.nombre;
+            updatePayload.name = row.nombre;
+          }
+
+          await updateDoc(convRef, updatePayload);
+          updated++;
+        } else {
+          // ── CREATE new contact ──────────────────────────────────────────────
+          await addDoc(convsColRef, {
+            jid: null,
+            type: 'user',
+            name: row.nombre,
+            displayName: row.nombre,
+            phoneE164: row.telefono || null,
+            lastMessageText: null,
+            lastMessageAt: null,
+            unreadCount: 0,
+            isContact: true,
+            labelIds: newLabelIds,
+            source: 'import',
+            customer: {
+              name: row.nombre,
+              phone: row.telefono || null,
+              email: row.email || null,
+              company: row.empresa || null,
+              notes: row.notas || null,
+              isContact: true,
+              source: 'import',
+              updatedAt: serverTimestamp(),
+            },
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          });
+          created++;
+        }
+      }
+
+      setResult({ created, updated, skipped, labelsCreated });
+      setPhase('done');
+    } catch (e: any) {
+      console.error('[ImportContactsDialog] error', e);
+      toast({
+        variant: 'destructive',
+        title: 'Error durante la importación',
+        description: e?.message || String(e),
+      });
+      setPhase('preview');
+    }
+  }
+
+  // ── Preview table (capped at 50 visible rows) ──────────────────────────────
+  const PREVIEW_CAP = 50;
+
+  return (
+    <Dialog open={open} onOpenChange={phase === 'importing' ? undefined : onOpenChange}>
+      <DialogContent className="max-w-2xl max-h-[90vh] flex flex-col">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <FileSpreadsheet className="h-5 w-5 text-primary" />
+            {phase === 'upload' && 'Importar contactos'}
+            {phase === 'preview' && 'Previsualización de importación'}
+            {phase === 'importing' && 'Importando contactos...'}
+            {phase === 'done' && 'Importación completada'}
+          </DialogTitle>
+          <DialogDescription>
+            {phase === 'upload' && 'Sube un archivo CSV o Excel con tus contactos.'}
+            {phase === 'preview' && `${validRows.length} contacto${validRows.length !== 1 ? 's' : ''} válido${validRows.length !== 1 ? 's' : ''} · ${errorRows.length} con error`}
+            {phase === 'importing' && `Procesando... ${progress}%`}
+            {phase === 'done' && 'Los contactos ya están disponibles en tu lista.'}
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="flex-1 overflow-y-auto min-h-0">
+
+          {/* ── PHASE: UPLOAD ───────────────────────────────────────────────── */}
+          {phase === 'upload' && (
+            <div className="space-y-4 py-2">
+              {/* Drag-and-drop zone */}
+              <div
+                className={cn(
+                  'border-2 border-dashed rounded-lg p-8 text-center cursor-pointer transition-colors',
+                  isDragging
+                    ? 'border-primary bg-primary/5'
+                    : 'border-muted-foreground/30 hover:border-primary/50 hover:bg-muted/30'
+                )}
+                onDragOver={e => { e.preventDefault(); setIsDragging(true); }}
+                onDragLeave={() => setIsDragging(false)}
+                onDrop={onDrop}
+                onClick={() => fileInputRef.current?.click()}
+              >
+                <Upload className="h-10 w-10 mx-auto mb-3 text-muted-foreground/50" />
+                <p className="text-sm font-medium mb-1">Arrastra tu archivo aquí</p>
+                <p className="text-xs text-muted-foreground">o haz clic para seleccionar</p>
+                <p className="text-xs text-muted-foreground mt-2">Formatos aceptados: .csv · .xlsx · .xls</p>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept=".csv,.xlsx,.xls"
+                  className="hidden"
+                  onChange={onFileInputChange}
+                />
+              </div>
+
+              {/* Format instructions */}
+              <div className="rounded-lg border bg-muted/30 p-4 space-y-2">
+                <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Formato esperado</p>
+                <div className="overflow-x-auto">
+                  <table className="text-xs w-full border-collapse">
+                    <thead>
+                      <tr className="border-b">
+                        {['nombre *', 'telefono *', 'email', 'empresa', 'notas', 'etiquetas'].map(h => (
+                          <th key={h} className="text-left py-1 pr-3 font-semibold text-muted-foreground">{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr>
+                        <td className="py-1 pr-3 text-foreground">Juan López</td>
+                        <td className="py-1 pr-3 text-foreground">+5213141234</td>
+                        <td className="py-1 pr-3 text-muted-foreground">juan@mail.com</td>
+                        <td className="py-1 pr-3 text-muted-foreground">Acme SA</td>
+                        <td className="py-1 pr-3 text-muted-foreground">Cliente frecuente</td>
+                        <td className="py-1 pr-3 text-muted-foreground">VIP, Prospecto</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+                <p className="text-[11px] text-muted-foreground">* Columnas obligatorias. Las etiquetas se separan por coma.</p>
+              </div>
+            </div>
+          )}
+
+          {/* ── PHASE: PREVIEW ─────────────────────────────────────────────── */}
+          {phase === 'preview' && (
+            <div className="space-y-4 py-2">
+              {/* Summary chips */}
+              <div className="flex flex-wrap gap-2">
+                <span className="inline-flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400 font-medium">
+                  <CheckCircle className="h-3 w-3" />
+                  {validRows.length} válido{validRows.length !== 1 ? 's' : ''}
+                </span>
+                {errorRows.length > 0 && (
+                  <span className="inline-flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400 font-medium">
+                    <AlertTriangle className="h-3 w-3" />
+                    {errorRows.length} con error
+                  </span>
+                )}
+                {detectedLabels.length > 0 && (
+                  <span className="inline-flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full bg-primary/10 text-primary font-medium">
+                    <Tag className="h-3 w-3" />
+                    {detectedLabels.length} etiqueta{detectedLabels.length !== 1 ? 's' : ''} detectada{detectedLabels.length !== 1 ? 's' : ''}
+                  </span>
+                )}
+              </div>
+
+              {/* Detected labels */}
+              {detectedLabels.length > 0 && (
+                <div className="rounded-lg border bg-muted/30 p-3">
+                  <p className="text-xs font-semibold text-muted-foreground mb-2">Etiquetas detectadas (se crearán si no existen):</p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {detectedLabels.map(label => {
+                      const exists = existingLabels.some(l => normaliseLabelName(l.name) === normaliseLabelName(label));
+                      return (
+                        <span
+                          key={label}
+                          className={cn(
+                            'inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full font-medium',
+                            exists
+                              ? 'bg-primary/10 text-primary'
+                              : 'bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-400'
+                          )}
+                        >
+                          <Tag className="h-2.5 w-2.5" />
+                          {label}
+                          {!exists && <span className="opacity-60 ml-0.5">(nueva)</span>}
+                        </span>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* Valid rows table */}
+              {validRows.length > 0 && (
+                <div>
+                  <p className="text-xs font-semibold text-muted-foreground mb-2">
+                    Contactos a importar{validRows.length > PREVIEW_CAP ? ` (mostrando ${PREVIEW_CAP} de ${validRows.length})` : ''}:
+                  </p>
+                  <div className="rounded-lg border overflow-hidden">
+                    <div className="overflow-x-auto max-h-48">
+                      <table className="text-xs w-full">
+                        <thead className="bg-muted/50 sticky top-0">
+                          <tr>
+                            {['Nombre', 'Teléfono', 'Email', 'Empresa', 'Etiquetas'].map(h => (
+                              <th key={h} className="text-left px-3 py-2 font-semibold text-muted-foreground whitespace-nowrap">{h}</th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {validRows.slice(0, PREVIEW_CAP).map(row => (
+                            <tr key={row.rowNum} className="border-t hover:bg-muted/20">
+                              <td className="px-3 py-1.5 font-medium truncate max-w-[120px]">{row.nombre}</td>
+                              <td className="px-3 py-1.5 text-muted-foreground whitespace-nowrap">{row.telefono}</td>
+                              <td className="px-3 py-1.5 text-muted-foreground truncate max-w-[120px]">{row.email || '—'}</td>
+                              <td className="px-3 py-1.5 text-muted-foreground truncate max-w-[100px]">{row.empresa || '—'}</td>
+                              <td className="px-3 py-1.5">
+                                {row.etiquetas.length > 0 ? (
+                                  <div className="flex flex-wrap gap-0.5">
+                                    {row.etiquetas.slice(0, 3).map(e => (
+                                      <span key={e} className="inline-block bg-primary/10 text-primary rounded px-1 py-0.5 text-[10px]">{e}</span>
+                                    ))}
+                                    {row.etiquetas.length > 3 && (
+                                      <span className="text-muted-foreground text-[10px]">+{row.etiquetas.length - 3}</span>
+                                    )}
+                                  </div>
+                                ) : '—'}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Error rows */}
+              {errorRows.length > 0 && (
+                <div>
+                  <p className="text-xs font-semibold text-muted-foreground mb-2">Filas con error (se omitirán):</p>
+                  <div className="rounded-lg border border-red-200 dark:border-red-900/40 overflow-hidden">
+                    <div className="overflow-x-auto max-h-32">
+                      <table className="text-xs w-full">
+                        <thead className="bg-red-50 dark:bg-red-900/20 sticky top-0">
+                          <tr>
+                            {['Fila', 'Nombre', 'Teléfono', 'Error'].map(h => (
+                              <th key={h} className="text-left px-3 py-2 font-semibold text-muted-foreground">{h}</th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {errorRows.map(row => (
+                            <tr key={row.rowNum} className="border-t bg-red-50/30 dark:bg-red-900/10">
+                              <td className="px-3 py-1.5 text-muted-foreground">{row.rowNum}</td>
+                              <td className="px-3 py-1.5">{row.nombre || '—'}</td>
+                              <td className="px-3 py-1.5">{row.telefono || '—'}</td>
+                              <td className="px-3 py-1.5 text-red-600 dark:text-red-400 font-medium">{row.error}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ── PHASE: IMPORTING ───────────────────────────────────────────── */}
+          {phase === 'importing' && (
+            <div className="flex flex-col items-center justify-center py-12 gap-4">
+              <Loader2 className="h-10 w-10 animate-spin text-primary" />
+              <div className="w-full max-w-xs space-y-2">
+                <div className="flex justify-between text-xs text-muted-foreground">
+                  <span>Importando contactos...</span>
+                  <span>{progress}%</span>
+                </div>
+                <div className="w-full bg-muted rounded-full h-2">
+                  <div
+                    className="bg-primary h-2 rounded-full transition-all duration-300"
+                    style={{ width: `${progress}%` }}
+                  />
+                </div>
+              </div>
+              <p className="text-xs text-muted-foreground">No cierres esta ventana.</p>
+            </div>
+          )}
+
+          {/* ── PHASE: DONE ────────────────────────────────────────────────── */}
+          {phase === 'done' && result && (
+            <div className="py-6 space-y-4">
+              <div className="flex items-center justify-center">
+                <div className="flex items-center justify-center size-16 rounded-full bg-green-100 dark:bg-green-900/30">
+                  <CheckCircle className="h-8 w-8 text-green-600 dark:text-green-400" />
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                {[
+                  { label: 'Creados', value: result.created, color: 'text-green-600 dark:text-green-400' },
+                  { label: 'Actualizados', value: result.updated, color: 'text-blue-600 dark:text-blue-400' },
+                  { label: 'Con error', value: result.skipped + errorRows.length, color: 'text-red-500 dark:text-red-400' },
+                  { label: 'Etiquetas creadas', value: result.labelsCreated, color: 'text-primary' },
+                ].map(stat => (
+                  <div key={stat.label} className="rounded-lg border bg-muted/30 p-3 text-center">
+                    <p className={cn('text-2xl font-bold', stat.color)}>{stat.value}</p>
+                    <p className="text-xs text-muted-foreground mt-0.5">{stat.label}</p>
+                  </div>
+                ))}
+              </div>
+              <p className="text-sm text-center text-muted-foreground">
+                Los contactos importados ya aparecen en la lista.
+              </p>
+            </div>
+          )}
+
+        </div>
+
+        {/* ── Footer buttons ────────────────────────────────────────────────── */}
+        <DialogFooter className="pt-2 border-t gap-2">
+          {phase === 'upload' && (
+            <Button variant="outline" onClick={() => onOpenChange(false)}>Cancelar</Button>
+          )}
+          {phase === 'preview' && (
+            <>
+              <Button variant="outline" onClick={() => setPhase('upload')}>
+                Cambiar archivo
+              </Button>
+              <Button
+                onClick={handleImport}
+                disabled={validRows.length === 0}
+              >
+                <Upload className="h-4 w-4 mr-2" />
+                Importar {validRows.length} contacto{validRows.length !== 1 ? 's' : ''}
+              </Button>
+            </>
+          )}
+          {phase === 'done' && (
+            <Button onClick={() => onOpenChange(false)}>
+              <CheckCircle className="h-4 w-4 mr-2" />
+              Listo
+            </Button>
+          )}
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -939,14 +1715,17 @@ function ContactCard({
   tags: ChannelLabel[];
   tagById: Map<string, ChannelLabel>;
 }) {
-  const [dialogOpen, setDialogOpen] = useState(false);
+  const [labelsOpen, setLabelsOpen] = useState(false);
+  const [editOpen, setEditOpen] = useState(false);
+  const [deleteOpen, setDeleteOpen] = useState(false);
 
   const displayName =
     conv.customer?.name ||
     (conv.displayName && conv.displayName !== conv.jid ? conv.displayName : null) ||
     (conv.name && conv.name !== conv.jid ? conv.name : null) ||
     conv.phoneE164 ||
-    conv.jid;
+    conv.jid ||
+    'Sin nombre';
 
   const phone = conv.customer?.phone || conv.phoneE164 || null;
   const email = conv.customer?.email || null;
@@ -957,7 +1736,7 @@ function ContactCard({
     <>
       <Card className="shadow-none">
         <CardContent className="p-4 space-y-2">
-          {/* Header: avatar + name + actions button */}
+          {/* Header: avatar + name + action buttons */}
           <div className="flex items-center gap-2">
             <div className="flex items-center justify-center size-8 rounded-full bg-primary/10 shrink-0">
               <User className="size-4 text-primary" />
@@ -967,10 +1746,28 @@ function ContactCard({
               variant="ghost"
               size="icon"
               className="h-7 w-7 shrink-0 text-muted-foreground hover:text-foreground"
-              onClick={() => setDialogOpen(true)}
+              onClick={() => setEditOpen(true)}
+              title="Editar contacto"
+            >
+              <Edit3 className="h-3.5 w-3.5" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-7 w-7 shrink-0 text-muted-foreground hover:text-foreground"
+              onClick={() => setLabelsOpen(true)}
               title="Administrar etiquetas"
             >
               <Tags className="h-3.5 w-3.5" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-7 w-7 shrink-0 text-muted-foreground hover:text-destructive"
+              onClick={() => setDeleteOpen(true)}
+              title="Eliminar contacto"
+            >
+              <Trash2 className="h-3.5 w-3.5" />
             </Button>
           </div>
 
@@ -1008,13 +1805,276 @@ function ContactCard({
       </Card>
 
       <AssignLabelsDialog
-        open={dialogOpen}
-        onOpenChange={setDialogOpen}
+        open={labelsOpen}
+        onOpenChange={setLabelsOpen}
         conv={conv}
         channelId={channelId}
         tags={tags}
       />
+
+      <EditContactDialog
+        open={editOpen}
+        onOpenChange={setEditOpen}
+        conv={conv}
+        channelId={channelId}
+      />
+
+      <DeleteContactDialog
+        open={deleteOpen}
+        onOpenChange={setDeleteOpen}
+        conv={conv}
+        channelId={channelId}
+        displayName={displayName}
+      />
     </>
+  );
+}
+
+// ─── DeleteContactDialog ──────────────────────────────────────────────────────
+
+function DeleteContactDialog({
+  open,
+  onOpenChange,
+  conv,
+  channelId,
+  displayName,
+}: {
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+  conv: Conversation;
+  channelId: string;
+  displayName: string;
+}) {
+  const firestore = useFirestore();
+  const { toast } = useToast();
+  const [isDeleting, setIsDeleting] = useState(false);
+
+  // A "manual" contact has no real WhatsApp jid (jid is null/undefined or doesn't end in @s.whatsapp.net)
+  const isManualContact = !conv.jid || conv.jid === null;
+
+  const handleDelete = async () => {
+    if (!firestore) return;
+    setIsDeleting(true);
+    try {
+      const convRef = doc(firestore, 'channels', channelId, 'conversations', conv.id);
+
+      if (isManualContact) {
+        // Manual contact: safe to delete the whole document — no real conversation exists
+        await deleteDoc(convRef);
+      } else {
+        // Real conversation: only remove contact fields, preserve conversation + messages
+        await updateDoc(convRef, {
+          isContact: false,
+          customer: null,
+          labelIds: [],
+          updatedAt: serverTimestamp(),
+        });
+      }
+
+      toast({ title: 'Contacto eliminado' });
+      onOpenChange(false);
+    } catch (e: any) {
+      console.error('[DeleteContactDialog] error', e);
+      toast({
+        variant: 'destructive',
+        title: 'Error al eliminar contacto',
+        description: e?.message || String(e),
+      });
+    } finally {
+      setIsDeleting(false);
+    }
+  };
+
+  return (
+    <AlertDialog open={open} onOpenChange={onOpenChange}>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>¿Eliminar contacto?</AlertDialogTitle>
+          <AlertDialogDescription asChild>
+            <div className="space-y-2 text-sm text-muted-foreground">
+              <p>
+                Se eliminará <strong className="text-foreground">{displayName}</strong> de tu lista de contactos.
+              </p>
+              <p>Esta acción eliminará únicamente el contacto. No se eliminará la conversación ni el historial de mensajes asociado.</p>
+            </div>
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel disabled={isDeleting}>Cancelar</AlertDialogCancel>
+          <AlertDialogAction
+            onClick={(e) => { e.preventDefault(); handleDelete(); }}
+            disabled={isDeleting}
+            className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+          >
+            {isDeleting ? (
+              <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+            ) : (
+              <Trash2 className="h-4 w-4 mr-2" />
+            )}
+            Eliminar contacto
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  );
+}
+
+
+// ─── EditContactDialog ────────────────────────────────────────────────────────
+
+function EditContactDialog({
+  open,
+  onOpenChange,
+  conv,
+  channelId,
+}: {
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+  conv: Conversation;
+  channelId: string;
+}) {
+  const firestore = useFirestore();
+  const { toast } = useToast();
+  const [isSaving, setIsSaving] = useState(false);
+  const [formData, setFormData] = useState({
+    name: '',
+    phone: '',
+    email: '',
+    company: '',
+    notes: '',
+  });
+
+  useEffect(() => {
+    if (open) {
+      setFormData({
+        name: conv.customer?.name || conv.displayName || conv.name || '',
+        phone: conv.customer?.phone || conv.phoneE164 || '',
+        email: conv.customer?.email || '',
+        company: conv.customer?.company || '',
+        notes: conv.customer?.notes || '',
+      });
+    }
+  }, [open, conv]);
+
+  const handleSave = async () => {
+    if (!formData.name.trim() || !formData.phone.trim()) {
+      toast({
+        variant: 'destructive',
+        title: 'Campos obligatorios',
+        description: 'Nombre y Teléfono son requeridos.',
+      });
+      return;
+    }
+    if (!firestore) return;
+    setIsSaving(true);
+    try {
+      // Use conv.id (Firestore doc ID) — works for both manual and real contacts
+      const convRef = doc(firestore, 'channels', channelId, 'conversations', conv.id);
+      await updateDoc(convRef, {
+        displayName: formData.name.trim(),
+        name: formData.name.trim(),
+        phoneE164: formData.phone.trim() || null,
+        isContact: true,
+        customer: {
+          ...(conv.customer || {}),
+          name: formData.name.trim(),
+          phone: formData.phone.trim() || null,
+          email: formData.email.trim() || null,
+          company: formData.company.trim() || null,
+          notes: formData.notes.trim() || null,
+          isContact: true,
+          source: (conv.customer?.source as any) || 'manual',
+          updatedAt: serverTimestamp(),
+        },
+        updatedAt: serverTimestamp(),
+      });
+      toast({ title: 'Contacto actualizado' });
+      onOpenChange(false);
+    } catch (e: any) {
+      console.error('[EditContactDialog] error', e);
+      toast({ variant: 'destructive', title: 'Error al actualizar contacto', description: e?.message || String(e) });
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Modificar contacto</DialogTitle>
+          <DialogDescription>Actualiza la información manual de este contacto.</DialogDescription>
+        </DialogHeader>
+        <div className="grid gap-4 py-4">
+          <div className="grid gap-2">
+            <Label htmlFor="edit-contact-name" className="flex items-center gap-1">
+              Nombre <span className="text-destructive">*</span>
+            </Label>
+            <Input
+              id="edit-contact-name"
+              value={formData.name}
+              onChange={e => setFormData({ ...formData, name: e.target.value })}
+              placeholder="Nombre completo"
+              disabled={isSaving}
+            />
+          </div>
+          <div className="grid gap-2">
+            <Label htmlFor="edit-contact-phone" className="flex items-center gap-1">
+              Teléfono <span className="text-destructive">*</span>
+            </Label>
+            <Input
+              id="edit-contact-phone"
+              value={formData.phone}
+              onChange={e => setFormData({ ...formData, phone: e.target.value })}
+              placeholder="+52..."
+              disabled={isSaving}
+            />
+          </div>
+          <div className="grid gap-2">
+            <Label htmlFor="edit-contact-email">Email</Label>
+            <Input
+              id="edit-contact-email"
+              value={formData.email}
+              onChange={e => setFormData({ ...formData, email: e.target.value })}
+              placeholder="correo@ejemplo.com"
+              disabled={isSaving}
+            />
+          </div>
+          <div className="grid gap-2">
+            <Label htmlFor="edit-contact-company">Empresa</Label>
+            <Input
+              id="edit-contact-company"
+              value={formData.company}
+              onChange={e => setFormData({ ...formData, company: e.target.value })}
+              placeholder="Nombre de la empresa"
+              disabled={isSaving}
+            />
+          </div>
+          <div className="grid gap-2">
+            <Label htmlFor="edit-contact-notes">Notas</Label>
+            <Textarea
+              id="edit-contact-notes"
+              value={formData.notes}
+              onChange={e => setFormData({ ...formData, notes: e.target.value })}
+              placeholder="Notas adicionales..."
+              disabled={isSaving}
+            />
+          </div>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={isSaving}>
+            Cancelar
+          </Button>
+          <Button
+            onClick={handleSave}
+            disabled={isSaving || !formData.name.trim() || !formData.phone.trim()}
+          >
+            {isSaving && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+            Guardar cambios
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
