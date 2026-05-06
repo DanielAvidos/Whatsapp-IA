@@ -15,6 +15,7 @@ import { useLanguage } from '@/context/language-provider';
 import type { WhatsappChannel, Conversation, Message, BotConfig, FollowupConfig, ImageResponse, FunnelStageConfig, ChannelLabel } from '@/lib/types';
 import { StatusBadge } from '@/components/app/status-badge';
 import { QrCodeDialog } from '@/components/app/qr-code-dialog';
+import { CampaignsView } from '@/components/app/campaigns-view';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Alert, AlertTitle, AlertDescription } from '@/components/ui/alert';
 import { Input } from '@/components/ui/input';
@@ -249,7 +250,7 @@ export function ChannelDetailPage({ channelId }: { channelId: string }) {
   // Sync activeTab with URL search params
   useEffect(() => {
     const tab = searchParams.get('tab');
-    if (tab && ['connection', 'chats', 'chatbot', 'funnel', 'contacts', 'labels'].includes(tab)) {
+    if (tab && ['connection', 'chats', 'chatbot', 'funnel', 'contacts', 'labels', 'campaigns'].includes(tab)) {
       setActiveTab(tab);
     }
   }, [searchParams]);
@@ -425,6 +426,10 @@ export function ChannelDetailPage({ channelId }: { channelId: string }) {
 
         <TabsContent value="labels" className="m-0 border-none outline-none">
           <LabelsView channelId={channelId} />
+        </TabsContent>
+
+        <TabsContent value="campaigns" className="m-0 border-none outline-none">
+          <CampaignsView channelId={channelId} />
         </TabsContent>
       </Tabs>
 

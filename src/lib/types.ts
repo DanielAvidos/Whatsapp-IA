@@ -213,3 +213,56 @@ export type ChannelLabel = {
   createdAt: Timestamp | FieldValue;
   updatedAt: Timestamp | FieldValue;
 };
+
+// ── Campaigns ─────────────────────────────────────────────────────────────────
+
+export type CampaignStatus =
+  | 'created' | 'scheduled' | 'active'
+  | 'paused' | 'completed' | 'cancelled' | 'failed';
+
+export type Campaign = {
+  id: string;
+  name: string;
+  description: string | null;
+  message: string;
+  status: CampaignStatus;
+  audience: {
+    mode: 'contacts' | 'tags' | 'mixed';
+    tagIds: string[];
+    contactIds: string[];
+    resolvedContactIds: string[];
+    totalResolved: number;
+    totalValidPhones: number;
+    totalInvalidPhones: number;
+  };
+  schedule: {
+    startAt: Timestamp | null;
+    timezone: string;
+    manualStartAllowed: boolean;
+  };
+  stats: {
+    total: number;
+    pending: number;
+    sent: number;
+    failed: number;
+    skipped: number;
+  };
+  createdAt: Timestamp | FieldValue;
+  updatedAt: Timestamp | FieldValue;
+  createdByUid: string | null;
+  createdByEmail: string | null;
+};
+
+export type CampaignRecipient = {
+  id: string;
+  contactId: string;
+  displayName: string;
+  phone: string;
+  email: string | null;
+  company: string | null;
+  tagIds: string[];
+  status: 'pending';
+  error: null;
+  sentAt: null;
+  createdAt: Timestamp | FieldValue;
+};

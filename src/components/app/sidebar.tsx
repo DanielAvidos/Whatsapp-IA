@@ -31,7 +31,8 @@ import {
   ChevronDown,
   LayoutGrid,
   BookUser,
-  Tag
+  Tag,
+  Megaphone
 } from "lucide-react";
 import { Logo } from "@/components/icons/logo";
 import { useUser, useAuth, useFirestore, useMemoFirebase, useCollection } from "@/firebase";
@@ -261,6 +262,19 @@ export function AppSidebar() {
                   <Link href={`/channels/${selectedChannelId}?tab=labels`} onClick={() => setOpenMobile(false)}>
                     <Tag />
                     <span>Etiquetas</span>
+                  </Link>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+
+              <SidebarMenuItem>
+                <SidebarMenuButton
+                  asChild
+                  isActive={pathname.startsWith(`/channels/${selectedChannelId}`) && currentTab === 'campaigns'}
+                  tooltip="Campañas"
+                >
+                  <Link href={`/channels/${selectedChannelId}?tab=campaigns`} onClick={() => setOpenMobile(false)}>
+                    <Megaphone />
+                    <span>Campañas</span>
                   </Link>
                 </SidebarMenuButton>
               </SidebarMenuItem>
