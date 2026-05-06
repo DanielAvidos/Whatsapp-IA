@@ -2,11 +2,13 @@
 import { useState, useMemo } from 'react';
 import { useFirestore, useMemoFirebase, useCollection, useUser } from '@/firebase';
 import { collection, query, orderBy, addDoc, updateDoc, doc, serverTimestamp, Timestamp, limit } from 'firebase/firestore';
+import type { CampaignRecipient } from '@/lib/types';
 import type { Conversation, ChannelLabel, Campaign, CampaignStatus } from '@/lib/types';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog';
 import { AlertDialog, AlertDialogContent, AlertDialogHeader, AlertDialogTitle, AlertDialogDescription, AlertDialogFooter, AlertDialogCancel, AlertDialogAction } from '@/components/ui/alert-dialog';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { Label } from '@/components/ui/label';
@@ -14,7 +16,7 @@ import { Checkbox } from '@/components/ui/checkbox';
 import { Badge } from '@/components/ui/badge';
 import { useToast } from '@/hooks/use-toast';
 import { cn } from '@/lib/utils';
-import { Megaphone, Plus, Users, Tag, ChevronRight, ChevronLeft, Play, Pause, XCircle, Eye, Loader2, Search, Info, User, AlertTriangle, Calendar } from 'lucide-react';
+import { Megaphone, Plus, Users, Tag, ChevronRight, ChevronLeft, Play, Pause, XCircle, Eye, Loader2, Search, Info, User, AlertTriangle, Calendar, CheckCircle2, Clock, Send } from 'lucide-react';
 import { format } from 'date-fns';
 
 const STATUS_CFG: Record<CampaignStatus, { label: string; cls: string }> = {
@@ -30,6 +32,21 @@ const STATUS_CFG: Record<CampaignStatus, { label: string; cls: string }> = {
 function phone(c: Conversation): string | null { return c.customer?.phone || c.phoneE164 || null; }
 function dname(c: Conversation): string {
   return (c.customer?.name || (c.displayName !== c.jid ? c.displayName : null) || (c.name !== c.jid ? c.name : null) || c.phoneE164 || c.jid || 'Sin nombre') as string;
+}
+
+/** Handles error field that may be a string (old) or structured object (new) */
+function getErrorMessage(error: any): string {
+  if (!error) return '';
+  if (typeof error === 'string') return error;
+  if (typeof error === 'object' && error.message) return error.message;
+  return JSON.stringify(error).slice(0, 120);
+}
+
+function getErrorDetails(error: any): { message: string; code?: string; httpStatus?: number; raw?: string; at?: any } | null {
+  if (!error) return null;
+  if (typeof error === 'string') return { message: error };
+  if (typeof error === 'object') return error as any;
+  return null;
 }
 
 function StatusBadge({ s }: { s: CampaignStatus }) {
@@ -57,7 +74,10 @@ export function CampaignsView({ channelId }: { channelId: string }) {
   const handleStatusChange = async () => {
     if (!firestore || !action) return;
     try {
-      await updateDoc(doc(firestore, 'channels', channelId, 'campaigns', action.c.id), { status: action.s, updatedAt: serverTimestamp() });
+      const update: Record<string, any> = { status: action.s, updatedAt: serverTimestamp() };
+      // When activating, clear nextSendAt so scheduler processes immediately
+      if (action.s === 'active') update.nextSendAt = null;
+      await updateDoc(doc(firestore, 'channels', channelId, 'campaigns', action.c.id), update);
       toast({ title: 'Estado actualizado' });
     } catch (e: any) {
       toast({ variant: 'destructive', title: 'Error', description: e?.message });
@@ -92,9 +112,27 @@ export function CampaignsView({ channelId }: { channelId: string }) {
                   <StatusBadge s={c.status} />
                 </div>
                 {c.description && <p className='text-xs text-muted-foreground line-clamp-2'>{c.description}</p>}
+                {/* Progress bar for active/completed campaigns */}
+                {(c.stats?.total ?? 0) > 0 && (() => {
+                  const total = c.stats?.total ?? 0;
+                  const sent = c.stats?.sent ?? 0;
+                  const pct = total > 0 ? Math.round((sent / total) * 100) : 0;
+                  return (
+                    <div className='space-y-1'>
+                      <div className='flex justify-between text-[10px] text-muted-foreground'>
+                        <span>{sent} enviados de {total}</span>
+                        <span>{pct}%</span>
+                      </div>
+                      <div className='w-full bg-muted rounded-full h-1.5'>
+                        <div className='bg-primary h-1.5 rounded-full transition-all' style={{ width: pct + '%' }} />
+                      </div>
+                    </div>
+                  );
+                })()}
                 <div className='flex flex-wrap gap-2 text-xs text-muted-foreground'>
-                  <span className='flex items-center gap-1'><Users className='h-3 w-3' />{c.stats?.total ?? 0} destinatarios</span>
-                  {c.schedule?.startAt && <span className='flex items-center gap-1'><Calendar className='h-3 w-3' />{format((c.schedule.startAt as Timestamp).toDate(), 'dd/MM/yy HH:mm')}</span>}
+                  {(c.stats?.failed ?? 0) > 0 && <span className='flex items-center gap-1 text-destructive'><AlertTriangle className='h-3 w-3' />{c.stats!.failed} fallidos</span>}
+                  {(c as any).lastSendAt && <span className='flex items-center gap-1'><Clock className='h-3 w-3' />Último: {format(((c as any).lastSendAt as Timestamp).toDate(), 'HH:mm')}</span>}
+                  {c.schedule?.startAt && !((c as any).lastSendAt) && <span className='flex items-center gap-1'><Calendar className='h-3 w-3' />{format((c.schedule.startAt as Timestamp).toDate(), 'dd/MM/yy HH:mm')}</span>}
                 </div>
                 <div className='flex flex-wrap gap-1 pt-1'>
                   <Button variant='ghost' size='sm' className='h-7 text-xs' onClick={() => setDetail(c)}><Eye className='h-3 w-3 mr-1' />Ver</Button>
@@ -129,7 +167,7 @@ export function CampaignsView({ channelId }: { channelId: string }) {
         </AlertDialogContent>
       </AlertDialog>
 
-      {detail && <CampaignDetailDialog campaign={detail} onOpenChange={o => { if (!o) setDetail(null); }} />}
+      {detail && <CampaignDetailDialog campaign={detail} channelId={channelId} onOpenChange={o => { if (!o) setDetail(null); }} />}
     </div>
   );
 }
@@ -287,28 +325,105 @@ function NewCampaignWizard({ open, onOpenChange, channelId, contacts, labels }: 
   );
 }
 
-function CampaignDetailDialog({ campaign: c, onOpenChange }: { campaign: Campaign; onOpenChange: (v: boolean) => void }) {
+function CampaignDetailDialog({ campaign: c, channelId, onOpenChange }: { campaign: Campaign; channelId: string; onOpenChange: (v: boolean) => void }) {
+  const firestore = useFirestore();
+  const recipientsQ = useMemoFirebase(() =>
+    firestore ? query(collection(firestore, 'channels', channelId, 'campaigns', c.id, 'recipients'), orderBy('createdAt', 'asc'), limit(200)) : null,
+    [firestore, channelId, c.id]
+  );
+  const { data: recipients } = useCollection<CampaignRecipient>(recipientsQ);
+
+  const RCPT_STATUS: Record<string, { label: string; cls: string }> = {
+    pending: { label: 'Pendiente', cls: 'bg-secondary text-secondary-foreground' },
+    sent:    { label: 'Enviado',   cls: 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400' },
+    failed:  { label: 'Error',     cls: 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400' },
+    skipped: { label: 'Omitido',   cls: 'bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-400' },
+  };
+
+  const total = c.stats?.total ?? 0;
+  const sent = c.stats?.sent ?? 0;
+  const pct = total > 0 ? Math.round((sent / total) * 100) : 0;
+
   return (
     <Dialog open onOpenChange={onOpenChange}>
-      <DialogContent className='max-w-lg max-h-[90vh] flex flex-col'>
+      <DialogContent className='max-w-xl max-h-[90vh] flex flex-col'>
         <DialogHeader>
           <DialogTitle className='flex items-center gap-2'>{c.name}</DialogTitle>
           <DialogDescription asChild><div className='flex items-center gap-2 flex-wrap'><StatusBadge s={c.status} />{c.description && <span className='text-xs'>{c.description}</span>}</div></DialogDescription>
         </DialogHeader>
         <div className='flex-1 overflow-y-auto space-y-3 py-2 text-sm'>
+          {/* Message */}
           <div className='rounded-lg border bg-muted/30 p-3 space-y-1'>
             <p className='text-xs font-semibold text-muted-foreground'>MENSAJE</p>
             <p className='whitespace-pre-wrap text-sm'>{c.message}</p>
           </div>
-          <div className='grid grid-cols-2 gap-2'>
-            {[['Total', c.stats?.total ?? 0], ['Validos', c.stats?.pending ?? 0], ['Enviados', c.stats?.sent ?? 0], ['Errores', c.stats?.failed ?? 0]].map(([l, v]) => (
-              <div key={String(l)} className='rounded-lg border bg-muted/30 p-2 text-center'><p className='text-lg font-bold'>{v}</p><p className='text-xs text-muted-foreground'>{l}</p></div>
+          {/* Stats grid */}
+          <div className='grid grid-cols-4 gap-2'>
+            {([['Total', total, ''], ['Enviados', sent, 'text-green-700'], ['Pendientes', c.stats?.pending ?? 0, 'text-blue-600'], ['Errores', c.stats?.failed ?? 0, 'text-destructive']] as [string, number, string][]).map(([l, v, cl]) => (
+              <div key={l} className='rounded-lg border bg-muted/30 p-2 text-center'><p className={cn('text-lg font-bold', cl)}>{v}</p><p className='text-xs text-muted-foreground'>{l}</p></div>
             ))}
           </div>
-          <div className='rounded-lg border bg-amber-50 dark:bg-amber-900/10 p-3 flex gap-2'>
-            <Info className='h-4 w-4 text-amber-600 shrink-0 mt-0.5' />
-            <p className='text-xs text-amber-800 dark:text-amber-300'>Esta version solo guarda la estructura de la campaña. El envio automatico se implementara en una fase posterior.</p>
-          </div>
+          {/* Progress bar */}
+          {total > 0 && (
+            <div className='space-y-1'>
+              <div className='flex justify-between text-xs text-muted-foreground'><span>Progreso de envío</span><span>{pct}%</span></div>
+              <div className='w-full bg-muted rounded-full h-2'><div className='bg-primary h-2 rounded-full transition-all' style={{ width: pct + '%' }} /></div>
+            </div>
+          )}
+          {/* Timing info */}
+          {((c as any).lastSendAt || (c as any).nextSendAt) && (
+            <div className='flex flex-wrap gap-3 text-xs text-muted-foreground'>
+              {(c as any).lastSendAt && <span className='flex items-center gap-1'><Clock className='h-3 w-3' />Último envío: {format(((c as any).lastSendAt as Timestamp).toDate(), 'dd/MM HH:mm')}</span>}
+              {(c as any).nextSendAt && c.status === 'active' && <span className='flex items-center gap-1'><Send className='h-3 w-3' />Próximo: {format(((c as any).nextSendAt as Timestamp).toDate(), 'dd/MM HH:mm')}</span>}
+            </div>
+          )}
+          {/* Recipients list */}
+          {recipients && recipients.length > 0 && (
+            <div>
+              <p className='text-xs font-semibold text-muted-foreground mb-2'>DESTINATARIOS ({recipients.length})</p>
+              <div className='rounded-lg border overflow-hidden'>
+                <div className='max-h-48 overflow-y-auto'>
+                  {recipients.map(r => {
+                    const errDetail = getErrorDetails(r.error);
+                    const errMsg = getErrorMessage(r.error);
+                    return (
+                      <div key={r.id} className='flex items-center justify-between px-3 py-1.5 border-b last:border-0 text-xs gap-2'>
+                        <span className='truncate flex-1 font-medium'>{r.displayName}</span>
+                        <span className='text-muted-foreground shrink-0'>{r.phone}</span>
+                        <span className={cn('inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-medium shrink-0', (RCPT_STATUS[r.status] ?? RCPT_STATUS.pending).cls)}>
+                          {(RCPT_STATUS[r.status] ?? RCPT_STATUS.pending).label}
+                        </span>
+                        {errDetail && (
+                          <Popover>
+                            <PopoverTrigger asChild>
+                              <button className='text-destructive text-[10px] flex items-center gap-0.5 shrink-0 hover:underline cursor-pointer'>
+                                <AlertTriangle className='h-3 w-3' />Ver error
+                              </button>
+                            </PopoverTrigger>
+                            <PopoverContent className='w-72 text-xs space-y-1.5 p-3' side='left' align='start'>
+                              <p className='font-semibold text-destructive'>Error de envío</p>
+                              <p className='break-words'>{errDetail.message}</p>
+                              {errDetail.code && <p className='text-muted-foreground'>Código: <span className='font-mono'>{errDetail.code}</span></p>}
+                              {errDetail.httpStatus && <p className='text-muted-foreground'>HTTP: {errDetail.httpStatus}</p>}
+                              {errDetail.raw && <p className='text-muted-foreground break-all'>Detalle: {String(errDetail.raw).slice(0, 200)}</p>}
+                              {errDetail.at && errDetail.at.toDate && <p className='text-muted-foreground'>{format(errDetail.at.toDate(), 'dd/MM/yyyy HH:mm:ss')}</p>}
+                            </PopoverContent>
+                          </Popover>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          )}
+          {/* Active campaign notice */}
+          {c.status === 'active' && (
+            <div className='rounded-lg border bg-blue-50 dark:bg-blue-900/10 p-3 flex gap-2'>
+              <Info className='h-4 w-4 text-blue-600 shrink-0 mt-0.5' />
+              <p className='text-xs text-blue-800 dark:text-blue-300'>El envío se realiza automáticamente cada 2 minutos mientras la campaña esté activa y dentro del horario laboral.</p>
+            </div>
+          )}
         </div>
         <DialogFooter className='border-t pt-3'><Button onClick={() => onOpenChange(false)}>Cerrar</Button></DialogFooter>
       </DialogContent>

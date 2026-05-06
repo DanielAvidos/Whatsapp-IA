@@ -1161,3 +1161,454 @@ exports.onKnowledgeFileFinalize = functions
     }
     return null;
   });
+
+
+// ─── CAMPAIGN HELPERS ─────────────────────────────────────────────────────────
+
+/**
+ * Normalizes a phone number to WhatsApp JID format.
+ * Handles Mexican numbers primarily.
+ * Examples:
+ *   '3314653839'      → '5213314653839@s.whatsapp.net'
+ *   '+523314653839'   → '5213314653839@s.whatsapp.net'
+ *   '523314653839'    → '5213314653839@s.whatsapp.net'
+ *   '+5213314653839'  → '5213314653839@s.whatsapp.net'
+ *   '5213314653839'   → '5213314653839@s.whatsapp.net'
+ * Returns null if phone is not normalizable.
+ */
+/**
+ * Normalizes a phone number to a Mexican WhatsApp JID.
+ * Strips all non-digit characters first, then applies rules:
+ *   10 digits                     → 521 + digits
+ *   12 digits starting with 52    → 521 + last 10 digits
+ *   13 digits starting with 521   → use as-is
+ *   >13 digits                    → attempt last 10 digits fallback + warning
+ * Returns { jid, normalizedPhone, error }
+ */
+function normalizeToWhatsAppJid(phone) {
+  if (!phone) return { jid: null, normalizedPhone: null, error: 'Teléfono vacío o nulo' };
+
+  const digits = String(phone).replace(/\D/g, '');
+  logger.info('[CAMPAIGN] normalizeToWhatsAppJid', { original: String(phone).slice(0, 30), digits });
+
+  let normalized;
+
+  if (digits.length === 10) {
+    // Local MX: 3314653839 → 5213314653839
+    normalized = '521' + digits;
+  } else if (digits.length === 12 && digits.startsWith('52') && !digits.startsWith('521')) {
+    // 523314653839 → 5213314653839
+    normalized = '521' + digits.slice(2);
+  } else if (digits.length === 13 && digits.startsWith('521')) {
+    // Already correct: 5213314653839
+    normalized = digits;
+  } else if (digits.length > 13) {
+    // Try last-10 fallback (e.g. country code + area code collisions)
+    const last10 = digits.slice(-10);
+    if (last10.length === 10) {
+      logger.warn('[CAMPAIGN] Phone has > 13 digits, using last-10 fallback', { original: phone, digits, last10 });
+      normalized = '521' + last10;
+    } else {
+      const msg = 'Teléfono inválido: no se pudo convertir a WhatsApp JID mexicano (>13 dígitos, fallback falló)';
+      logger.warn('[CAMPAIGN] ' + msg, { phone, digits });
+      return { jid: null, normalizedPhone: null, error: msg };
+    }
+  } else {
+    const msg = 'Teléfono inválido: no se pudo convertir a WhatsApp JID mexicano (' + digits.length + ' dígitos)';
+    logger.warn('[CAMPAIGN] ' + msg, { phone, digits });
+    return { jid: null, normalizedPhone: null, error: msg };
+  }
+
+  const jid = normalized + '@s.whatsapp.net';
+  logger.info('[CAMPAIGN] JID normalized', { original: phone, normalized, jid });
+  return { jid, normalizedPhone: normalized, error: null };
+}
+
+/**
+ * Renders a campaign message template replacing variables with recipient data.
+ * Supported: {{nombre}}, {{telefono}}, {{empresa}}
+ */
+function renderCampaignMessage(template, recipient) {
+  const nombre = (recipient && recipient.displayName) ? recipient.displayName : 'cliente';
+  const telefono = (recipient && recipient.phone) ? recipient.phone : '';
+  const empresa = (recipient && recipient.company) ? recipient.company : '';
+  return String(template || '')
+    .replace(/{{nombre}}/gi, nombre)
+    .replace(/{{telefono}}/gi, telefono)
+    .replace(/{{empresa}}/gi, empresa);
+}
+
+/**
+ * Sends a campaign message via the Baileys worker.
+ * Uses getWorkerUrl() (reads from Firestore runtime/config) — same as followup.
+ * channelId is always dynamic (from Firestore path), never hardcoded.
+ */
+/**
+ * Sends a campaign message via the Baileys worker.
+ * Returns the worker response body on success.
+ * Throws a structured error with .httpStatus, .workerBody, .code on failure.
+ */
+async function sendCampaignMessage(channelId, toJid, text) {
+  const workerUrl = await getWorkerUrl();
+  const url = workerUrl + '/v1/channels/' + encodeURIComponent(channelId) + '/messages/send';
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 15000);
+
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ to: toJid, text: text, source: 'campaign' }),
+      signal: controller.signal,
+    });
+
+    const body = await res.json().catch(() => ({}));
+
+    if (!res.ok) {
+      const err = new Error('Worker respondió ' + res.status + ': ' + JSON.stringify(body).slice(0, 300));
+      err.httpStatus = res.status;
+      err.workerBody = JSON.stringify(body).slice(0, 500);
+      err.code = 'WORKER_HTTP_ERROR';
+      throw err;
+    }
+
+    logger.info('[CAMPAIGN] sendCampaignMessage OK', { channelId, toJid, status: res.status });
+    return body;
+
+  } catch (e) {
+    if (e.name === 'AbortError' || e.code === 'ABORT_ERR') {
+      const err = new Error('Timeout o conexión abortada al llamar al worker Baileys (15s)');
+      err.code = 'TIMEOUT';
+      throw err;
+    }
+    throw e; // re-throw structured errors from above
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+// ─── CAMPAIGN SCHEDULER ───────────────────────────────────────────────────────
+
+const { v4: uuidv4 } = require('uuid');
+const CAMPAIGN_SEND_INTERVAL_MS = 2 * 60 * 1000; // 2 minutes between sends
+const CAMPAIGN_LOCK_STALE_MS = 5 * 60 * 1000;    // 5 minutes = stale lock
+const CAMPAIGN_DEFAULT_START_HOUR = 8;
+const CAMPAIGN_DEFAULT_END_HOUR = 22;
+
+exports.campaignTickEveryMinute = functions
+  .region('us-central1')
+  .pubsub
+  .schedule('every 1 minutes')
+  .onRun(async (_context) => {
+    logger.info('[CAMPAIGN] Tick started');
+
+    let channelsSnap;
+    try {
+      channelsSnap = await db.collection('channels').get();
+    } catch (e) {
+      logger.error('[CAMPAIGN] Failed to load channels', { error: e.message });
+      return null;
+    }
+
+    for (const channelDoc of channelsSnap.docs) {
+      const channelId = channelDoc.id;
+
+      // 1. Verify channel access (trial/billing)
+      let access;
+      try {
+        access = await getChannelAccess(channelId);
+      } catch (e) {
+        logger.warn('[CAMPAIGN] Could not check access', { channelId, error: e.message });
+        continue;
+      }
+      if (access.blocked) {
+        logger.info('[CAMPAIGN] Channel blocked, skip', { channelId, reason: access.reason });
+        continue;
+      }
+
+      // 2. Load business hours (from runtime/followup if available, else defaults)
+      let startHour = CAMPAIGN_DEFAULT_START_HOUR;
+      let endHour = CAMPAIGN_DEFAULT_END_HOUR;
+      let timezone = 'America/Mexico_City';
+
+      try {
+        const followupSnap = await db.doc('channels/' + channelId + '/runtime/followup').get();
+        if (followupSnap.exists) {
+          const fc = followupSnap.data();
+          if (fc && fc.businessHours) {
+            startHour = parseInt(fc.businessHours.startHour ?? CAMPAIGN_DEFAULT_START_HOUR);
+            endHour = parseInt(fc.businessHours.endHour ?? CAMPAIGN_DEFAULT_END_HOUR);
+            if (fc.businessHours.timezone) timezone = fc.businessHours.timezone;
+          }
+        } else {
+          logger.info('[CAMPAIGN] No followup config, using default hours 8-22 CST', { channelId });
+        }
+      } catch (e) {
+        logger.warn('[CAMPAIGN] Could not load followup config, using defaults', { channelId, error: e.message });
+      }
+
+      // 3. Check business hours
+      const nowDt = DateTime.now().setZone(timezone);
+      if (nowDt.hour < startHour || nowDt.hour >= endHour) {
+        logger.info('[CAMPAIGN] Outside business hours, skip channel', { channelId, hour: nowDt.hour, startHour, endHour });
+        continue;
+      }
+
+      // 4. Find campaigns ready to process
+      let campaignsSnap;
+      try {
+        campaignsSnap = await db
+          .collection('channels/' + channelId + '/campaigns')
+          .where('status', 'in', ['active', 'scheduled'])
+          .limit(20)
+          .get();
+      } catch (e) {
+        logger.error('[CAMPAIGN] Failed to query campaigns', { channelId, error: e.message });
+        continue;
+      }
+
+      if (campaignsSnap.empty) continue;
+
+      for (const campaignDoc of campaignsSnap.docs) {
+        const campaignId = campaignDoc.id;
+        const campaign = campaignDoc.data();
+
+        logger.info('[CAMPAIGN] Found campaign', { channelId, campaignId, status: campaign.status });
+
+        try {
+          // 5. Handle scheduled → active transition
+          if (campaign.status === 'scheduled') {
+            const startAt = campaign.schedule && campaign.schedule.startAt;
+            if (startAt) {
+              const startDate = startAt.toDate ? startAt.toDate() : new Date(startAt);
+              if (new Date() < startDate) {
+                logger.info('[CAMPAIGN] Scheduled not yet due, skip', { channelId, campaignId });
+                continue;
+              }
+            }
+            // Activate it
+            await campaignDoc.ref.update({
+              status: 'active',
+              updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+            });
+            logger.info('[CAMPAIGN] Scheduled → active', { channelId, campaignId });
+          }
+
+          // 6. Check nextSendAt (rate limiting: 1 msg per campaign per 2 min)
+          const nowMs = Date.now();
+          const nextSendAt = campaign.nextSendAt;
+          if (nextSendAt) {
+            const nextMs = nextSendAt.toDate ? nextSendAt.toDate().getTime() : new Date(nextSendAt).getTime();
+            if (nowMs < nextMs) {
+              logger.info('[CAMPAIGN] Rate limit active, skip', { channelId, campaignId });
+              continue;
+            }
+          }
+
+          // 7. Acquire processing lock via transaction
+          const instanceId = uuidv4().slice(0, 8);
+          const lockAcquired = await db.runTransaction(async (tx) => {
+            const freshSnap = await tx.get(campaignDoc.ref);
+            if (!freshSnap.exists) return false;
+            const fresh = freshSnap.data();
+
+            if (!fresh || !['active', 'scheduled'].includes(fresh.status)) return false;
+
+            // Check existing lock
+            const existingLock = fresh.processingLock;
+            if (existingLock && existingLock.lockedAt) {
+              const lockedMs = existingLock.lockedAt.toDate
+                ? existingLock.lockedAt.toDate().getTime()
+                : new Date(existingLock.lockedAt).getTime();
+              if (Date.now() - lockedMs < CAMPAIGN_LOCK_STALE_MS) {
+                return false; // Lock is fresh — another instance is processing
+              }
+              logger.warn('[CAMPAIGN] Stale lock detected, overriding', { channelId, campaignId, lockedBy: existingLock.lockedBy });
+            }
+
+            tx.update(campaignDoc.ref, {
+              processingLock: {
+                lockedAt: admin.firestore.FieldValue.serverTimestamp(),
+                lockedBy: 'campaignTick-' + instanceId,
+              },
+            });
+            return true;
+          });
+
+          if (!lockAcquired) {
+            logger.info('[CAMPAIGN] Campaign locked by another instance, skip', { channelId, campaignId });
+            continue;
+          }
+
+          logger.info('[CAMPAIGN] Lock acquired', { channelId, campaignId, instanceId });
+
+          try {
+            // 8. Find first pending recipient
+            const recipientsSnap = await db
+              .collection('channels/' + channelId + '/campaigns/' + campaignId + '/recipients')
+              .where('status', '==', 'pending')
+              .limit(1)
+              .get();
+
+            if (recipientsSnap.empty) {
+              // No pending recipients → mark as completed
+              await campaignDoc.ref.update({
+                status: 'completed',
+                completedAt: admin.firestore.FieldValue.serverTimestamp(),
+                nextSendAt: null,
+                processingLock: null,
+                updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+              });
+              logger.info('[CAMPAIGN] No pending recipients → completed', { channelId, campaignId });
+              continue;
+            }
+
+            const recipientDoc = recipientsSnap.docs[0];
+            const recipient = recipientDoc.data();
+
+            logger.info('[CAMPAIGN] Recipient selected', {
+              channelId, campaignId,
+              recipientId: recipientDoc.id,
+              displayName: recipient.displayName,
+              phone: recipient.phone,
+            });
+
+            // 9. Normalize phone to WhatsApp JID
+            const normResult = normalizeToWhatsAppJid(recipient.phone);
+            const toJid = normResult.jid;
+            const nextSendTs = admin.firestore.Timestamp.fromDate(new Date(Date.now() + CAMPAIGN_SEND_INTERVAL_MS));
+
+            if (!toJid) {
+              logger.warn('[CAMPAIGN] Invalid phone, skipping recipient', { channelId, campaignId, phone: recipient.phone, error: normResult.error });
+              const batch = db.batch();
+              batch.update(recipientDoc.ref, {
+                status: 'skipped',
+                error: {
+                  message: normResult.error || 'Teléfono inválido o no normalizable a JID de WhatsApp',
+                  code: 'INVALID_PHONE',
+                  raw: String(recipient.phone).slice(0, 50),
+                  at: admin.firestore.FieldValue.serverTimestamp(),
+                },
+                sentAt: null,
+              });
+              batch.update(campaignDoc.ref, {
+                'stats.skipped': admin.firestore.FieldValue.increment(1),
+                'stats.pending': admin.firestore.FieldValue.increment(-1),
+                nextSendAt: nextSendTs,
+                lastSendAt: admin.firestore.FieldValue.serverTimestamp(),
+                processingLock: null,
+                updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+              });
+              await batch.commit();
+
+              // Check if campaign is complete after skipping
+              const remSnap = await db
+                .collection('channels/' + channelId + '/campaigns/' + campaignId + '/recipients')
+                .where('status', '==', 'pending').limit(1).get();
+              if (remSnap.empty) {
+                await campaignDoc.ref.update({
+                  status: 'completed',
+                  completedAt: admin.firestore.FieldValue.serverTimestamp(),
+                  nextSendAt: null,
+                  updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+                });
+                logger.info('[CAMPAIGN] Campaign completed after skip', { channelId, campaignId });
+              }
+              continue;
+            }
+
+            // 10. Render message with variables
+            const text = renderCampaignMessage(campaign.message, recipient);
+
+            // 11. Send via worker
+            try {
+              await sendCampaignMessage(channelId, toJid, text);
+
+              const batch = db.batch();
+              batch.update(recipientDoc.ref, {
+                status: 'sent',
+                sentAt: admin.firestore.FieldValue.serverTimestamp(),
+                error: null,
+              });
+              batch.update(campaignDoc.ref, {
+                'stats.sent': admin.firestore.FieldValue.increment(1),
+                'stats.pending': admin.firestore.FieldValue.increment(-1),
+                lastSendAt: admin.firestore.FieldValue.serverTimestamp(),
+                nextSendAt: nextSendTs,
+                processingLock: null,
+                updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+              });
+              await batch.commit();
+
+              logger.info('[CAMPAIGN] Recipient sent successfully', {
+                channelId, campaignId, recipientId: recipientDoc.id, toJid,
+              });
+
+            } catch (sendErr) {
+              logger.error('[CAMPAIGN] Send failed', {
+                channelId, campaignId, recipientId: recipientDoc.id,
+                toJid, error: sendErr.message, code: sendErr.code, httpStatus: sendErr.httpStatus,
+              });
+
+              const errorPayload = {
+                message: sendErr.message || 'Error desconocido al enviar',
+                code: sendErr.code || null,
+                httpStatus: sendErr.httpStatus || null,
+                raw: sendErr.workerBody ? sendErr.workerBody.slice(0, 300) : null,
+                at: admin.firestore.FieldValue.serverTimestamp(),
+              };
+
+              const batch = db.batch();
+              batch.update(recipientDoc.ref, {
+                status: 'failed',
+                error: errorPayload,
+                sentAt: null,
+              });
+              batch.update(campaignDoc.ref, {
+                'stats.failed': admin.firestore.FieldValue.increment(1),
+                'stats.pending': admin.firestore.FieldValue.increment(-1),
+                nextSendAt: nextSendTs,
+                processingLock: null,
+                updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+              });
+              await batch.commit();
+            }
+
+            // 12. Check completion after send
+            const remainingSnap = await db
+              .collection('channels/' + channelId + '/campaigns/' + campaignId + '/recipients')
+              .where('status', '==', 'pending').limit(1).get();
+
+            if (remainingSnap.empty) {
+              await campaignDoc.ref.update({
+                status: 'completed',
+                completedAt: admin.firestore.FieldValue.serverTimestamp(),
+                nextSendAt: null,
+                updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+              });
+              logger.info('[CAMPAIGN] Campaign completed', { channelId, campaignId });
+            }
+
+          } catch (innerErr) {
+            // Always release lock on inner error
+            logger.error('[CAMPAIGN] Inner error, releasing lock', {
+              channelId, campaignId, error: innerErr.message,
+            });
+            await campaignDoc.ref.update({
+              processingLock: null,
+              updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+            }).catch(() => {});
+          }
+
+        } catch (campaignErr) {
+          logger.error('[CAMPAIGN] Error processing campaign', {
+            channelId, campaignId, error: campaignErr.message,
+          });
+        }
+      } // end campaigns loop
+    } // end channels loop
+
+    logger.info('[CAMPAIGN] Tick finished');
+    return null;
+  });
