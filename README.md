@@ -1,93 +1,184 @@
+````md
 # WhatsApp-IA
 
 Sistema de automatización de WhatsApp basado en Baileys + Firebase + Next.js.
 
 ---
 
-# 🚨 CONTEXTO CRÍTICO PARA IA (OBLIGATORIO LEER)
+# 🚨 CONTEXTO CRÍTICO PARA IA
 
-Este proyecto:
+Este proyecto YA está en producción, YA está estabilizado y tiene módulos interconectados.
 
-- YA está en producción
-- YA está estabilizado
-- YA tiene múltiples módulos interconectados
+NO es greenfield.  
+NO debe reestructurarse.  
+NO debe reinterpretarse.  
+NO debe regenerarse.
 
-👉 NO es un proyecto greenfield  
-👉 NO debe ser reestructurado  
-👉 NO debe ser reinterpretado  
+Principio absoluto:
 
----
+> Este sistema es incremental, no regenerativo.
 
-# 🧠 PRINCIPIO ABSOLUTO
-
-> Este sistema es **incremental**, NO regenerativo.
-
-Cualquier intento de:
-- reescribir
-- reorganizar
-- optimizar globalmente
-
-👉 SE CONSIDERA ERROR CRÍTICO
+Cualquier refactor global, cambio de arquitectura, duplicación de componentes o reescritura completa se considera error crítico.
 
 ---
 
-# 🏗️ ARQUITECTURA
+# 🧱 ÁREAS SEPARADAS DEL SISTEMA
 
-## Frontend
-- Next.js
-- Ubicación: `/src`
-- Render principal: React Components
+## 1. Frontend
 
-### Pantallas principales
-- Conexión
-- Chats
-- Chatbot
-- Embudo de ventas
-- Contactos (capa visual)
+Ubicación principal:
 
----
+```txt
+/src
+````
 
-## Backend
+Responsable de:
 
-### Baileys Worker
-- Ubicación: `/services/baileys-worker`
-- Deploy: Google Cloud Run
-- Responsabilidades:
-  - Conexión a WhatsApp
-  - Envío/recepción de mensajes
-  - Descarga de media
-  - Subida a Firebase Storage
-
-🚨 REGLA:
-NO modificar este worker salvo instrucción explícita
+* UI
+* navegación
+* lectura/escritura Firestore desde cliente
+* contactos
+* etiquetas
+* campañas
+* chatbot UI
+* embudo
+* chats
 
 ---
 
-## Base de datos
-- Firestore
+## 2. Cloud Functions
 
-## Storage
-- Firebase Storage
+Ubicación:
+
+```txt
+/functions
+```
+
+Responsable de:
+
+* lógica backend programada
+* schedulers
+* automatizaciones
+* campañas programadas
+* seguimiento automático
+
+Regla:
+NO modificar funciones existentes si no es necesario.
+
+Especialmente NO tocar el comportamiento de:
+
+```txt
+followupTickEveryMinute
+```
+
+Esta función ya trabaja para seguimiento automático y está estable.
+
+Si se necesita una lógica nueva, crear una función independiente.
+
+---
+
+## 3. Baileys Worker
+
+Ubicación:
+
+```txt
+/services/baileys-worker
+```
+
+Responsable de:
+
+* conexión WhatsApp
+* QR
+* sesiones
+* envío real de mensajes
+* recepción de mensajes
+* media
+
+Regla:
+NO modificar el worker salvo instrucción explícita.
 
 ---
 
 # 🔐 REGLAS INVIOLABLES
 
-❌ NO modificar Firestore Rules  
-❌ NO modificar Storage Rules  
-❌ NO modificar Firebase config  
-❌ NO ejecutar `firebase init`  
-❌ NO crear nuevas configuraciones Firebase  
-❌ NO cambiar estructura de documentos Firestore  
-❌ NO borrar campos existentes  
-❌ NO tocar Cloud Functions existentes  
-❌ NO crear duplicación de lógica  
+NO modificar:
+
+* Firestore Rules
+* Storage Rules
+* firebase.json
+* apphosting.yaml
+* .env.local
+* configuración Firebase
+* worker Baileys
+* funciones estables existentes
+* estructura base de ChatInterface
+* estructura global del proyecto
+
+NO hacer:
+
+* refactor global
+* reestructurar carpetas
+* duplicar lógica
+* duplicar componentes críticos
+* crear endpoints innecesarios
+* enviar mensajes desde frontend
+* borrar conversaciones al borrar contactos
+* borrar mensajes al borrar contactos
+* tocar producción sin instrucción explícita
+
+---
+
+# 🌎 ENTORNOS
+
+## DEV
+
+```txt
+projectId: whatsapp-ia-dev
+worker: baileys-worker-dev
+```
+
+## PROD
+
+```txt
+projectId: studio-6317141337-13e75
+worker: baileys-worker
+```
+
+DEV y PROD no deben mezclarse.
 
 ---
 
 # ⚙️ VARIABLES DE ENTORNO
 
-Archivo: `.env.local` (NO subir a Git)
+## Local
+
+Archivo:
+
+```txt
+.env.local
+```
+
+Sirve para:
+
+```bash
+npm run dev
+```
+
+## App Hosting
+
+Archivo:
+
+```txt
+apphosting.yaml
+```
+
+Sirve para despliegue en Firebase App Hosting.
+
+Importante:
+`.env.local` NO sirve para App Hosting.
+`apphosting.yaml` NO sirve para correr local si Next.js no carga esas variables.
+
+Variables requeridas:
 
 ```env
 NEXT_PUBLIC_FIREBASE_API_KEY=
@@ -99,150 +190,346 @@ NEXT_PUBLIC_FIREBASE_APP_ID=
 NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID=
 NEXT_PUBLIC_FIREBASE_DATABASE_URL=
 NEXT_PUBLIC_BAILEYS_WORKER_URL=
+```
 
-📊 MODELO DE DATOS (FIRESTORE)
-channels/
-  {channelId}/
-    conversations/
-      {jid}/
-        name
-        phoneE164
-        displayName
-        isContact
-        customer: {
-          name
-          phone
-          email
-          company
-          notes
-          isContact
-          source
-        }
-        botEnabled
-        followupEnabled
-        funnelStage
-        lastMessage
-        messages/
-🧩 LÓGICA DE CONTACTOS
+---
 
-Los contactos NO reemplazan datos de Baileys.
+# 🗂️ MODELO FIRESTORE PRINCIPAL
 
-Son una capa adicional.
+```txt
+channels/{channelId}
+```
 
-Regla clave:
+## Conversaciones
 
-Baileys puede seguir sobrescribiendo:
+```txt
+channels/{channelId}/conversations/{jid}
+channels/{channelId}/conversations/{jid}/messages/{messageId}
+```
 
-name
-pushName
+## Runtime
 
-Pero la UI debe priorizar:
+```txt
+channels/{channelId}/runtime/bot
+channels/{channelId}/runtime/followup
+```
 
-customer.name (si isContact)
-displayName
-name
-phoneE164
-jid
-💬 CHAT (CRÍTICO)
-ChatInterface
+## Contactos
 
-🚨 COMPONENTE MÁS IMPORTANTE 🚨
+Los contactos son una capa adicional sobre conversaciones.
 
-REGLAS:
+Pueden existir:
 
-❌ NO duplicar
-❌ NO reescribir
-❌ NO crear versiones paralelas
-❌ NO modificar estructura base
-❌ NO eliminar funcionalidades
+* contactos ligados a conversación
+* contactos manuales sin conversación
 
-📦 FUNCIONALIDADES EXISTENTES
-Mensajes
-✅ Texto envío/recepción
-✅ Imágenes envío/recepción
-✅ Audio recepción
-⚠️ Audio envío (estable pero sensible)
-IA
-Activación por conversación
-Seguimiento automático (FU)
-Palabras clave:
-s3gu1r
-d3t3n3r
-Embudo de ventas
-Etapas configurables
-Movimientos de conversación
-Contactos
-Basados en conversaciones
-Persistencia en Firestore
-UI prioritaria
-🎯 REGLAS DE UI
-Nombre mostrado
+Regla:
+Eliminar un contacto NO debe eliminar conversación ni mensajes.
 
-Orden de prioridad:
+## Etiquetas
 
+Las etiquetas viven por canal y pueden asignarse a contactos mediante `tagIds`.
+
+## Campañas
+
+```txt
+channels/{channelId}/campaigns/{campaignId}
+channels/{channelId}/campaigns/{campaignId}/recipients/{recipientId}
+```
+
+Estados de campaña:
+
+```txt
+created
+scheduled
+active
+paused
+completed
+cancelled
+failed
+```
+
+Regla:
+El frontend puede crear, editar, pausar, activar o cancelar campañas, pero el envío real debe ocurrir desde Cloud Functions.
+
+---
+
+# 📇 CONTACTOS
+
+Campos habituales:
+
+```txt
+name / displayName
+phone / phoneE164
+email
+company
+notes
+tagIds
+source
+createdAt
+updatedAt
+conversationId / jid opcional
+```
+
+Nombre mostrado, prioridad:
+
+```txt
 customer.name
 displayName
 name
 phoneE164
 jid
-🚫 CAMBIOS PROHIBIDOS
+```
 
-❌ Refactor global
-❌ Reestructurar carpetas
-❌ Crear nueva arquitectura
-❌ Reescribir ChatInterface
-❌ Cambiar lógica de mensajes
-❌ Cambiar worker
-❌ Crear duplicación de componentes
+Reglas:
 
-✅ CAMBIOS PERMITIDOS
+* Nombre y teléfono son obligatorios al crear manualmente.
+* Email, empresa y notas son opcionales.
+* Contacto manual puede no tener conversación.
+* No asumir que todo contacto tiene `jid`.
+* No borrar conversaciones desde contactos.
 
-✔ UI incremental
-✔ Nuevos componentes aislados
-✔ Lectura de Firestore
-✔ Mejoras visuales
-✔ Capas adicionales (ej: contactos)
+---
 
-🧪 FLUJO DE DESARROLLO
-git checkout -b nueva-rama
+# 🏷️ ETIQUETAS
+
+Reglas:
+
+* Se asignan a contactos mediante `tagIds`.
+* No duplicar etiquetas por mayúsculas/minúsculas o espacios.
+* UI debe soportar muchas etiquetas.
+* Mostrar chips limitados y `+N más` si hay demasiadas.
+
+---
+
+# 📣 CAMPAÑAS
+
+Las campañas sirven para envío agrupado de mensajes a contactos.
+
+Audiencia:
+
+* contactos individuales
+* etiquetas
+* selección mixta
+
+Reglas:
+
+* No enviar todos los mensajes de golpe.
+* Envío gradual desde Cloud Functions.
+* Máximo recomendado: 1 recipient cada 2 minutos por campaña.
+* No enviar desde frontend.
+* No llamar worker directamente desde UI.
+* Respetar horarios si existe configuración del canal.
+* Guardar logs/error por recipient.
+
+La función de campañas debe ser independiente de `followupTickEveryMinute`.
+
+---
+
+# 💬 CHAT
+
+Componente crítico:
+
+```txt
+ChatInterface
+```
+
+Reglas:
+
+* NO duplicar
+* NO reescribir
+* NO cambiar estructura base
+* NO eliminar funcionalidades
+* NO romper envío/recepción
+* NO romper media
+* NO romper seguimiento
+
+---
+
+# 🤖 SEGUIMIENTO AUTOMÁTICO
+
+Función crítica existente:
+
+```txt
+followupTickEveryMinute
+```
+
+Responsabilidad:
+
+* revisar seguimiento automático
+* generar mensajes IA
+* enviar vía Baileys
+* programar siguiente toque
+* usar locks
+* respetar horario
+
+Regla:
+NO modificar su comportamiento para campañas.
+Campañas deben usar función separada.
+
+---
+
+# 📦 FUNCIONALIDADES EXISTENTES
+
+## Mensajes
+
+* texto envío/recepción
+* imágenes envío/recepción
+* audio recepción
+* audio envío sensible
+
+## IA
+
+* chatbot por canal
+* activación por conversación
+* seguimiento automático
+
+## Contactos
+
+* creación manual
+* edición
+* eliminación segura
+* importación masiva
+* etiquetas
+
+## Etiquetas
+
+* creación
+* asignación a contactos
+* visualización en tarjetas
+
+## Campañas
+
+* creación
+* audiencia por contactos/etiquetas
+* recipients
+* estados
+* envío gradual por función programada
+
+---
+
+# 🧪 FLUJO DE DESARROLLO
+
+Rama estable actual de trabajo:
+
+```bash
+contacts-labels-v2
+```
+
+Comandos:
+
+```bash
+git status
+git branch
+git checkout contacts-labels-v2
+git pull origin contacts-labels-v2
 
 npm install
 npm run dev
 npm run build
-
 git diff
-🚀 DEPLOY
-Frontend
+```
 
-Firebase Studio / App Hosting
+Si se usan functions:
 
-Worker
+```bash
+cd functions
+npm install
+cd ..
+```
+
+---
+
+# 🚀 DEPLOY
+
+## Frontend App Hosting
+
+```bash
+firebase deploy --only apphosting:studio --project whatsapp-ia-dev
+```
+
+## Functions DEV
+
+```bash
+firebase deploy --only functions --project whatsapp-ia-dev
+```
+
+## Worker DEV
+
+Solo si se solicita explícitamente:
+
+```bash
 gcloud run deploy baileys-worker-dev \
-  --source=services/baileys-worker
-🧠 INSTRUCCIONES PARA IA
+  --source=services/baileys-worker \
+  --region=us-central1 \
+  --project=whatsapp-ia-dev
+```
 
-ANTES DE HACER CAMBIOS:
+---
 
-Leer completamente este README
-NO asumir contexto externo
-NO crear lógica nueva innecesaria
-NO modificar más de lo solicitado
-NO reconstruir componentes
+# 🧠 INSTRUCCIONES PARA IA / ANTIGRAVITY
 
-SI NO ESTÁS SEGURO:
+Antes de modificar:
 
-👉 NO HAGAS CAMBIOS
+1. Leer este README.
+2. Inspeccionar archivos existentes.
+3. Identificar si el cambio pertenece a:
 
-🧨 REGLA FINAL
+   * frontend
+   * functions
+   * worker
+4. Tocar solo lo mínimo necesario.
+5. No asumir estructura inexistente.
+6. No crear arquitectura nueva.
+7. No tocar producción.
+8. Mostrar plan breve.
+9. Después mostrar archivos modificados.
 
-Es mejor NO hacer cambios que romper el sistema.
+Si no estás seguro:
 
-📌 ESTADO
+NO hagas cambios.
 
-Sistema funcional y estable.
+---
 
-Cambios deben ser:
+# ✅ CAMBIOS PERMITIDOS
 
-pequeños
-controlados
-verificables
+* UI incremental
+* nuevos componentes aislados
+* lectura/escritura Firestore segura
+* mejoras visuales
+* validaciones puntuales
+* nuevas funciones independientes
+* nuevos módulos aislados
+* logs y manejo de errores
+
+---
+
+# ❌ CAMBIOS PROHIBIDOS
+
+* refactor global
+* reescribir ChatInterface
+* modificar worker sin instrucción
+* modificar followupTickEveryMinute sin instrucción
+* cambiar reglas Firebase
+* cambiar configuración Firebase
+* borrar datos existentes
+* cambiar estructura Firestore estable
+* enviar mensajes masivos desde frontend
+* crear duplicación de lógica
+
+---
+
+# 🧨 REGLA FINAL
+
+Es mejor no hacer cambios que romper el sistema.
+
+Todo cambio debe ser:
+
+* pequeño
+* controlado
+* verificable
+* reversible
+* incremental
+
+```
+```
